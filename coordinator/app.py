@@ -31,7 +31,9 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from flask import Flask, Response, abort, jsonify, render_template, request, send_file, stream_with_context
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, stream_with_context
+
+import auth
 
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
@@ -532,23 +534,34 @@ def reaper():
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
+auth.init(app, db, tx, HIVE_KEY, DB_PATH.parent)  # setup token lives next to the db
 
 
 def provided_key():
     auth = request.headers.get("Authorization", "")
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    return request.headers.get("X-Hive-Key", "") or request.args.get("key", "")
+    return request.headers.get("X-Hive-Key", "")  # never from the url: urls end up in logs
 
 
 def require_key():
-    if not hmac.compare_digest(provided_key().encode(), HIVE_KEY.encode()):
+    """machines only: nodes authenticate with the hive key."""
+    k = provided_key()
+    if not k or not hmac.compare_digest(k.encode(), HIVE_KEY.encode()):
         abort(401)
+
+
+require_user = auth.require_user  # people (session + csrf) or machines (hive key)
 
 
 @app.errorhandler(401)
 def unauthorized(_):
-    return jsonify({"error": {"message": "invalid or missing hive key", "type": "unauthorized"}}), 401
+    return jsonify({"error": {"message": "log in, or send the hive key as a bearer token", "type": "unauthorized"}}), 401
+
+
+@app.errorhandler(403)
+def forbidden(_):
+    return jsonify({"error": {"message": "missing or bad csrf token", "type": "forbidden"}}), 403
 
 
 def body():
@@ -562,6 +575,10 @@ def body():
 
 @app.get("/")
 def index():
+    if not auth.owner_exists():
+        return redirect("/setup")
+    if not auth.current_session():
+        return redirect("/login")
     return render_template("index.html")
 
 
@@ -573,7 +590,7 @@ def node_script():
 
 @app.get("/health")
 def health():
-    return jsonify({"ok": True, "nodes_online": len(online_nodes())})
+    return jsonify({"ok": True})
 
 
 # ---- node protocol
@@ -702,7 +719,7 @@ def job_view(j, full=False):
 
 @app.get("/api/state")
 def api_state():
-    require_key()
+    require_user()
     c = db()
     nodes = [node_view(r) for r in c.execute("SELECT * FROM nodes ORDER BY first_seen ASC")]
     jobs = [job_view(r) for r in c.execute("SELECT * FROM jobs ORDER BY created DESC LIMIT 40")]
@@ -725,7 +742,7 @@ def api_state():
 
 @app.get("/api/jobs/<jid>")
 def api_job(jid):
-    require_key()
+    require_user()
     j = get_job(jid)
     if not j:
         abort(404)
@@ -734,7 +751,7 @@ def api_job(jid):
 
 @app.post("/api/jobs/<jid>/cancel")
 def api_job_cancel(jid):
-    require_key()
+    require_user()
     with tx() as c:
         c.execute("UPDATE jobs SET status='cancelled', finished=? WHERE id=? AND status IN ('queued','running')",
                   (now(), jid))
@@ -743,7 +760,7 @@ def api_job_cancel(jid):
 
 @app.post("/api/nodes/<nid>/toggle")
 def api_node_toggle(nid):
-    require_key()
+    require_user()
     with tx() as c:
         c.execute("UPDATE nodes SET enabled = 1 - enabled WHERE id=?", (nid,))
     return jsonify({"ok": True})
@@ -751,7 +768,7 @@ def api_node_toggle(nid):
 
 @app.delete("/api/nodes/<nid>")
 def api_node_delete(nid):
-    require_key()
+    require_user()
     with tx() as c:
         c.execute("DELETE FROM nodes WHERE id=?", (nid,))
     return jsonify({"ok": True})
@@ -759,7 +776,7 @@ def api_node_delete(nid):
 
 @app.post("/api/swarms")
 def api_swarm_create():
-    require_key()
+    require_user()
     d = body()
     goal = str(d.get("goal") or "").strip()
     if not goal:
@@ -771,7 +788,7 @@ def api_swarm_create():
 
 @app.get("/api/swarms/<sid>")
 def api_swarm(sid):
-    require_key()
+    require_user()
     s = row(db().execute("SELECT * FROM swarms WHERE id=?", (sid,)).fetchone())
     if not s:
         abort(404)
@@ -783,7 +800,7 @@ def api_swarm(sid):
 
 @app.post("/api/swarms/<sid>/cancel")
 def api_swarm_cancel(sid):
-    require_key()
+    require_user()
     with tx() as c:
         c.execute("UPDATE swarms SET status='cancelled', finished=? WHERE id=? AND status NOT IN ('done','failed')",
                   (now(), sid))
@@ -823,7 +840,7 @@ def openai_options(d):
 
 @app.get("/v1/models")
 def v1_models():
-    require_key()
+    require_user()
     t = int(now())
     data = [{"id": "auto", "object": "model", "created": t, "owned_by": "hivemind"},
             {"id": "hive-swarm", "object": "model", "created": t, "owned_by": "hivemind"},
@@ -834,7 +851,7 @@ def v1_models():
 
 @app.post("/v1/chat/completions")
 def v1_chat():
-    require_key()
+    require_user()
     d = body()
     model = str(d.get("model") or "auto")
     msgs = normalize_messages(d.get("messages"))
@@ -956,13 +973,20 @@ def boot():
 boot()
 
 if __name__ == "__main__":
+    import sys
+    if "--reset-auth" in sys.argv:
+        auth.reset_owner(tx)
+        print(f"owner account, sessions and 2fa wiped. new setup token: {auth.ensure_setup_token()}")
+        sys.exit(0)
     host = os.environ.get("HIVE_HOST", "0.0.0.0")
     port = int(os.environ.get("HIVE_PORT", 7777))
     print(f"""
   ╦ ╦╦╦  ╦╔═╗╔╦╗╦╔╗╔╔╦╗
   ╠═╣║╚╗╔╝║╣ ║║║║║║║ ║║   coordinator on http://{host}:{port}
-  ╩ ╩╩ ╚╝ ╚═╝╩ ╩╩╝╚╝═╩╝   hive key: {HIVE_KEY}
+  ╩ ╩╩ ╚╝ ╚═╝╩ ╩╩╝╚╝═╩╝   node key: coordinator/hive_key.txt
 """)
+    if not auth.owner_exists():
+        print(f"  first run: open http://<this-machine>:{port}/setup  with setup token  {auth.ensure_setup_token()}\n")
     try:
         from waitress import serve  # optional, free, better under load
         serve(app, host=host, port=port, threads=64)

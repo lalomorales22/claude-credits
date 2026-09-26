@@ -89,9 +89,9 @@ textarea,input[type=text],input[type=password],select{
 textarea:focus,input:focus,select:focus{border-color:var(--amber)}
 textarea{resize:vertical;min-height:90px}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.row>*{flex:none}
+.row>*{flex:0 1 auto;min-width:0}
 label.l{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);display:block;margin:10px 0 5px}
-.seg{display:inline-flex;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:3px}
+.seg{display:inline-flex;flex-wrap:wrap;max-width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:3px}
 .seg button{background:none;border:0;padding:6px 12px;border-radius:7px;cursor:pointer;color:var(--dim)}
 .seg button.on{background:var(--panel2);color:var(--amber)}
 .hint{font-size:12px;color:var(--faint)}
@@ -141,12 +141,25 @@ table.jobs td{padding:7px 8px;border-bottom:1px solid rgba(44,38,27,.6);vertical
 table.jobs td.mono{font-family:var(--mono);font-size:11.5px;color:var(--dim);white-space:nowrap}
 table.jobs tr{cursor:pointer}table.jobs tr:hover td{background:rgba(255,182,39,.03)}
 .clip{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* phones */
+@media (max-width:640px){
+  .wrap{padding:12px 12px 40px}
+  header{gap:10px}
+  .stats{margin-left:0;width:100%;display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+  .stat{min-width:0;padding:5px 8px}.stat b{font-size:15px}.stat span{font-size:9px;letter-spacing:.08em}
+  header>.btn{flex:1}
+  .tab{padding:8px 10px;font-size:12px}
+  .pbody{padding:12px}
+  .card{padding:16px}
+  .msg{max-width:94%}
+  table.jobs th:nth-child(5),table.jobs td:nth-child(5){display:none}
+}
 /* modal */
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:50;padding:16px}
 .modal.on{display:flex}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;max-width:760px;width:100%;max-height:88vh;overflow:auto;padding:20px}
 .card h3{margin:0 0 6px}
-.code{position:relative;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+.code{overflow-wrap:anywhere;position:relative;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;
   font:12.5px/1.55 var(--mono);white-space:pre-wrap;word-break:break-all;margin:8px 0}
 .code .cp{position:absolute;top:6px;right:6px}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--amber);
@@ -167,6 +180,7 @@ table.jobs tr{cursor:pointer}table.jobs tr:hover td{background:rgba(255,182,39,.
       <div class="stat"><b id="st-tok">0</b><span>tokens made</span></div>
     </div>
     <button class="btn" onclick="openModal('m-add')">+ add node</button>
+    <button class="btn" onclick="openSecurity()" title="phone pairing, devices, password">🔒 security</button>
   </header>
 
   <div class="grid">
@@ -237,7 +251,7 @@ table.jobs tr{cursor:pointer}table.jobs tr:hover td{background:rgba(255,182,39,.
         <div class="view" id="v-api">
           <p>Your whole fleet is one <b>OpenAI-compatible</b> endpoint. Point any tool at it (Open WebUI, Continue, aider, LangChain, your own scripts).</p>
           <label class="l">base url</label><div class="code"><span id="api-base"></span></div>
-          <label class="l">api key</label><div class="code"><span id="api-key">••••••••</span> <button class="btn sm cp" onclick="copy(KEY)">copy</button></div>
+          <label class="l">api key</label><div class="code"><span id="api-key">••••••••</span> <button class="btn sm cp" onclick="loadKey().then(copy)">copy</button></div>
           <label class="l">models</label>
           <p class="hint" style="margin-top:0"><code>auto</code> uses the best model on whatever node is free · <code>hive-swarm</code> means planner → parallel workers → synthesizer · <code>hive-council</code> means every node answers and a judge merges · or name any model on the fleet directly</p>
           <label class="l">curl</label>
@@ -250,13 +264,39 @@ table.jobs tr{cursor:pointer}table.jobs tr:hover td{background:rgba(255,182,39,.
   </div>
 </div>
 
-<!-- key modal -->
-<div class="modal" id="m-key">
-  <div class="card" style="max-width:440px">
-    <h3>unlock the hive</h3>
-    <p class="hint">paste the key from <code>coordinator/hive_key.txt</code> (it's also printed when the coordinator starts)</p>
-    <input type="password" id="key-in" placeholder="hive-…" onkeydown="if(event.key==='Enter')saveKey()">
-    <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn primary" onclick="saveKey()">unlock</button></div>
+<!-- security modal -->
+<div class="modal" id="m-sec" onclick="if(event.target===this)closeSecurity()">
+  <div class="card">
+    <h3>security</h3>
+    <label class="l">pair a phone</label>
+    <p class="hint" style="margin-top:0">scan with your phone's camera. the link works once and dies in 5 minutes. it never contains your password or hive key.</p>
+    <div class="row">
+      <button class="btn primary" onclick="makePair()">show pairing qr</button>
+      <span class="hint" id="pair-timer"></span>
+    </div>
+    <div id="pair-box" style="display:none;margin-top:10px">
+      <div style="background:#fff;border-radius:12px;padding:10px;display:inline-block" id="pair-qr"></div>
+      <div class="code" id="pair-url" style="margin-top:8px"></div>
+      <p class="hint">the qr points at <b id="pair-base"></b>. if your phone reaches the hive a different way (wireguard ip, tunnel domain), set <code>HIVE_PUBLIC_URL</code> on the coordinator.</p>
+    </div>
+
+    <label class="l">signed-in devices</label>
+    <div id="sessions"></div>
+    <div class="row" style="margin-top:8px"><button class="btn sm danger" onclick="revokeOthers()">sign out every other device</button></div>
+
+    <label class="l">change password</label>
+    <div class="row" style="gap:8px">
+      <input type="password" id="pw-cur" placeholder="current password" style="flex:1;min-width:160px" autocomplete="current-password">
+      <input type="password" id="pw-new" placeholder="new password (10+)" style="flex:1;min-width:160px" autocomplete="new-password">
+      <input id="pw-code" placeholder="2fa code" style="width:110px" inputmode="numeric" autocomplete="one-time-code">
+      <button class="btn" onclick="changePw()">change</button>
+    </div>
+    <p class="hint" id="rec-left"></p>
+
+    <div class="row" style="justify-content:space-between;margin-top:14px">
+      <button class="btn danger" onclick="logout()">log out</button>
+      <button class="btn" onclick="closeSecurity()">close</button>
+    </div>
   </div>
 </div>
 
@@ -289,10 +329,9 @@ mac:    nohup python3 hive_node.py --hive … --key … &gt; ~/hive-node.log 2&g
 <div class="toast" id="toast"></div>
 
 <script>
-let KEY = '';
-try { KEY = localStorage.getItem('hive_key') || ''; } catch (e) {}
+let KEY = '', CSRF = '', ME = null;   // the hive key is only fetched when you open "add node" or "api"
 const qs = new URLSearchParams(location.search);
-if (qs.get('key')) { KEY = qs.get('key'); try { localStorage.setItem('hive_key', KEY); } catch (e) {} history.replaceState(null, '', location.pathname); }
+try { localStorage.removeItem('hive_key'); } catch (e) {}   // older versions stored the key here
 
 let STATE = null, SWARM = null, MODE = 'swarm', chatHistory = [], chatBusy = false;
 
@@ -300,18 +339,20 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(t){ const e=$('#toast'); e.textContent=t; e.classList.add('on'); setTimeout(()=>e.classList.remove('on'),1600); }
 function copy(t){ navigator.clipboard?.writeText(t).then(()=>toast('copied'), ()=>toast('copy failed')); }
-function openModal(id){ if (id === 'm-add') renderJoin(); $('#'+id).classList.add('on'); }
+function openModal(id){ if (id === 'm-add') loadKey().then(renderJoin).catch(() => {}); $('#'+id).classList.add('on'); }
 function closeModal(id){ $('#'+id).classList.remove('on'); }
 function ago(t){ const s = Math.max(0, (Date.now()/1000) - t); if (s<60) return Math.floor(s)+'s'; if (s<3600) return Math.floor(s/60)+'m'; if (s<86400) return Math.floor(s/3600)+'h'; return Math.floor(s/86400)+'d'; }
 function fmt(n){ n = +n||0; return n>=1e6 ? (n/1e6).toFixed(1)+'M' : n>=1e3 ? (n/1e3).toFixed(1)+'k' : String(n); }
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'X-Hive-Key': KEY, ...(opts.headers||{}) } });
-  if (r.status === 401) { openModal('m-key'); throw new Error('unauthorized'); }
+  const r = await fetch(path, { ...opts, credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-Hive-CSRF': CSRF, ...(opts.headers||{}) } });
+  if (r.status === 401) { location.href = '/login'; throw new Error('logged out'); }
   if (!r.ok) throw new Error((await r.text()).slice(0, 300));
   return r.status === 204 ? null : r.json();
 }
-function saveKey(){ KEY = $('#key-in').value.trim(); try { localStorage.setItem('hive_key', KEY); } catch (e) {} closeModal('m-key'); tick(); }
+async function loadMe(){ ME = await api('/api/auth/me'); CSRF = ME.csrf; }
+async function loadKey(){ if (!KEY) KEY = (await api('/api/auth/hive-key')).hive_key; return KEY; }
 
 /* tiny markdown: escape first, then format. safe by construction. */
 function md(src) {
@@ -333,7 +374,7 @@ function md(src) {
 
 /* ---------------- state ---------------- */
 async function tick() {
-  if (!KEY) { openModal('m-key'); return; }
+  if (!CSRF) { try { await loadMe(); } catch (e) { return; } }
   try { STATE = await api('/api/state'); } catch (e) { return; }
   renderStats(); renderNodes(); renderJobs(); renderSwarmList(); renderModelSelects();
 }
@@ -490,7 +531,7 @@ async function chatSend() {
   const bubble = addMsg('assistant', '…', model); const body = bubble.querySelector('.md'); const who = bubble.querySelector('.who');
   let out = '', status = '';
   try {
-    const r = await fetch('/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + KEY },
+    const r = await fetch('/v1/chat/completions', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Hive-CSRF': CSRF },
       body: JSON.stringify({ model, messages: chatHistory, stream: true }) });
     if (!r.ok) throw new Error(await r.text());
     const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
@@ -528,6 +569,36 @@ function joinCmd() {
   return `curl -fsSL ${location.origin}/node.py -o hive_node.py\npython3 hive_node.py --hive ${location.origin} --key ${KEY || 'YOUR_HIVE_KEY'}`;
 }
 function renderJoin(){ const el = $('#join-cmd'); el.firstChild && el.firstChild.nodeType === 3 && el.firstChild.remove(); el.insertBefore(document.createTextNode(joinCmd()), el.firstChild); }
+
+/* ---------------- security ---------------- */
+let pairTimer = null;
+async function openSecurity(){ openModal('m-sec'); await loadSessions(); await loadMe();
+  $('#rec-left').textContent = `${ME.recovery_left} recovery codes left.` + (ME.recovery_left < 3 ? ' running low, regenerate soon.' : ''); }
+function closeSecurity(){ closeModal('m-sec'); clearInterval(pairTimer); $('#pair-box').style.display = 'none'; $('#pair-timer').textContent = ''; }
+async function makePair(){
+  const r = await api('/api/auth/pair', { method: 'POST', body: '{}' });
+  $('#pair-qr').innerHTML = r.qr;                 // server-rendered svg
+  $('#pair-url').textContent = r.url;
+  $('#pair-base').textContent = ME.public_url;
+  $('#pair-box').style.display = '';
+  let left = r.expires_in; clearInterval(pairTimer);
+  pairTimer = setInterval(() => { left--; $('#pair-timer').textContent = left > 0 ? `expires in ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}` : 'expired, make a new one';
+    if (left <= 0) { clearInterval(pairTimer); $('#pair-box').style.display = 'none'; loadSessions(); } }, 1000);
+}
+async function loadSessions(){
+  const list = await api('/api/auth/sessions');
+  $('#sessions').innerHTML = list.map(s => `<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">
+    <b style="min-width:90px">${esc(s.device)}</b><span class="hint" style="flex:1">${esc(s.ip||'')} · active ${ago(s.last_seen)} ago · since ${ago(s.created)}</span>
+    ${s.current ? '<span class="status s-done">this device</span>' : `<button class="btn sm danger" onclick="revoke('${esc(s.id)}')">sign out</button>`}</div>`).join('');
+}
+async function revoke(id){ await api('/api/auth/sessions/' + id, { method: 'DELETE' }); loadSessions(); }
+async function revokeOthers(){ if (confirm('sign out every other device?')) { await api('/api/auth/sessions/revoke-others', { method: 'POST', body: '{}' }); loadSessions(); } }
+async function changePw(){
+  try { await api('/api/auth/password', { method: 'POST', body: JSON.stringify({ current_password: $('#pw-cur').value, new_password: $('#pw-new').value, code: $('#pw-code').value }) });
+        toast('password changed'); $('#pw-cur').value = $('#pw-new').value = $('#pw-code').value = ''; }
+  catch (e) { toast(JSON.parse(e.message || '{}').error || 'failed'); }
+}
+async function logout(){ await api('/api/auth/logout', { method: 'POST', body: '{}' }); location.href = '/login'; }
 
 tick(); setInterval(tick, 1500); setInterval(pollSwarm, 900);
 </script>

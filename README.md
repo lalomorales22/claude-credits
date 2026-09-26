@@ -10,6 +10,7 @@ HIVEMIND turns every computer you own into a single AI supercomputer: desktops, 
 - **Swarm mode.** The biggest model online plans your goal into parallel subtasks, every machine works a piece at the same time, then the big model synthesizes one answer.
 - **Council mode.** Every machine answers the same question with its own model, and a judge merges the best of all of them and flags where they disagreed.
 - **a live dashboard** showing the fleet, tokens streaming out of every worker in real time, the swarm pipeline, a chat playground, and job history.
+- **locked down for use from anywhere**: password + 2FA, device sessions you can revoke, QR pairing for your phone, and a WireGuard helper so the hive never has to sit on the open internet. See [docs/remote-access.md](docs/remote-access.md).
 
 It needs no cloud, no API bills, and no port forwarding. Nodes only make **outbound** requests, so a machine at a friend's place or the office can join over a cloudflare tunnel.
 
@@ -32,7 +33,7 @@ pip install -r requirements.txt
 python3 coordinator/app.py
 ```
 
-It prints your hive key (also saved to `coordinator/hive_key.txt`). Open `http://<that-machine>:7777` and paste the key.
+On first run it prints a **setup token**. Open `http://<that-machine>:7777/setup`, paste it, pick a password, and scan the 2FA QR with any authenticator app. The **node key** machines use to join is saved in `coordinator/hive_key.txt`, and the dashboard shows it under **+ add node**.
 
 **2. nodes** (every machine that can run a model)
 
@@ -67,7 +68,7 @@ python3 tools/mock_ollama.py --port 11500 --models qwen2.5:14b --tps 40 &
 python3 tools/mock_ollama.py --port 11501 --models llama3.2:3b --tps 25 &
 python3 node/hive_node.py --key demo --name big --ollama http://127.0.0.1:11500 &
 python3 node/hive_node.py --key demo --name small --ollama http://127.0.0.1:11501 &
-open "http://127.0.0.1:7777/?key=demo"
+open "http://127.0.0.1:7777/setup"   # setup token is printed by the coordinator
 ```
 
 ## the api
@@ -97,15 +98,15 @@ print(hive.chat.completions.create(model="hive-swarm",
 
 Streaming (`"stream": true`) works for everything. For swarm and council, pipeline status comes through as `reasoning_content`, so clients that show reasoning get a live view of the hive thinking.
 
-## putting it on the internet (optional)
-
-Keep the coordinator at home and expose it with a free cloudflare tunnel:
+## using it from your phone, anywhere
 
 ```bash
-cloudflared tunnel --url http://localhost:7777
+python3 tools/wireguard_setup.py --endpoint <your-public-ip-or-ddns> --peers phone
 ```
 
-Remote nodes then join with `--hive https://<your-tunnel>.trycloudflare.com`. Everything is gated by the hive key, so treat it like a password and rotate it by deleting `coordinator/hive_key.txt` (or setting `HIVE_KEY`) and restarting.
+That makes a private WireGuard network with a QR code for the free WireGuard phone app. Your phone reaches the hive at `10.44.0.1`, and nothing else on the internet can even see it. Then open 🔒 security → **show pairing qr** on the dashboard and scan it with your phone to sign in. The full walkthrough, including the no-port-forwarding and cloudflare options, is in [docs/remote-access.md](docs/remote-access.md).
+
+The node key (`coordinator/hive_key.txt`) is a password for machines. Rotate it by deleting the file (or changing `HIVE_KEY`) and restarting.
 
 ## how it holds up
 
@@ -132,19 +133,24 @@ Node flags: `--name`, `--slots N`, `--default-model`, `--models a,b` (only share
 ## tests
 
 ```bash
-python3 tools/smoke_test.py
+python3 tools/smoke_test.py      # the fleet, end to end
+python3 tools/auth_test.py       # login, 2fa, csrf, lockout, pairing, sessions
 ```
 
-This boots a coordinator, mock ollamas, and nodes, then checks auth, model routing, streaming, swarm (including that the planner lands on the biggest model), council, the virtual models over the openai api, and a node dying mid-job.
+The smoke test boots a coordinator, mock ollamas, and nodes, then checks auth, model routing, streaming, swarm (including that the planner lands on the biggest model), council, the virtual models over the openai api, and a node dying mid-job.
 
 ## layout
 
 ```
 coordinator/app.py            flask app: fleet, queue, swarm engine, openai api, reaper
-coordinator/templates/        the dashboard (single file, no build step)
+coordinator/auth.py           password + 2fa, sessions, csrf, lockout, qr pairing
+coordinator/templates/        the dashboard and login screens (no build step)
 node/hive_node.py             the node agent (stdlib only)
 tools/mock_ollama.py          fake ollama for demos/tests
-tools/smoke_test.py           end-to-end test
+tools/smoke_test.py           end-to-end fleet test
+tools/auth_test.py            auth test
+tools/wireguard_setup.py      private wireguard network + phone qr codes
+docs/remote-access.md         using the hive from anywhere, safely
 ```
 
 ## where this goes next

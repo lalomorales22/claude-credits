@@ -4,3 +4,5 @@ coordinator/hivemind.db*
 coordinator/hive_key.txt
 .venv/
 .DS_Store
+coordinator/setup_token.txt
+wireguard/

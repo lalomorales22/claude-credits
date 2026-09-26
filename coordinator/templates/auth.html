@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0a08">
+<title>HIVEMIND · {{ mode }}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='50,3 95,27 95,73 50,97 5,73 5,27' fill='%23ffb627'/%3E%3C/svg%3E">
+<style>
+:root{--bg:#0b0a08;--panel:#17140f;--panel2:#1e1a13;--line:#2c261b;--text:#efe6d2;--dim:#9c9080;--faint:#6b6255;
+  --amber:#ffb627;--amber2:#ff8a00;--glow:rgba(255,182,39,.18);--bad:#ff5e5e;--ok:#5ee6a0;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:ui-sans-serif,-apple-system,"Segoe UI",Inter,Roboto,sans-serif}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:15px/1.5 var(--sans)}
+body{display:flex;align-items:center;justify-content:center;padding:24px 16px;min-height:100vh;
+  background:radial-gradient(800px 500px at 50% -10%,rgba(255,138,0,.12),transparent 60%),var(--bg)}
+.card{width:100%;max-width:420px;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:26px 22px}
+.logo{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.hex{width:34px;height:38px;background:linear-gradient(160deg,var(--amber),var(--amber2));clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%);
+  box-shadow:0 0 30px var(--glow)}
+.logo b{letter-spacing:.24em;font-size:17px}.logo small{display:block;color:var(--dim);font-size:11px;letter-spacing:.2em}
+h1{font-size:18px;margin:0 0 4px}
+p{color:var(--dim);margin:0 0 16px;font-size:14px}
+label{display:block;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin:14px 0 6px}
+input{width:100%;background:#12100c;border:1px solid var(--line);border-radius:11px;padding:13px 14px;color:var(--text);font:inherit;outline:none}
+input:focus{border-color:var(--amber)}
+input.code{font:22px var(--mono);letter-spacing:.3em;text-align:center}
+button{width:100%;margin-top:18px;padding:13px;border:0;border-radius:11px;font:700 15px var(--sans);cursor:pointer;
+  background:linear-gradient(160deg,var(--amber),var(--amber2));color:#1a1204}
+button:disabled{opacity:.5;cursor:wait}
+button.ghost{background:var(--panel2);color:var(--text);border:1px solid var(--line);font-weight:600}
+.err{color:var(--bad);font-size:13px;margin-top:12px;min-height:1em}
+.qr{background:#fff;border-radius:12px;padding:10px;display:flex;justify-content:center;margin:10px 0}
+.qr svg{max-width:100%;height:auto}
+.mono{font:13px var(--mono);word-break:break-all;background:#12100c;border:1px solid var(--line);border-radius:9px;padding:9px 11px;color:var(--amber)}
+.codes{display:grid;grid-template-columns:1fr 1fr;gap:6px;font:14px var(--mono);margin:10px 0}
+.codes span{background:#12100c;border:1px solid var(--line);border-radius:8px;padding:7px;text-align:center}
+.step{display:none}.step.on{display:block}
+.hint{font-size:12px;color:var(--faint);margin-top:10px}
+a{color:var(--amber)}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo"><div class="hex"></div><div><b>HIVEMIND</b><small>one brain · every machine</small></div></div>
+
+{% if mode == 'login' %}
+  <form id="f-login" autocomplete="on">
+    <h1>welcome back</h1>
+    <p>password plus the 6-digit code from your authenticator app.</p>
+    <label for="pw">password</label>
+    <input id="pw" type="password" autocomplete="current-password" required>
+    <label for="code">2fa code</label>
+    <input id="code" class="code" inputmode="numeric" autocomplete="one-time-code" maxlength="14" placeholder="000000" required>
+    <button id="go">unlock</button>
+    <div class="err" id="err"></div>
+    <div class="hint">lost your phone? a recovery code works in the 2fa box.</div>
+  </form>
+
+{% elif mode == 'setup' %}
+  <div class="step on" id="s1">
+    <h1>claim this hive</h1>
+    <p>first run. the setup token was printed when the coordinator started, and it's also in <code>coordinator/setup_token.txt</code> on that machine.</p>
+    <form id="f-setup1">
+      <label for="tok">setup token</label>
+      <input id="tok" autocomplete="off" required>
+      <label for="pw1">new password (10+ characters)</label>
+      <input id="pw1" type="password" autocomplete="new-password" minlength="10" required>
+      <label for="pw2">again</label>
+      <input id="pw2" type="password" autocomplete="new-password" minlength="10" required>
+      <button>next: 2fa</button>
+      <div class="err" id="err1"></div>
+    </form>
+  </div>
+  <div class="step" id="s2">
+    <h1>turn on 2fa</h1>
+    <p>scan this with any authenticator app (Aegis, 2FAS, Google Authenticator, the iPhone Passwords app…), then type the code it shows.</p>
+    <div class="qr" id="qr"></div>
+    <div class="hint">can't scan? enter this key by hand:</div>
+    <div class="mono" id="secret"></div>
+    <form id="f-setup2">
+      <label for="code2">6-digit code</label>
+      <input id="code2" class="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" required>
+      <button>finish</button>
+      <div class="err" id="err2"></div>
+    </form>
+  </div>
+  <div class="step" id="s3">
+    <h1>save your recovery codes</h1>
+    <p>each one works once in place of a 2fa code, for when your phone is lost. this is the only time you'll see them, so write them down or put them in a password manager.</p>
+    <div class="codes" id="codes"></div>
+    <button onclick="location.href='/'">i saved them, open the hive</button>
+  </div>
+
+{% elif mode == 'pair' %}
+  <form id="f-pair">
+    <h1>pair this device</h1>
+    <p>this link was made by a logged-in session and works once, for 5 minutes.</p>
+    <label for="dev">name this device</label>
+    <input id="dev" value="phone" maxlength="60" required>
+    <button>pair</button>
+    <div class="err" id="err"></div>
+  </form>
+{% endif %}
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+async function post(url, data) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(j.error || ('error ' + r.status));
+  return j;
+}
+function guessDevice() {
+  const ua = navigator.userAgent;
+  return /iPhone/.test(ua) ? 'iphone' : /iPad/.test(ua) ? 'ipad' : /Android/.test(ua) ? 'android' :
+         /Mac/.test(ua) ? 'mac' : /Windows/.test(ua) ? 'windows' : /Linux/.test(ua) ? 'linux' : 'browser';
+}
+function busy(form, on) { form.querySelectorAll('button').forEach(b => b.disabled = on); }
+
+{% if mode == 'login' %}
+$('#f-login').onsubmit = async e => {
+  e.preventDefault(); busy(e.target, true); $('#err').textContent = '';
+  try { await post('/api/auth/login', { password: $('#pw').value, code: $('#code').value, device: guessDevice() }); location.href = '/'; }
+  catch (x) { $('#err').textContent = x.message; $('#code').value = ''; $('#code').focus(); }
+  busy(e.target, false);
+};
+{% elif mode == 'setup' %}
+$('#f-setup1').onsubmit = async e => {
+  e.preventDefault(); $('#err1').textContent = '';
+  if ($('#pw1').value !== $('#pw2').value) { $('#err1').textContent = "passwords don't match"; return; }
+  busy(e.target, true);
+  try {
+    const r = await post('/api/auth/setup/start', { setup_token: $('#tok').value.trim(), password: $('#pw1').value });
+    $('#qr').innerHTML = r.qr;   // server-generated svg
+    $('#secret').textContent = r.secret.match(/.{1,4}/g).join(' ');
+    $('#s1').classList.remove('on'); $('#s2').classList.add('on'); $('#code2').focus();
+  } catch (x) { $('#err1').textContent = x.message; }
+  busy(e.target, false);
+};
+$('#f-setup2').onsubmit = async e => {
+  e.preventDefault(); busy(e.target, true); $('#err2').textContent = '';
+  try {
+    const r = await post('/api/auth/setup/finish', { setup_token: $('#tok').value.trim(), code: $('#code2').value, device: guessDevice() });
+    $('#codes').innerHTML = r.recovery_codes.map(c => `<span>${c}</span>`).join('');
+    $('#s2').classList.remove('on'); $('#s3').classList.add('on');
+  } catch (x) { $('#err2').textContent = x.message; }
+  busy(e.target, false);
+};
+{% elif mode == 'pair' %}
+const token = location.hash.slice(1);
+history.replaceState(null, '', '/pair');   // get the token out of the address bar right away
+$('#dev').value = guessDevice();
+if (!token) { $('#err').textContent = 'no pairing code in this link. scan the qr again.'; }
+$('#f-pair').onsubmit = async e => {
+  e.preventDefault(); busy(e.target, true); $('#err').textContent = '';
+  try { await post('/api/auth/pair/claim', { token, device: $('#dev').value }); location.href = '/'; }
+  catch (x) { $('#err').textContent = x.message; }
+  busy(e.target, false);
+};
+{% endif %}
+</script>
+</body>
+</html>
