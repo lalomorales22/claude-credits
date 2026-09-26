@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+coordinator/hivemind.db*
+coordinator/hive_key.txt
+.venv/
+.DS_Store

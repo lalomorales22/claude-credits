@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HIVEMIND</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='50,3 95,27 95,73 50,97 5,73 5,27' fill='%23ffb627'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#0b0a08; --bg2:#12100c; --panel:#17140f; --panel2:#1e1a13; --line:#2c261b;
+  --text:#efe6d2; --dim:#9c9080; --faint:#6b6255;
+  --amber:#ffb627; --amber2:#ff8a00; --glow:rgba(255,182,39,.18);
+  --ok:#5ee6a0; --bad:#ff5e5e; --info:#6cc4ff; --violet:#c49bff;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans:ui-sans-serif,-apple-system,"Segoe UI",Inter,Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans)}
+body{
+  background:
+    radial-gradient(1200px 600px at 80% -10%,rgba(255,138,0,.10),transparent 60%),
+    radial-gradient(900px 500px at -10% 110%,rgba(255,182,39,.07),transparent 60%),
+    var(--bg);
+  min-height:100vh;
+}
+body::before{ /* honeycomb */
+  content:"";position:fixed;inset:0;pointer-events:none;opacity:.05;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='98'%3E%3Cpath d='M28 66L0 50V16L28 0l28 16v34L28 66zm0 32L0 82V50l28 16 28-16v32L28 98z' fill='none' stroke='%23ffb627' stroke-width='1'/%3E%3C/svg%3E");
+}
+a{color:var(--amber)}
+button,input,select,textarea{font:inherit;color:inherit}
+.wrap{max-width:1500px;margin:0 auto;padding:18px 16px 60px;position:relative}
+header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+.logo{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.22em;font-size:18px}
+.hex{width:30px;height:34px;background:linear-gradient(160deg,var(--amber),var(--amber2));
+  clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%);box-shadow:0 0 30px var(--glow);
+  display:grid;place-items:center;color:#1a1204;font-size:14px;font-weight:900;letter-spacing:0}
+.logo small{display:block;font-size:10px;letter-spacing:.3em;color:var(--dim);font-weight:600}
+.stats{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 12px;min-width:92px}
+.stat b{display:block;font:700 18px var(--mono);color:var(--amber)}
+.stat span{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+.btn{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:8px 14px;cursor:pointer;transition:.15s}
+.btn:hover{border-color:var(--amber);color:var(--amber)}
+.btn.primary{background:linear-gradient(160deg,var(--amber),var(--amber2));color:#1a1204;border:0;font-weight:700}
+.btn.primary:hover{filter:brightness(1.1);color:#1a1204}
+.btn.primary:disabled{opacity:.5;cursor:wait}
+.btn.sm{padding:4px 9px;font-size:12px}
+.btn.danger:hover{border-color:var(--bad);color:var(--bad)}
+.grid{display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:16px}
+@media (max-width:980px){.grid{grid-template-columns:1fr}}
+.panel{background:rgba(23,20,15,.85);border:1px solid var(--line);border-radius:14px;backdrop-filter:blur(6px)}
+.panel>h2{margin:0;padding:12px 16px;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);
+  border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+.panel>h2 .sp{flex:1}
+.pbody{padding:14px 16px}
+/* fleet */
+.nodes{display:flex;flex-direction:column;gap:10px}
+.node{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px;position:relative;overflow:hidden}
+.node.busy{border-color:rgba(255,182,39,.5);box-shadow:0 0 0 1px rgba(255,182,39,.15),0 0 24px var(--glow)}
+.node.busy::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--amber),transparent);animation:scan 1.4s linear infinite}
+@keyframes scan{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.node.off{opacity:.45}
+.node .top{display:flex;align-items:center;gap:8px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--faint);flex:none}
+.dot.on{background:var(--ok);box-shadow:0 0 10px var(--ok)}
+.dot.busy{background:var(--amber);box-shadow:0 0 10px var(--amber);animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.4}}
+.node .name{font-weight:700}
+.node .tag{font:11px var(--mono);color:var(--dim);margin-left:auto}
+.node .hw{font-size:12px;color:var(--dim);margin:6px 0}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{font:11px var(--mono);background:rgba(255,182,39,.08);color:var(--amber);border:1px solid rgba(255,182,39,.2);
+  padding:1px 7px;border-radius:99px}
+.chip.gray{background:transparent;color:var(--dim);border-color:var(--line)}
+.node .meta{display:flex;gap:14px;font:12px var(--mono);color:var(--dim);margin-top:8px;align-items:center}
+.node .meta b{color:var(--text);font-weight:600}
+.node .acts{margin-left:auto;display:flex;gap:4px}
+.empty{color:var(--dim);text-align:center;padding:26px 10px;font-size:13px}
+/* tabs */
+.tabs{display:flex;gap:4px;padding:8px 8px 0;border-bottom:1px solid var(--line)}
+.tab{padding:9px 14px;border-radius:9px 9px 0 0;cursor:pointer;color:var(--dim);border:1px solid transparent;border-bottom:0;
+  font-size:13px;font-weight:600;letter-spacing:.04em}
+.tab.on{color:var(--amber);background:var(--panel2);border-color:var(--line)}
+.view{display:none}.view.on{display:block}
+textarea,input[type=text],input[type=password],select{
+  width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;outline:none}
+textarea:focus,input:focus,select:focus{border-color:var(--amber)}
+textarea{resize:vertical;min-height:90px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.row>*{flex:none}
+label.l{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);display:block;margin:10px 0 5px}
+.seg{display:inline-flex;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:3px}
+.seg button{background:none;border:0;padding:6px 12px;border-radius:7px;cursor:pointer;color:var(--dim)}
+.seg button.on{background:var(--panel2);color:var(--amber)}
+.hint{font-size:12px;color:var(--faint)}
+/* swarm */
+.swlist{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin:14px 0 10px}
+.swi{flex:none;max-width:220px;background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:6px 10px;cursor:pointer;
+  font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.swi.on{border-color:var(--amber)}
+.status{font:11px var(--mono);text-transform:uppercase;letter-spacing:.1em;padding:2px 8px;border-radius:99px;border:1px solid var(--line)}
+.s-queued{color:var(--dim)} .s-running,.s-working,.s-planning,.s-synthesizing{color:var(--amber);border-color:rgba(255,182,39,.4)}
+.s-done{color:var(--ok);border-color:rgba(94,230,160,.35)} .s-failed,.s-cancelled{color:var(--bad);border-color:rgba(255,94,94,.35)}
+.flow{display:flex;align-items:center;gap:8px;margin:12px 0;flex-wrap:wrap}
+.stage{font:12px var(--mono);padding:5px 10px;border-radius:8px;background:var(--bg2);border:1px solid var(--line);color:var(--faint)}
+.stage.on{color:var(--amber);border-color:var(--amber);box-shadow:0 0 16px var(--glow)}
+.stage.did{color:var(--ok);border-color:rgba(94,230,160,.35)}
+.arrow{color:var(--faint)}
+.workers{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+.worker{background:var(--bg2);border:1px solid var(--line);border-radius:11px;padding:10px;display:flex;flex-direction:column;min-height:150px}
+.worker.running{border-color:rgba(255,182,39,.45)}
+.worker .wh{display:flex;gap:6px;align-items:center;margin-bottom:6px}
+.worker .wt{font-weight:700;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.worker .wm{font:11px var(--mono);color:var(--dim);margin-bottom:6px}
+.worker pre{margin:0;flex:1;font:12px/1.45 var(--mono);white-space:pre-wrap;word-break:break-word;color:#d8cfbd;
+  max-height:220px;overflow:auto}
+.final{margin-top:16px;border:1px solid rgba(255,182,39,.35);border-radius:12px;background:linear-gradient(180deg,rgba(255,182,39,.06),transparent 120px)}
+.final h3{margin:0;padding:10px 14px;font-size:11px;letter-spacing:.2em;color:var(--amber);border-bottom:1px solid var(--line);display:flex}
+.final h3 .sp{flex:1}
+.md{padding:6px 16px 14px;line-height:1.65}
+.md pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;font:12.5px/1.5 var(--mono)}
+.md code{font-family:var(--mono);background:var(--bg);padding:1px 5px;border-radius:5px;font-size:.92em}
+.md pre code{background:none;padding:0}
+.md h1,.md h2,.md h3,.md h4{margin:18px 0 6px;line-height:1.3}
+.md table{border-collapse:collapse}.md td,.md th{border:1px solid var(--line);padding:4px 8px}
+/* chat */
+.chat{display:flex;flex-direction:column;height:62vh;min-height:380px}
+.msgs{flex:1;overflow:auto;padding:4px 2px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:86%;padding:10px 14px;border-radius:12px;background:var(--panel2);border:1px solid var(--line)}
+.msg.user{align-self:flex-end;background:rgba(255,182,39,.1);border-color:rgba(255,182,39,.25)}
+.msg .who{font:11px var(--mono);color:var(--dim);margin-bottom:4px}
+.msg .md{padding:0}
+.composer{display:flex;gap:8px;margin-top:10px}
+.composer textarea{min-height:52px;height:52px}
+/* jobs */
+table.jobs{width:100%;border-collapse:collapse;font-size:12.5px}
+table.jobs th{text-align:left;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);padding:6px 8px;border-bottom:1px solid var(--line)}
+table.jobs td{padding:7px 8px;border-bottom:1px solid rgba(44,38,27,.6);vertical-align:top}
+table.jobs td.mono{font-family:var(--mono);font-size:11.5px;color:var(--dim);white-space:nowrap}
+table.jobs tr{cursor:pointer}table.jobs tr:hover td{background:rgba(255,182,39,.03)}
+.clip{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* modal */
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:50;padding:16px}
+.modal.on{display:flex}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;max-width:760px;width:100%;max-height:88vh;overflow:auto;padding:20px}
+.card h3{margin:0 0 6px}
+.code{position:relative;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+  font:12.5px/1.55 var(--mono);white-space:pre-wrap;word-break:break-all;margin:8px 0}
+.code .cp{position:absolute;top:6px;right:6px}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--amber);
+  padding:8px 16px;border-radius:10px;opacity:0;transition:.25s;pointer-events:none;z-index:60}
+.toast.on{opacity:1}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo"><div class="hex">H</div><div>HIVEMIND<small>one brain · every machine</small></div></div>
+    <div class="stats">
+      <div class="stat"><b id="st-nodes">0/0</b><span>nodes online</span></div>
+      <div class="stat"><b id="st-tps">0</b><span>fleet tok/s</span></div>
+      <div class="stat"><b id="st-ram">0</b><span>fleet ram gb</span></div>
+      <div class="stat"><b id="st-models">0</b><span>models</span></div>
+      <div class="stat"><b id="st-queue">0/0</b><span>running/queued</span></div>
+      <div class="stat"><b id="st-tok">0</b><span>tokens made</span></div>
+    </div>
+    <button class="btn" onclick="openModal('m-add')">+ add node</button>
+  </header>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>fleet <span class="sp"></span><span id="fleet-count" class="hint"></span></h2>
+      <div class="pbody"><div class="nodes" id="nodes"></div></div>
+    </section>
+
+    <section class="panel">
+      <div class="tabs">
+        <div class="tab on" data-v="swarm">⬡ Swarm</div>
+        <div class="tab" data-v="chat">Playground</div>
+        <div class="tab" data-v="jobs">Jobs</div>
+        <div class="tab" data-v="api">API</div>
+      </div>
+
+      <div class="pbody">
+        <!-- SWARM -->
+        <div class="view on" id="v-swarm">
+          <div class="row" style="justify-content:space-between">
+            <div class="seg" id="mode">
+              <button class="on" data-m="swarm" title="planner splits the goal, workers run in parallel on different machines, synthesizer merges">Swarm · divide &amp; conquer</button>
+              <button data-m="council" title="every machine answers independently, a judge merges the best of all">Council · every mind votes</button>
+            </div>
+            <div class="row">
+              <select id="sw-max" style="width:auto" title="max parallel subtasks">
+                <option value="3">3 workers</option><option value="4">4 workers</option>
+                <option value="5" selected>5 workers</option><option value="6">6 workers</option><option value="8">8 workers</option>
+              </select>
+              <select id="sw-lead" style="width:auto" title="model for planner / synthesizer / judge"></select>
+            </div>
+          </div>
+          <label class="l">goal</label>
+          <textarea id="goal" placeholder="Give the hive something big. e.g. 'Write a complete business plan for a neighborhood coffee roaster: market, products, pricing, marketing strategy, 90-day launch plan.'"></textarea>
+          <div class="row" style="margin-top:10px;justify-content:space-between">
+            <span class="hint" id="mode-hint">the planner splits your goal · workers run in parallel across machines · the synthesizer merges it all</span>
+            <button class="btn primary" id="launch" onclick="launch()">Launch swarm ⬡</button>
+          </div>
+          <div class="swlist" id="swlist"></div>
+          <div id="swview"></div>
+        </div>
+
+        <!-- CHAT -->
+        <div class="view" id="v-chat">
+          <div class="chat">
+            <div class="row" style="margin-bottom:10px">
+              <select id="chat-model" style="width:auto"></select>
+              <span class="hint">goes through <code>/v1/chat/completions</code>, the same endpoint your tools use</span>
+              <button class="btn sm" style="margin-left:auto" onclick="chatClear()">clear</button>
+            </div>
+            <div class="msgs" id="msgs"><div class="empty">talk to your fleet. pick <b>hive-swarm</b> or <b>hive-council</b> to have every machine work on one answer.</div></div>
+            <div class="composer">
+              <textarea id="chat-in" placeholder="message the hive…  (enter to send, shift+enter for newline)"></textarea>
+              <button class="btn primary" id="chat-send" onclick="chatSend()">Send</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- JOBS -->
+        <div class="view" id="v-jobs">
+          <table class="jobs">
+            <thead><tr><th>status</th><th>kind</th><th>prompt</th><th>node / model</th><th>tok/s</th><th>age</th></tr></thead>
+            <tbody id="jobs"></tbody>
+          </table>
+        </div>
+
+        <!-- API -->
+        <div class="view" id="v-api">
+          <p>Your whole fleet is one <b>OpenAI-compatible</b> endpoint. Point any tool at it (Open WebUI, Continue, aider, LangChain, your own scripts).</p>
+          <label class="l">base url</label><div class="code"><span id="api-base"></span></div>
+          <label class="l">api key</label><div class="code"><span id="api-key">••••••••</span> <button class="btn sm cp" onclick="copy(KEY)">copy</button></div>
+          <label class="l">models</label>
+          <p class="hint" style="margin-top:0"><code>auto</code> uses the best model on whatever node is free · <code>hive-swarm</code> means planner → parallel workers → synthesizer · <code>hive-council</code> means every node answers and a judge merges · or name any model on the fleet directly</p>
+          <label class="l">curl</label>
+          <div class="code" id="api-curl"></div>
+          <label class="l">python</label>
+          <div class="code" id="api-py"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- key modal -->
+<div class="modal" id="m-key">
+  <div class="card" style="max-width:440px">
+    <h3>unlock the hive</h3>
+    <p class="hint">paste the key from <code>coordinator/hive_key.txt</code> (it's also printed when the coordinator starts)</p>
+    <input type="password" id="key-in" placeholder="hive-…" onkeydown="if(event.key==='Enter')saveKey()">
+    <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn primary" onclick="saveKey()">unlock</button></div>
+  </div>
+</div>
+
+<!-- add node modal -->
+<div class="modal" id="m-add" onclick="if(event.target===this)closeModal('m-add')">
+  <div class="card">
+    <h3>add a machine to the hive</h3>
+    <p class="hint">works on mac, linux, jetson, raspberry pi, any old laptop. needs python 3.8+ and <a href="https://ollama.com" target="_blank" rel="noopener">ollama</a> (free). the node only makes outbound connections, so there's no port forwarding.</p>
+    <label class="l">1 · install ollama + a model</label>
+    <div class="code">curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3.2        # 3B, runs on a pi 5 or anything with 8GB
+# bigger machines: ollama pull qwen2.5:14b  /  gemma3:12b  /  llama3.1:8b</div>
+    <label class="l">2 · join the hive</label>
+    <div class="code" id="join-cmd"><button class="btn sm cp" onclick="copy(joinCmd())">copy</button></div>
+    <p class="hint">flags: <code>--name kitchen-mini</code> · <code>--slots 2</code> (parallel jobs on big machines) · <code>--default-model qwen2.5:14b</code></p>
+    <label class="l">3 · keep it running (optional)</label>
+    <div class="code">linux:  sudo systemd-run --unit hive-node --property=Restart=always $(which python3) $PWD/hive_node.py --hive … --key …
+mac:    nohup python3 hive_node.py --hive … --key … &gt; ~/hive-node.log 2&gt;&amp;1 &amp;</div>
+    <div class="row" style="justify-content:flex-end;margin-top:10px"><button class="btn" onclick="closeModal('m-add')">done</button></div>
+  </div>
+</div>
+
+<!-- job modal -->
+<div class="modal" id="m-job" onclick="if(event.target===this)closeModal('m-job')">
+  <div class="card"><div id="job-detail"></div>
+    <div class="row" style="justify-content:flex-end;margin-top:10px"><button class="btn" onclick="closeModal('m-job')">close</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let KEY = '';
+try { KEY = localStorage.getItem('hive_key') || ''; } catch (e) {}
+const qs = new URLSearchParams(location.search);
+if (qs.get('key')) { KEY = qs.get('key'); try { localStorage.setItem('hive_key', KEY); } catch (e) {} history.replaceState(null, '', location.pathname); }
+
+let STATE = null, SWARM = null, MODE = 'swarm', chatHistory = [], chatBusy = false;
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function toast(t){ const e=$('#toast'); e.textContent=t; e.classList.add('on'); setTimeout(()=>e.classList.remove('on'),1600); }
+function copy(t){ navigator.clipboard?.writeText(t).then(()=>toast('copied'), ()=>toast('copy failed')); }
+function openModal(id){ if (id === 'm-add') renderJoin(); $('#'+id).classList.add('on'); }
+function closeModal(id){ $('#'+id).classList.remove('on'); }
+function ago(t){ const s = Math.max(0, (Date.now()/1000) - t); if (s<60) return Math.floor(s)+'s'; if (s<3600) return Math.floor(s/60)+'m'; if (s<86400) return Math.floor(s/3600)+'h'; return Math.floor(s/86400)+'d'; }
+function fmt(n){ n = +n||0; return n>=1e6 ? (n/1e6).toFixed(1)+'M' : n>=1e3 ? (n/1e3).toFixed(1)+'k' : String(n); }
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'X-Hive-Key': KEY, ...(opts.headers||{}) } });
+  if (r.status === 401) { openModal('m-key'); throw new Error('unauthorized'); }
+  if (!r.ok) throw new Error((await r.text()).slice(0, 300));
+  return r.status === 204 ? null : r.json();
+}
+function saveKey(){ KEY = $('#key-in').value.trim(); try { localStorage.setItem('hive_key', KEY); } catch (e) {} closeModal('m-key'); tick(); }
+
+/* tiny markdown: escape first, then format. safe by construction. */
+function md(src) {
+  src = String(src || '').replace(/<think>[\s\S]*?(<\/think>|$)/g, '');
+  const blocks = [];
+  src = src.replace(/```(\w*)\n?([\s\S]*?)(```|$)/g, (_, l, c) => { blocks.push('<pre><code>' + esc(c) + '</code></pre>'); return '\u0000' + (blocks.length-1) + '\u0000'; });
+  let h = esc(src);
+  h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>')
+       .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+       .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
+       .replace(/^#### (.*)$/gm, '<h4>$1</h4>').replace(/^### (.*)$/gm, '<h3>$1</h3>')
+       .replace(/^## (.*)$/gm, '<h2>$1</h2>').replace(/^# (.*)$/gm, '<h1>$1</h1>')
+       .replace(/^\s*[-*] (.*)$/gm, '<li>$1</li>').replace(/^\s*\d+\. (.*)$/gm, '<li class="n">$1</li>');
+  h = h.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>')
+       .replace(/((?:<li class="n">.*<\/li>\n?)+)/g, '<ol>$1</ol>');
+  h = h.split(/\n{2,}/).map(p => /^\s*<(h\d|ul|ol|pre|\u0000)/.test(p) || p.startsWith('\u0000') ? p : '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('\n');
+  return h.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[+i]);
+}
+
+/* ---------------- state ---------------- */
+async function tick() {
+  if (!KEY) { openModal('m-key'); return; }
+  try { STATE = await api('/api/state'); } catch (e) { return; }
+  renderStats(); renderNodes(); renderJobs(); renderSwarmList(); renderModelSelects();
+}
+
+function renderStats() {
+  const s = STATE.stats;
+  $('#st-nodes').textContent = `${s.nodes_online}/${s.nodes_total}`;
+  $('#st-tps').textContent = s.fleet_tps;
+  $('#st-ram').textContent = s.fleet_ram_gb;
+  $('#st-models').textContent = s.models.length;
+  $('#st-queue').textContent = `${s.running||0}/${s.queued||0}`;
+  $('#st-tok').textContent = fmt(s.tokens_out);
+}
+
+function renderNodes() {
+  const el = $('#nodes');
+  $('#fleet-count').textContent = `${STATE.nodes.filter(n=>n.online).length} online`;
+  if (!STATE.nodes.length) {
+    el.innerHTML = `<div class="empty">no machines yet.<br><br><button class="btn primary" onclick="openModal('m-add')">+ add your first node</button></div>`;
+    return;
+  }
+  el.innerHTML = STATE.nodes.map(n => {
+    const hw = n.hardware || {}, gpu = hw.gpu || {};
+    const busy = n.online && n.busy > 0;
+    const cls = !n.online || !n.enabled ? 'off' : busy ? 'busy' : '';
+    const models = (n.models||[]).map(m => `<span class="chip" title="${esc(m.quant||'')} · ${esc(m.size_gb)} GB">${esc(m.name)}</span>`).join('') || '<span class="chip gray">no models</span>';
+    return `<div class="node ${cls}">
+      <div class="top"><span class="dot ${busy?'busy':n.online?'on':''}"></span><span class="name">${esc(n.name)}</span>
+        <span class="tag">${esc(n.host||'')}</span></div>
+      <div class="hw">${esc(gpu.name||'')} · ${esc(hw.cores||'?')} cores · ${esc(hw.ram_gb||'?')} GB · ${esc(hw.arch||'')}</div>
+      <div class="chips">${models}</div>
+      <div class="meta"><span><b>${n.avg_tps ? n.avg_tps.toFixed(1) : '–'}</b> tok/s</span><span><b>${n.jobs_done}</b> jobs</span>
+        <span><b>${n.busy}</b>/${n.slots} busy</span>
+        <span class="acts">${!n.online ? `<span>seen ${ago(n.last_seen)} ago</span>` : ''}
+          <button class="btn sm" onclick="toggleNode('${esc(n.id)}')">${n.enabled ? 'pause' : 'resume'}</button>
+          ${!n.online ? `<button class="btn sm danger" onclick="delNode('${esc(n.id)}')">✕</button>` : ''}</span></div>
+    </div>`;
+  }).join('');
+}
+async function toggleNode(id){ await api(`/api/nodes/${id}/toggle`, {method:'POST'}); tick(); }
+async function delNode(id){ if (confirm('remove this node from the fleet list?')) { await api(`/api/nodes/${id}`, {method:'DELETE'}); tick(); } }
+
+function nodeName(id){ return (STATE?.nodes.find(n => n.id === id) || {}).name || (id ? id.slice(0,10) : '–'); }
+
+function renderJobs() {
+  $('#jobs').innerHTML = STATE.jobs.map(j => `<tr onclick="showJob('${j.id}')">
+    <td><span class="status s-${j.status}">${j.status}</span></td><td class="mono">${esc(j.kind)}</td>
+    <td><div class="clip">${esc(j.title ? j.title + ' · ' : '')}${esc(j.prompt_preview)}</div></td>
+    <td class="mono">${esc(nodeName(j.node_id))}<br>${esc(j.model_used || j.model)}</td>
+    <td class="mono">${j.tps ? j.tps.toFixed(1) : '–'}</td><td class="mono">${ago(j.created)}</td></tr>`).join('')
+    || `<tr><td colspan="6" class="empty">no jobs yet</td></tr>`;
+}
+async function showJob(id) {
+  const j = await api('/api/jobs/' + id);
+  $('#job-detail').innerHTML = `<h3>${esc(j.title || j.kind)} <span class="status s-${j.status}">${j.status}</span></h3>
+    <p class="hint">${esc(j.id)} · ${esc(nodeName(j.node_id))} · ${esc(j.model_used || j.model)} · ${j.tokens_out} tokens · ${j.tps||0} tok/s · attempt ${j.attempts}</p>
+    ${j.error ? `<div class="code" style="color:var(--bad)">${esc(j.error)}</div>` : ''}
+    <label class="l">prompt</label>${j.messages.map(m => `<div class="code"><b>${esc(m.role)}</b>\n${esc(m.content)}</div>`).join('')}
+    <label class="l">output</label><div class="md">${md(j.result || j.partial || '')}</div>`;
+  openModal('m-job');
+}
+
+function renderModelSelects() {
+  const models = STATE.stats.models;
+  const sig = models.join('|');
+  if (renderModelSelects.sig === sig) return;
+  renderModelSelects.sig = sig;
+  const opts = list => list.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+  const cm = $('#chat-model'), cv = cm.value;
+  cm.innerHTML = `<optgroup label="hive"><option value="auto">auto · best free node</option><option value="hive-swarm">hive-swarm · divide &amp; conquer</option><option value="hive-council">hive-council · every mind votes</option></optgroup>` +
+                 (models.length ? `<optgroup label="fleet models">${opts(models)}</optgroup>` : '');
+  if (cv) cm.value = cv;
+  const lm = $('#sw-lead'), lv = lm.value;
+  lm.innerHTML = `<option value="">lead: biggest model online</option>` + models.map(m => `<option value="${esc(m)}">lead: ${esc(m)}</option>`).join('');
+  if (lv) lm.value = lv;
+  $('#api-base').textContent = location.origin + '/v1';
+  $('#api-curl').textContent = `curl ${location.origin}/v1/chat/completions \\\n  -H "Authorization: Bearer $HIVE_KEY" -H "Content-Type: application/json" \\\n  -d '{"model":"hive-council","messages":[{"role":"user","content":"hello, hive"}]}'`;
+  $('#api-py').textContent = `from openai import OpenAI\nclient = OpenAI(base_url="${location.origin}/v1", api_key="YOUR_HIVE_KEY")\nr = client.chat.completions.create(model="auto", messages=[{"role":"user","content":"hi"}])\nprint(r.choices[0].message.content)`;
+}
+
+/* ---------------- swarm ---------------- */
+document.querySelectorAll('#mode button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#mode button').forEach(x => x.classList.toggle('on', x === b));
+  MODE = b.dataset.m;
+  $('#launch').textContent = MODE === 'swarm' ? 'Launch swarm ⬡' : 'Convene council ⬡';
+  $('#sw-max').style.display = MODE === 'swarm' ? '' : 'none';
+  $('#mode-hint').textContent = MODE === 'swarm'
+    ? 'the planner splits your goal · workers run in parallel across machines · the synthesizer merges it all'
+    : 'every online machine answers on its own model · a judge merges the best of all of them';
+});
+
+async function launch() {
+  const goal = $('#goal').value.trim();
+  if (!goal) return toast('give the hive a goal');
+  $('#launch').disabled = true;
+  try {
+    const r = await api('/api/swarms', { method: 'POST', body: JSON.stringify({ goal, mode: MODE,
+      max_subtasks: +$('#sw-max').value, lead_model: $('#sw-lead').value || undefined }) });
+    SWARM = r.id; await pollSwarm(); tick();
+  } catch (e) { toast('launch failed: ' + e.message); }
+  $('#launch').disabled = false;
+}
+
+function renderSwarmList() {
+  $('#swlist').innerHTML = STATE.swarms.map(s => `<div class="swi ${s.id===SWARM?'on':''}" onclick="SWARM='${s.id}';pollSwarm()" title="${esc(s.goal)}">
+    <span class="status s-${s.status}">${s.mode === 'council' ? 'council' : 'swarm'} · ${s.status}</span> ${esc(s.goal.slice(0,60))}</div>`).join('');
+  if (!SWARM && STATE.swarms.length) { SWARM = STATE.swarms[0].id; pollSwarm(); }
+}
+
+async function pollSwarm() {
+  if (!SWARM) return;
+  let s; try { s = await api('/api/swarms/' + SWARM); } catch (e) { return; }
+  const stages = s.mode === 'council' ? ['working', 'synthesizing', 'done'] : ['planning', 'working', 'synthesizing', 'done'];
+  const names = s.mode === 'council' ? { working: 'council deliberates', synthesizing: 'judge merges', done: 'done' }
+                                      : { planning: 'planner', working: 'workers in parallel', synthesizing: 'synthesizer', done: 'done' };
+  const at = stages.indexOf(s.status);
+  const flow = stages.map((st, i) => `<span class="stage ${s.status === st && st !== 'done' ? 'on' : (at > i || s.status === 'done') ? 'did' : ''}">${names[st]}</span>`).join('<span class="arrow">→</span>');
+  const jobs = s.jobs.filter(j => ['subtask', 'council'].includes(j.kind));
+  const lead = s.jobs.filter(j => ['plan', 'synth', 'judge'].includes(j.kind));
+  const card = j => `<div class="worker ${j.status}">
+      <div class="wh"><span class="wt" title="${esc(j.title)}">${esc(j.title || j.kind)}</span><span class="status s-${j.status}">${j.status}</span></div>
+      <div class="wm">${esc(nodeName(j.node_id))} · ${esc(j.model_used || j.model)}${j.tps ? ' · ' + j.tps.toFixed(1) + ' tok/s' : ''}</div>
+      <pre>${esc((j.result || j.partial || (j.status === 'queued' ? 'waiting for a free node…' : j.error || '')).replace(/<think>[\s\S]*?(<\/think>|$)/g, '💭 thinking… ').slice(-1500))}</pre></div>`;
+  $('#swview').innerHTML = `
+    <div class="row"><span class="status s-${s.status}">${s.status}</span><b style="flex:1;min-width:200px">${esc(s.goal.slice(0,200))}</b>
+      ${['done','failed','cancelled'].includes(s.status) ? '' : `<button class="btn sm danger" onclick="cancelSwarm()">cancel</button>`}</div>
+    <div class="flow">${flow}</div>
+    ${s.error ? `<div class="code" style="color:var(--bad)">${esc(s.error)}</div>` : ''}
+    ${lead.filter(j => j.status !== 'done' || j.kind === 'plan').length && s.status !== 'done' ? `<div class="workers" style="margin-bottom:10px">${lead.filter(j => j.status !== 'done').map(card).join('')}</div>` : ''}
+    <div class="workers">${jobs.map(card).join('')}</div>
+    ${s.final ? `<div class="final"><h3>FINAL ANSWER<span class="sp"></span><button class="btn sm" onclick="copy(window._final)">copy</button></h3><div class="md">${md(s.final)}</div></div>` : ''}`;
+  window._final = s.final || '';
+  document.querySelectorAll('#swlist .swi').forEach(e => e.classList.toggle('on', e.getAttribute('onclick').includes(SWARM)));
+}
+async function cancelSwarm(){ await api(`/api/swarms/${SWARM}/cancel`, {method:'POST'}); pollSwarm(); }
+
+/* ---------------- chat ---------------- */
+function chatClear(){ chatHistory = []; $('#msgs').innerHTML = ''; }
+function addMsg(role, text, who) {
+  const empty = $('#msgs .empty'); if (empty) empty.remove();
+  const d = document.createElement('div'); d.className = 'msg ' + role;
+  d.innerHTML = `<div class="who">${esc(who || role)}</div><div class="md"></div>`;
+  d.querySelector('.md').innerHTML = md(text);
+  $('#msgs').appendChild(d); $('#msgs').scrollTop = 1e9; return d;
+}
+$('#chat-in').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSend(); } });
+
+async function chatSend() {
+  const text = $('#chat-in').value.trim();
+  if (!text || chatBusy) return;
+  const model = $('#chat-model').value || 'auto';
+  $('#chat-in').value = ''; chatBusy = true; $('#chat-send').disabled = true;
+  chatHistory.push({ role: 'user', content: text }); addMsg('user', text, 'you');
+  const bubble = addMsg('assistant', '…', model); const body = bubble.querySelector('.md'); const who = bubble.querySelector('.who');
+  let out = '', status = '';
+  try {
+    const r = await fetch('/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + KEY },
+      body: JSON.stringify({ model, messages: chatHistory, stream: true }) });
+    if (!r.ok) throw new Error(await r.text());
+    const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+    while (true) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 2);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim(); if (data === '[DONE]') continue;
+        const ev = JSON.parse(data);
+        if (ev.error) throw new Error(ev.error.message);
+        const d = ev.choices?.[0]?.delta || {};
+        if (d.reasoning_content) status = d.reasoning_content.trim();
+        if (d.content) out += d.content;
+        if (ev.model) who.textContent = ev.model;
+        body.innerHTML = out ? md(out) : `<span class="hint">${esc(status || 'waiting for a node…')}</span>`;
+        $('#msgs').scrollTop = 1e9;
+      }
+    }
+    chatHistory.push({ role: 'assistant', content: out.replace(/<think>[\s\S]*?<\/think>/g, '').trim() });
+  } catch (e) { body.innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`; chatHistory.pop(); }
+  chatBusy = false; $('#chat-send').disabled = false;
+}
+
+/* ---------------- misc ---------------- */
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + t.dataset.v));
+  try { localStorage.setItem('hive_tab', t.dataset.v); } catch (e) {}
+});
+try { const t = localStorage.getItem('hive_tab'); if (t) document.querySelector(`.tab[data-v="${t}"]`)?.click(); } catch (e) {}
+
+function joinCmd() {
+  return `curl -fsSL ${location.origin}/node.py -o hive_node.py\npython3 hive_node.py --hive ${location.origin} --key ${KEY || 'YOUR_HIVE_KEY'}`;
+}
+function renderJoin(){ const el = $('#join-cmd'); el.firstChild && el.firstChild.nodeType === 3 && el.firstChild.remove(); el.insertBefore(document.createTextNode(joinCmd()), el.firstChild); }
+
+tick(); setInterval(tick, 1500); setInterval(pollSwarm, 900);
+</script>
+</body>
+</html>
