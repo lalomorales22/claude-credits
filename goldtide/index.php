@@ -686,7 +686,7 @@ const GAME_REGISTRY = [
     'scratch'    => ['Sunset Scratchers', 'reels', 'Scratch nine spots. Match three prizes and it\'s yours.', 2],
     'keno'       => ['Kelp Keno', 'reels', 'Pick up to ten of forty. Ten numbers wash ashore.', 3],
     'roulette3d' => ['Coronado Roulette 3D', 'worlds', 'A real 3D wheel: the ball rides the track, bounces off the frets and drops.', 8],
-    'craps'      => ['Harbor Craps', 'worlds', 'Throw the bones down a 3D table. Pass line, odds, field, hardways.', 9],
+    'craps'      => ['Harbor Craps', 'worlds', 'Full bubble craps in 3D: line, come, odds, place, buy, lay, props.', 9],
     'pusher'     => ['Pier Pusher', 'worlds', 'The boardwalk coin pusher in 3D. Drop a coin, watch them spill.', 10],
     'roulette'   => ['Coronado Roulette', 'tables', 'Single-zero European wheel. Spread your chips.', 10],
     'baccarat'   => ['Bayfront Baccarat', 'tables', 'Player, banker, or tie. The classic high-roller card game.', 11],
@@ -1648,112 +1648,234 @@ function roulette3d_play(): array {
         'balance' => bal($pid), 'message' => "$n " . strtoupper($color) . ($payout ? ' · returned ' . coins($payout) . ' GC' : ' · house takes it')];
 }
 
-/* ── Harbor Craps ──
- * Line bets (pass / don't pass, odds) and hardways stay up across rolls; field and
- * proposition bets are one-roll. Returns include the stake (e.g. field 2 returns ×3).
- * House edge: pass 1.41%, don't pass 1.36%, odds 0%, field 2.78%, hard 6/8 9.09%,
- * hard 4/10 11.1%, any craps / yo 11.1%, any seven 16.7% (all standard).
+/* ── Harbor Craps: the full bubble-craps menu ──
+ * Returns below include the stake unless noted. "Stays up" bets (place, buy, lay, big 6/8,
+ * hardways) pay their profit and remain on the layout, and are OFF on the come-out roll.
+ * House edge (standard): pass 1.41%, don't pass 1.36%, come 1.41%, don't come 1.36%, odds 0%,
+ * place 6/8 1.52%, place 5/9 4.0%, place 4/10 6.67%, buy (5% on win) 1.67%, lay 4/10 2.44%,
+ * big 6/8 9.09%, field 2.78%, hard 6/8 9.09%, hard 4/10 11.1%, 2/12 13.9%, 3/11 11.1%,
+ * any craps 11.1%, horn 12.5%, C&E 11.1%, any seven 16.7%.
  */
-const CRAPS_ONE_ROLL = ['field', 'any7', 'anycraps', 'yo'];
-const CRAPS_KEYS = ['pass', 'dontpass', 'odds', 'field', 'any7', 'anycraps', 'yo', 'hard4', 'hard6', 'hard8', 'hard10'];
-const CRAPS_LABELS = ['pass' => 'Pass line', 'dontpass' => "Don't pass", 'odds' => 'Pass odds', 'field' => 'Field', 'any7' => 'Any seven',
-    'anycraps' => 'Any craps', 'yo' => 'Yo 11', 'hard4' => 'Hard 4', 'hard6' => 'Hard 6', 'hard8' => 'Hard 8', 'hard10' => 'Hard 10'];
-
+const CRAPS_NUMS = [4, 5, 6, 8, 9, 10];
+const CRAPS_ONE_ROLL = ['field', 'any7', 'anycraps', 'ace2', 'ace3', 'yo', 'twelve', 'horn', 'ce'];
+const CRAPS_TRUE = [4 => [2, 1], 10 => [2, 1], 5 => [3, 2], 9 => [3, 2], 6 => [6, 5], 8 => [6, 5]];   // odds on the number
+const CRAPS_PLACE = [4 => [9, 5], 10 => [9, 5], 5 => [7, 5], 9 => [7, 5], 6 => [7, 6], 8 => [7, 6]];
+const CRAPS_ODDS_MAX = [4 => 3, 10 => 3, 5 => 4, 9 => 4, 6 => 5, 8 => 5];                          // 3-4-5× odds
+function craps_label(string $k): string {
+    static $L = ['pass' => 'Pass line', 'dontpass' => "Don't pass", 'passodds' => 'Pass odds', 'dpodds' => "Don't pass odds",
+        'come' => 'Come', 'dontcome' => "Don't come", 'field' => 'Field', 'any7' => 'Any seven', 'anycraps' => 'Any craps',
+        'ace2' => 'Aces (2)', 'ace3' => 'Ace-deuce (3)', 'yo' => 'Yo (11)', 'twelve' => 'Boxcars (12)', 'horn' => 'Horn', 'ce' => 'C & E',
+        'big6' => 'Big 6', 'big8' => 'Big 8'];
+    if (isset($L[$k])) { return $L[$k]; }
+    if (preg_match('/^(hard|place|buy|lay|come|comeodds|dcome|dcomeodds)(\d+)$/', $k, $m)) {
+        return ['hard' => 'Hard ', 'place' => 'Place ', 'buy' => 'Buy ', 'lay' => 'Lay ', 'come' => 'Come ', 'comeodds' => 'Come odds ', 'dcome' => "Don't come ", 'dcomeodds' => "Don't come odds "][$m[1]] . $m[2];
+    }
+    return $k;
+}
+/** Keys a player may add chips to directly (come points themselves are created by rolls). */
+function craps_placeable(string $k): bool {
+    if (in_array($k, ['pass', 'dontpass', 'passodds', 'dpodds', 'come', 'dontcome', 'big6', 'big8', ...CRAPS_ONE_ROLL], true)) { return true; }
+    if (preg_match('/^hard(4|6|8|10)$/', $k)) { return true; }
+    return (bool)preg_match('/^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)$/', $k);
+}
+function craps_removable(string $k): bool {
+    return !in_array($k, ['pass', 'come'], true) && !preg_match('/^come\d+$/', $k) && !in_array($k, CRAPS_ONE_ROLL, true);
+}
 function craps_state(?array $r): array {
     $s = st($r);
-    return ['point' => (int)($s['point'] ?? 0), 'bets' => $s['bets'] ?? [], 'paid' => (int)($s['paid'] ?? 0), 'rolls' => $s['rolls'] ?? []];
+    $bets = $s['bets'] ?? [];
+    if (isset($bets['odds'])) { $bets['passodds'] = ($bets['passodds'] ?? 0) + $bets['odds']; unset($bets['odds']); }   // v1 name
+    if (isset($bets['yo'])) { /* same key */ }
+    return ['point' => (int)($s['point'] ?? 0), 'bets' => $bets, 'paid' => (int)($s['paid'] ?? 0), 'rolls' => $s['rolls'] ?? []];
+}
+/** Validate one chip placement against the current table state. Throws DomainException. */
+function craps_check_add(array $s, string $k, int $amt, array $g): void {
+    $b = $s['bets']; $pt = $s['point']; $cur = ($b[$k] ?? 0) + $amt; $max = (int)$g['max_bet'];
+    $need = function (bool $ok, string $why) { if (!$ok) { throw new DomainException($why); } };
+    switch (true) {
+        case $k === 'pass' || $k === 'dontpass':
+            $need(!$pt, 'Line bets go down on the come-out roll only.'); break;
+        case $k === 'come' || $k === 'dontcome':
+            $need((bool)$pt, 'Come and Don\'t Come need a point to be on.'); break;
+        case $k === 'passodds':
+            $need($pt && !empty($b['pass']), 'Pass odds need a pass line bet and a point.');
+            $need($cur <= $b['pass'] * CRAPS_ODDS_MAX[$pt], 'Odds on ' . $pt . ' max out at ' . CRAPS_ODDS_MAX[$pt] . '× your pass line.'); return;
+        case $k === 'dpodds':
+            $need($pt && !empty($b['dontpass']), 'Lay odds need a don\'t pass bet and a point.');
+            $need($cur <= $b['dontpass'] * 6, 'Lay odds max out at 6× your don\'t pass.'); return;
+        case (bool)preg_match('/^comeodds(\d+)$/', $k, $m):
+            $need(!empty($b['come' . $m[1]]), 'Come odds need a come bet sitting on ' . $m[1] . '.');
+            $need($cur <= $b['come' . $m[1]] * CRAPS_ODDS_MAX[(int)$m[1]], 'Odds max out at ' . CRAPS_ODDS_MAX[(int)$m[1]] . '× the come bet.'); return;
+        case (bool)preg_match('/^dcomeodds(\d+)$/', $k, $m):
+            $need(!empty($b['dcome' . $m[1]]), 'Lay odds need a don\'t come bet on ' . $m[1] . '.');
+            $need($cur <= $b['dcome' . $m[1]] * 6, 'Lay odds max out at 6× the don\'t come bet.'); return;
+        case $k === 'horn':
+            $need($amt % 4 === 0, 'Horn bets split four ways, so use a multiple of 4.'); break;
+        case $k === 'ce':
+            $need($amt % 2 === 0, 'C & E splits two ways, so use an even amount.'); break;
+    }
+    $need($cur <= $max, 'Table max on ' . craps_label($k) . ' is ' . coins($max) . ' GC.');
 }
 
 function craps_act(): array {
     $p = require_playable(); $g = game_cfg('craps');
     $pid = (int)$p['id'];
-    $raw = $_POST['bets'] ?? '';
+    $move = (string)($_POST['move'] ?? 'roll');
     $new = [];
-    if (is_string($raw) && $raw !== '' && $raw !== '[]') {
-        [$new] = parse_bets($g, fn($k) => in_array($k, CRAPS_KEYS, true));
-    } elseif (!empty($_POST['bet_key'])) {
-        [$new] = parse_bets($g, fn($k) => in_array($k, CRAPS_KEYS, true));
+    $raw = $_POST['bets'] ?? '';
+    if ((is_string($raw) && $raw !== '' && $raw !== '[]') || !empty($_POST['bet_key'])) {
+        [$new] = parse_bets($g, 'craps_placeable');
+    }
+
+    if ($move === 'takedown') {
+        $keys = array_filter(explode(',', (string)($_POST['keys'] ?? '')), 'craps_removable');
+        if (!$keys) { fail('Nothing to take down there.'); }
+        $out = tx(function () use ($pid, $keys) {
+            $r = round_active($pid, 'craps');
+            if (!$r) { throw new DomainException('No bets on the table.'); }
+            $s = craps_state($r); $back = 0;
+            foreach ($keys as $k) { if (isset($s['bets'][$k])) { $back += $s['bets'][$k]; unset($s['bets'][$k]); } }
+            if (!$back) { throw new DomainException('Nothing to take down there.'); }
+            move_coins($pid, $back, 'payout', 'craps', 'took down ' . implode(', ', $keys));
+            $s['paid'] += $back;
+            if (!$s['bets']) {
+                q("UPDATE rounds SET status = 'done', outcome = 'down', payout = ?, state = ?, updated_at = datetime('now') WHERE id = ?", [$s['paid'], json_encode($s), $r['id']]);
+                record_round($pid, (int)$r['bet'], $s['paid']);
+            } else { round_save($r, $s); }
+            return ['state' => $s, 'back' => $back];
+        });
+        return ['dice' => null, 'point' => $out['state']['point'], 'bets' => (object)$out['state']['bets'], 'events' => [], 'payout' => 0, 'win' => false,
+            'balance' => bal($pid), 'message' => 'Took down ' . coins($out['back']) . ' GC.'];
     }
 
     $out = tx(function () use ($pid, $new, $g) {
         $r = round_active($pid, 'craps');
         $s = craps_state($r);
-        foreach ($new as $k => $amt) {
-            if (($k === 'pass' || $k === 'dontpass') && $s['point']) { throw new DomainException('Line bets go down on the come-out roll only.'); }
-            if ($k === 'odds') {
-                if (!$s['point'] || empty($s['bets']['pass'])) { throw new DomainException('Odds need a pass line bet and a point.'); }
-                if (($s['bets']['odds'] ?? 0) + $amt > $s['bets']['pass'] * 3) { throw new DomainException('Odds max out at 3× your pass line bet.'); }
-            }
-            if (($s['bets'][$k] ?? 0) + $amt > (int)$g['max_bet'] * ($k === 'odds' ? 3 : 1)) { throw new DomainException('Table max on ' . CRAPS_LABELS[$k] . ' is ' . coins((int)$g['max_bet']) . ' GC.'); }
-            $s['bets'][$k] = ($s['bets'][$k] ?? 0) + $amt;
-        }
+        foreach ($new as $k => $amt) { craps_check_add($s, $k, $amt, $g); $s['bets'][$k] = ($s['bets'][$k] ?? 0) + $amt; }
         $stake = array_sum($new);
         if (!$s['bets']) { throw new DomainException('Put some chips on the table first.'); }
-        if ($stake) {
-            if ($r) { $r = round_raise($r, $stake, 'craps chips'); }
-            else { $r = round_open($pid, 'craps', $stake, []); }
-        }
+        if ($stake) { $r = $r ? round_raise($r, $stake, 'craps chips') : round_open($pid, 'craps', $stake, []); }
 
         $d = [random_int(1, 6), random_int(1, 6)];
-        $sum = $d[0] + $d[1]; $hard = $d[0] === $d[1];
+        $sum = $d[0] + $d[1]; $hard = $d[0] === $d[1]; $pt = $s['point']; $comeOut = !$pt;
         $pay = 0; $events = [];
-        $win = function (string $k, int $ret, string $what) use (&$s, &$pay, &$events) { $pay += $ret; $events[] = ['key' => $k, 'win' => true, 'text' => CRAPS_LABELS[$k] . ' ' . $what . ' +' . coins($ret)]; unset($s['bets'][$k]); };
-        $lose = function (string $k) use (&$s, &$events) { $events[] = ['key' => $k, 'win' => false, 'text' => CRAPS_LABELS[$k] . ' loses']; unset($s['bets'][$k]); };
+        $B = &$s['bets'];
+        $credit = function (string $k, int $amt, string $what, bool $remove = true) use (&$B, &$pay, &$events) {
+            $pay += $amt; $events[] = ['key' => $k, 'win' => true, 'text' => craps_label($k) . ' ' . $what . ' +' . coins($amt)];
+            if ($remove) { unset($B[$k]); }
+        };
+        $lose = function (string $k) use (&$B, &$events) { $events[] = ['key' => $k, 'win' => false, 'text' => craps_label($k) . ' loses']; unset($B[$k]); };
+        $push = function (string $k, string $why) use (&$B, &$pay, &$events) { $pay += $B[$k]; $events[] = ['key' => $k, 'win' => null, 'text' => craps_label($k) . ' ' . $why]; unset($B[$k]); };
+        $trueRet = fn(int $amt, int $n) => $amt + intdiv($amt * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]);
+        $layRet = fn(int $amt, int $n) => $amt + intdiv($amt * CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]);
+        $vig = fn(int $win) => max(1, (int)floor($win * 0.05));
 
-        // one-roll bets
+        // ── one-roll bets ──
         foreach (CRAPS_ONE_ROLL as $k) {
-            if (!isset($s['bets'][$k])) { continue; }
-            $a = $s['bets'][$k];
-            $x = match ($k) {
-                'field' => $sum === 2 ? 3 : ($sum === 12 ? 4 : (in_array($sum, [3, 4, 9, 10, 11], true) ? 2 : 0)),
-                'any7' => $sum === 7 ? 5 : 0,
-                'anycraps' => in_array($sum, [2, 3, 12], true) ? 8 : 0,
-                'yo' => $sum === 11 ? 16 : 0,
+            if (!isset($B[$k])) { continue; }
+            $a = $B[$k];
+            $ret = match ($k) {
+                'field' => $sum === 2 ? $a * 3 : ($sum === 12 ? $a * 4 : (in_array($sum, [3, 4, 9, 10, 11], true) ? $a * 2 : 0)),
+                'any7' => $sum === 7 ? $a * 5 : 0,
+                'anycraps' => in_array($sum, [2, 3, 12], true) ? $a * 8 : 0,
+                'ace2' => $sum === 2 ? $a * 31 : 0,
+                'twelve' => $sum === 12 ? $a * 31 : 0,
+                'ace3' => $sum === 3 ? $a * 16 : 0,
+                'yo' => $sum === 11 ? $a * 16 : 0,
+                'horn' => in_array($sum, [2, 12], true) ? intdiv($a, 4) * 31 : (in_array($sum, [3, 11], true) ? intdiv($a, 4) * 16 : 0),
+                'ce' => in_array($sum, [2, 3, 12], true) ? intdiv($a, 2) * 8 : ($sum === 11 ? intdiv($a, 2) * 16 : 0),
             };
-            $x ? $win($k, $a * $x, 'hits') : $lose($k);
+            $ret ? $credit($k, $ret, 'hits') : $lose($k);
         }
-        // hardways: win on the pair, lose on 7 or the easy way
-        foreach ([4, 6, 8, 10] as $n) {
-            $k = "hard$n";
-            if (!isset($s['bets'][$k])) { continue; }
-            if ($sum === $n && $hard) { $win($k, $s['bets'][$k] * ($n === 6 || $n === 8 ? 10 : 8), 'the hard way'); }
-            elseif ($sum === 7 || $sum === $n) { $lose($k); }
-        }
-        // line bets
-        $point = $s['point'];
-        if (!$point) {
-            if ($sum === 7 || $sum === 11) {
-                if (isset($s['bets']['pass'])) { $win('pass', $s['bets']['pass'] * 2, 'natural'); }
-                if (isset($s['bets']['dontpass'])) { $lose('dontpass'); }
-            } elseif (in_array($sum, [2, 3, 12], true)) {
-                if (isset($s['bets']['pass'])) { $lose('pass'); }
-                if (isset($s['bets']['dontpass'])) {
-                    $sum === 12 ? $win('dontpass', $s['bets']['dontpass'], 'pushes on 12') : $win('dontpass', $s['bets']['dontpass'] * 2, 'wins');
+        // ── stay-up bets: place, buy, lay, big 6/8, hardways (all OFF on the come-out) ──
+        if (!$comeOut) {
+            foreach (CRAPS_NUMS as $n) {
+                if (isset($B["place$n"])) {
+                    if ($sum === $n) { $a = $B["place$n"]; $credit("place$n", intdiv($a * CRAPS_PLACE[$n][0], CRAPS_PLACE[$n][1]), 'pays', false); }
+                    elseif ($sum === 7) { $lose("place$n"); }
                 }
-            } elseif (isset($s['bets']['pass']) || isset($s['bets']['dontpass'])) {
+                if (isset($B["buy$n"])) {
+                    if ($sum === $n) { $a = $B["buy$n"]; $w = intdiv($a * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]); $credit("buy$n", $w - $vig($w), 'pays true odds (less 5%)', false); }
+                    elseif ($sum === 7) { $lose("buy$n"); }
+                }
+                if (isset($B["lay$n"])) {
+                    if ($sum === 7) { $a = $B["lay$n"]; $w = intdiv($a * CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]); $credit("lay$n", $w - $vig($w), 'wins (less 5%)', false); }
+                    elseif ($sum === $n) { $lose("lay$n"); }
+                }
+            }
+            foreach ([6, 8] as $n) {
+                if (!isset($B["big$n"])) { continue; }
+                if ($sum === $n) { $credit("big$n", $B["big$n"], 'pays even money', false); } elseif ($sum === 7) { $lose("big$n"); }
+            }
+            foreach ([4, 6, 8, 10] as $n) {
+                if (!isset($B["hard$n"])) { continue; }
+                if ($sum === $n && $hard) { $credit("hard$n", $B["hard$n"] * ($n === 6 || $n === 8 ? 9 : 7), 'hits the hard way', false); }
+                elseif ($sum === 7 || $sum === $n) { $lose("hard$n"); }
+            }
+        }
+        // ── come points already on the numbers (come odds are off on the come-out, don't-come odds always work) ──
+        foreach (CRAPS_NUMS as $n) {
+            if (isset($B["come$n"])) {
+                if ($sum === $n) {
+                    $credit("come$n", $B["come$n"] * 2, 'hits');
+                    if (isset($B["comeodds$n"])) { $comeOut ? $push("comeodds$n", 'returned (odds off on the come-out)') : $credit("comeodds$n", $trueRet($B["comeodds$n"], $n), 'pays true odds'); }
+                } elseif ($sum === 7) {
+                    $lose("come$n");
+                    if (isset($B["comeodds$n"])) { $comeOut ? $push("comeodds$n", 'returned (odds off on the come-out)') : $lose("comeodds$n"); }
+                }
+            }
+            if (isset($B["dcome$n"])) {
+                if ($sum === 7) {
+                    $credit("dcome$n", $B["dcome$n"] * 2, 'wins');
+                    if (isset($B["dcomeodds$n"])) { $credit("dcomeodds$n", $layRet($B["dcomeodds$n"], $n), 'lay odds win'); }
+                } elseif ($sum === $n) { $lose("dcome$n"); if (isset($B["dcomeodds$n"])) { $lose("dcomeodds$n"); } }
+            }
+        }
+        // ── new come / don't come bets travel ──
+        if (isset($B['come'])) {
+            $a = $B['come'];
+            if ($sum === 7 || $sum === 11) { $credit('come', $a * 2, 'wins'); }
+            elseif (in_array($sum, [2, 3, 12], true)) { $lose('come'); }
+            else { unset($B['come']); $B["come$sum"] = ($B["come$sum"] ?? 0) + $a; $events[] = ['key' => "come$sum", 'win' => null, 'text' => "Come bet moves to $sum"]; }
+        }
+        if (isset($B['dontcome'])) {
+            $a = $B['dontcome'];
+            if ($sum === 2 || $sum === 3) { $credit('dontcome', $a * 2, 'wins'); }
+            elseif ($sum === 12) { $push('dontcome', 'pushes on 12'); }
+            elseif ($sum === 7 || $sum === 11) { $lose('dontcome'); }
+            else { unset($B['dontcome']); $B["dcome$sum"] = ($B["dcome$sum"] ?? 0) + $a; $events[] = ['key' => "dcome$sum", 'win' => null, 'text' => "Don't come moves behind $sum"]; }
+        }
+        // ── line bets ──
+        if ($comeOut) {
+            if ($sum === 7 || $sum === 11) {
+                if (isset($B['pass'])) { $credit('pass', $B['pass'] * 2, 'natural'); }
+                if (isset($B['dontpass'])) { $lose('dontpass'); }
+            } elseif (in_array($sum, [2, 3, 12], true)) {
+                if (isset($B['pass'])) { $lose('pass'); }
+                if (isset($B['dontpass'])) { $sum === 12 ? $push('dontpass', 'pushes on 12') : $credit('dontpass', $B['dontpass'] * 2, 'wins'); }
+            } else {
                 $s['point'] = $sum;
                 $events[] = ['key' => 'point', 'win' => null, 'text' => "Point is $sum"];
             }
-        } elseif ($sum === $point) {
-            if (isset($s['bets']['odds'])) {
-                $o = $s['bets']['odds'];
-                $ret = $o + intdiv($o * [4 => 2, 10 => 2, 5 => 3, 9 => 3, 6 => 6, 8 => 6][$point], [4 => 1, 10 => 1, 5 => 2, 9 => 2, 6 => 5, 8 => 5][$point]);
-                $win('odds', $ret, 'pays true odds');
-            }
-            if (isset($s['bets']['pass'])) { $win('pass', $s['bets']['pass'] * 2, 'hits the point'); }
-            if (isset($s['bets']['dontpass'])) { $lose('dontpass'); }
+        } elseif ($sum === $pt) {
+            if (isset($B['pass'])) { $credit('pass', $B['pass'] * 2, 'hits the point'); }
+            if (isset($B['passodds'])) { $credit('passodds', $trueRet($B['passodds'], $pt), 'pays true odds'); }
+            if (isset($B['dontpass'])) { $lose('dontpass'); }
+            if (isset($B['dpodds'])) { $lose('dpodds'); }
             $s['point'] = 0;
+            $events[] = ['key' => 'point', 'win' => null, 'text' => 'Winner! Point made'];
         } elseif ($sum === 7) {
-            foreach (['pass', 'odds'] as $k) { if (isset($s['bets'][$k])) { $lose($k); } }
-            if (isset($s['bets']['dontpass'])) { $win('dontpass', $s['bets']['dontpass'] * 2, 'wins on seven-out'); }
+            foreach (['pass', 'passodds'] as $k) { if (isset($B[$k])) { $lose($k); } }
+            if (isset($B['dontpass'])) { $credit('dontpass', $B['dontpass'] * 2, 'wins on seven-out'); }
+            if (isset($B['dpodds'])) { $credit('dpodds', $layRet($B['dpodds'], $pt), 'lay odds win'); }
             $s['point'] = 0;
             $events[] = ['key' => 'point', 'win' => null, 'text' => 'Seven out'];
         }
+        unset($B);
         if ($pay) { move_coins($pid, $pay, 'payout', 'craps', "roll $d[0]-$d[1]"); }
         $s['paid'] += $pay;
-        $s['rolls'] = array_slice([...$s['rolls'], $d], -12);
+        $s['rolls'] = array_slice([...$s['rolls'], $d], -16);
         if (!$s['bets']) {
-            // everything resolved: close the round with its totals
             $s['point'] = 0;
             q("UPDATE rounds SET status = 'done', outcome = ?, payout = ?, state = ?, updated_at = datetime('now') WHERE id = ?",
                 ["$d[0]-$d[1]", $s['paid'], json_encode($s), $r['id']]);
@@ -1764,9 +1886,11 @@ function craps_act(): array {
         return ['dice' => $d, 'sum' => $sum, 'state' => $s, 'pay' => $pay, 'events' => $events];
     });
     $s = $out['state'];
-    $msg = $out['sum'] . ($out['dice'][0] === $out['dice'][1] ? ' (hard)' : '') . ' · ' . ($out['events'] ? implode(' · ', array_map(fn($e) => $e['text'], $out['events'])) : 'no decision');
+    $wins = array_values(array_filter($out['events'], fn($e) => $e['win'] === true));
+    $msg = $out['sum'] . ($out['dice'][0] === $out['dice'][1] ? ' (hard)' : '') . ' · '
+        . ($out['events'] ? implode(' · ', array_map(fn($e) => $e['text'], array_slice($out['events'], 0, 5))) . (count($out['events']) > 5 ? ' …' : '') : 'no decision');
     return ['dice' => $out['dice'], 'sum' => $out['sum'], 'point' => $s['point'], 'bets' => (object)$s['bets'], 'events' => $out['events'],
-        'payout' => $out['pay'], 'win' => $out['pay'] > 0, 'balance' => bal($pid), 'message' => $msg];
+        'rolls' => $s['rolls'], 'payout' => $out['pay'], 'win' => $out['pay'] > 0 && (bool)$wins, 'balance' => bal($pid), 'message' => $msg];
 }
 
 /* ── Pier Pusher ──
@@ -3120,7 +3244,7 @@ function page_rules(): void {
  */
 const GAME_RULES = [
     'roulette3d' => ['Tap a chip, tap the board, hit Spin. Same single-zero payouts as the 2D table (35:1 straight up).', 'The wheel you watch is the real result: the server picks the pocket, then the ball is steered into it.', 'Right-click or long-press a spot to pull chips back.'],
-    'craps' => ['Come-out roll: put chips on Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass).', 'Any other number becomes the point. Roll it again before a 7 to win Pass.', 'Once a point is on, back your Pass bet with Odds (up to 3×). Odds pay true odds with zero house edge.', 'Field and the props (Any 7, Any craps, Yo) are one-roll bets. Hardways stay up until they hit, a 7 rolls, or the number comes easy.', 'Right-click or long-press a spot to take back chips you haven\'t rolled yet.'],
+    'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay true odds with zero house edge.', 'Every number has Place (6/8 pay 7:6, 5/9 pay 7:5, 4/10 pay 9:5), Buy (true odds, 5% on wins) and Lay (bet the 7 beats it). Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.'],
     'pusher' => ['Each coin you drop costs your coin value. Coins that spill over the front edge are yours.', 'Tap the machine or use the slider to aim. Aiming is just for fun: how many coins fall is decided the moment you drop.', 'About 46% of drops spill something, and rare avalanches pay 25× or 100×. Return to player is 95%.'],
     'scratch' => ['Buy a ticket, scratch all nine spots.', 'Three matching prizes wins that prize. Only one triple per ticket.', 'Top prize is 1,000× the ticket. About 1 in 4 tickets wins something.'],
     'keno' => ['Pick 1 to 10 numbers from 40.', 'Ten numbers are drawn. The more you catch, the more you win.', 'The paytable changes with how many you pick. Big picks, big jackpots.'],
@@ -3782,7 +3906,9 @@ function panel_roulette3d(array $p, array $g): string {
 function panel_craps(array $p, array $g): string {
     $r = round_active((int)$p['id'], 'craps');
     $s = craps_state($r);
-    $spot = fn(string $k, string $label, string $sub = '', string $cls = '') => '<button type="button" class="cr-spot ' . $cls . '" data-bet="' . h($k) . '"><b>' . h($label) . '</b>' . ($sub !== '' ? '<small>' . h($sub) . '</small>' : '') . '</button>';
+    $spot = fn(string $k, string $label, string $sub = '', string $cls = '', string $art = '') => '<button type="button" class="cr-spot ' . $cls . '" data-bet="' . h($k) . '">'
+        . ($art !== '' ? '<i class="cr-art" aria-hidden="true">' . $art . '</i>' : '') . '<b>' . h($label) . '</b>' . ($sub !== '' ? '<small>' . h($sub) . '</small>' : '') . '</button>';
+    $dice = fn(int $a, int $b) => die_svg($a) . die_svg($b);
     $chips = '';
     $first = true;
     foreach ([10, 25, 50, 100, 500, 1000] as $c) {
@@ -3790,14 +3916,35 @@ function panel_craps(array $p, array $g): string {
         $chips .= '<button type="button" class="chip c' . $c . '" role="radio" aria-checked="' . ($first ? 'true' : 'false') . '" data-chip="' . $c . '">' . ($c >= 1000 ? ($c / 1000) . 'K' : $c) . '</button>';
         $first = false;
     }
+    $cols = '';
+    foreach (CRAPS_NUMS as $n) {
+        [$pa, $pb] = CRAPS_PLACE[$n]; [$ta, $tb] = CRAPS_TRUE[$n];
+        $cols .= '<div class="cr-col' . ($s['point'] === $n ? ' pt' : '') . '" data-cr-num="' . $n . '" role="group" aria-label="Number ' . $n . '">'
+            . $spot("lay$n", 'Lay', "$tb:$ta · 5% on win", 'mini lay')
+            . '<div class="cr-num"><span class="cr-puck" aria-hidden="true">ON</span><b>' . ($n === 6 ? 'SIX' : ($n === 9 ? 'NINE' : $n)) . '</b><div class="cr-cp" data-cr-cp="' . $n . '"></div></div>'
+            . $spot("place$n", 'Place', "$pa:$pb", 'mini place')
+            . $spot("buy$n", 'Buy', "$ta:$tb · 5% on win", 'mini')
+            . $spot("comeodds$n", 'Come odds', "$ta:$tb true", 'mini odds')
+            . $spot("dcomeodds$n", 'DC odds', "$tb:$ta true", 'mini odds')
+            . '</div>';
+    }
+    $hist = '';
+    foreach (array_reverse($s['rolls']) as $d) { $t = $d[0] + $d[1]; $hist .= '<li class="' . ($t === 7 ? 'seven' : '') . '">' . $t . '</li>'; }
+    $placeable = ['pass', 'dontpass', 'passodds', 'dpodds', 'come', 'dontcome', 'field', 'big6', 'big8', 'hard4', 'hard6', 'hard8', 'hard10',
+        'any7', 'anycraps', 'ace2', 'ace3', 'yo', 'twelve', 'horn', 'ce'];
+    foreach (CRAPS_NUMS as $n) { array_push($placeable, "place$n", "buy$n", "lay$n", "comeodds$n", "dcomeodds$n"); }
     ob_start(); ?>
-<div class="craps" data-craps data-state="<?= h(json_encode(['point' => $s['point'], 'bets' => (object)$s['bets']])) ?>" data-max="<?= (int)$g['max_bet'] ?>">
+<div class="craps" data-craps data-state="<?= h(json_encode(['point' => $s['point'], 'bets' => (object)$s['bets']])) ?>" data-max="<?= (int)$g['max_bet'] ?>" data-min="<?= (int)$g['min_bet'] ?>">
   <div class="g3d-wrap">
     <?= g3d_stage('craps') ?>
     <div class="g3d-bar">
       <p class="result" data-cr-msg aria-live="polite"><?= $s['point'] ? 'Point is ' . $s['point'] . '. Roll again.' : 'Come-out roll. Put chips on the line.' ?></p>
-      <div class="cr-point" data-cr-point><?= $s['point'] ? 'POINT ' . $s['point'] : 'COME-OUT' ?></div>
+      <div class="cr-bar-r">
+        <button type="button" class="btn ghost sm" data-cr-mode hidden>Bubble view</button>
+        <div class="cr-point<?= $s['point'] ? ' on' : '' ?>" data-cr-point><?= $s['point'] ? 'POINT ' . $s['point'] : 'COME-OUT' ?></div>
+      </div>
     </div>
+    <ol class="history cr-hist" data-cr-hist aria-label="Last rolls"><?= $hist ?></ol>
   </div>
   <div class="cr-controls">
     <div class="chips" role="radiogroup" aria-label="Chip value" data-cr-chips><?= $chips ?></div>
@@ -3805,26 +3952,48 @@ function panel_craps(array $p, array $g): string {
     <div class="rl-actions">
       <button type="button" class="btn gold lg" data-cr-roll>Roll the dice</button>
       <button type="button" class="btn ghost" data-cr-clear>Clear new chips</button>
+      <button type="button" class="btn ghost" data-cr-td aria-pressed="false">Take bets down</button>
+      <button type="button" class="btn coral" data-cr-td-go hidden>Return 0 GC</button>
     </div>
+    <p class="cr-hint" data-cr-hint>Tap a spot to add your chip. Right-click or long-press to pull back chips you haven't rolled yet.</p>
+    <ul class="cr-log" data-cr-log aria-live="polite"></ul>
   </div>
   <div class="cr-board" data-cr-board>
-    <div class="cr-row">
-      <?= $spot('pass', 'Pass line', 'come-out only · 1:1', 'wide') ?>
-      <?= $spot('dontpass', "Don't pass", 'come-out only · bar 12', 'wide') ?>
-      <?= $spot('odds', 'Pass odds', 'true odds · up to 3×', 'wide') ?>
+    <div class="cr-nums">
+      <div class="cr-dcbar"><?= $spot('dontcome', "Don't come", 'bar 12 · 1:1', 'dark tall') ?></div>
+      <?= $cols ?>
     </div>
-    <div class="cr-row">
-      <?= $spot('field', 'Field', '2, 3, 4, 9, 10, 11, 12 · 2 pays 2:1 · 12 pays 3:1', 'xwide') ?>
+    <div class="cr-row cr-come"><?= $spot('come', 'Come', '7 or 11 wins · 2, 3, 12 lose · else moves to the number', 'wide') ?></div>
+    <div class="cr-row cr-field">
+      <?= $spot('big6', 'Big 6', 'stays up · 1:1', 'big') ?>
+      <?= $spot('field', 'Field', '3 · 4 · 9 · 10 · 11 pay 1:1 · 2 pays 2:1 · 12 pays 3:1', 'wide') ?>
+      <?= $spot('big8', 'Big 8', 'stays up · 1:1', 'big') ?>
     </div>
-    <div class="cr-row">
-      <?= $spot('hard4', 'Hard 4', '7:1') ?><?= $spot('hard6', 'Hard 6', '9:1') ?><?= $spot('hard8', 'Hard 8', '9:1') ?><?= $spot('hard10', 'Hard 10', '7:1') ?>
-      <?= $spot('any7', 'Any 7', '4:1') ?><?= $spot('anycraps', 'Any craps', '7:1') ?><?= $spot('yo', 'Yo 11', '15:1') ?>
+    <div class="cr-row cr-line">
+      <?= $spot('dontpass', "Don't pass bar", 'come-out · 12 pushes', 'dark') ?>
+      <?= $spot('dpodds', 'Lay odds', 'behind don\'t pass · 6×', 'odds') ?>
+      <?= $spot('pass', 'Pass line', 'come-out · 1:1', 'wide gold') ?>
+      <?= $spot('passodds', 'Pass odds', 'true odds · 3-4-5×', 'odds') ?>
+    </div>
+    <div class="cr-props" role="group" aria-label="Proposition bets">
+      <?= $spot('any7', 'Any seven', 'one roll · 4:1', 'red wide') ?>
+      <?= $spot('hard6', 'Hard 6', '9:1', 'hard', $dice(3, 3)) ?>
+      <?= $spot('hard10', 'Hard 10', '7:1', 'hard', $dice(5, 5)) ?>
+      <?= $spot('hard8', 'Hard 8', '9:1', 'hard', $dice(4, 4)) ?>
+      <?= $spot('hard4', 'Hard 4', '7:1', 'hard', $dice(2, 2)) ?>
+      <?= $spot('ace3', 'Ace-deuce', '15:1', '', $dice(1, 2)) ?>
+      <?= $spot('ace2', 'Aces', '30:1', '', $dice(1, 1)) ?>
+      <?= $spot('twelve', 'Boxcars', '30:1', '', $dice(6, 6)) ?>
+      <?= $spot('yo', 'Yo 11', '15:1', '', $dice(5, 6)) ?>
+      <?= $spot('horn', 'Horn', '2 · 3 · 11 · 12 · ×4 chips', 'wide') ?>
+      <?= $spot('ce', 'C & E', 'craps 3:1 · eleven 7:1', 'wide') ?>
+      <?= $spot('anycraps', 'Any craps', 'one roll · 7:1', 'red wide') ?>
     </div>
   </div>
   <noscript>
     <form class="panel form" method="post" action="<?= h(play_url('craps')) ?>">
       <?= csrf_field() ?>
-      <label>Add a bet (optional) <select name="bet_key"><option value="">none, just roll</option><?php foreach (CRAPS_LABELS as $k => $l): ?><option value="<?= h($k) ?>"><?= h($l) ?></option><?php endforeach; ?></select></label>
+      <label>Add a bet (optional) <select name="bet_key"><option value="">none, just roll</option><?php foreach ($placeable as $k): ?><option value="<?= h($k) ?>"><?= h(craps_label($k)) ?></option><?php endforeach; ?></select></label>
       <label>Amount <input type="number" name="amount" min="<?= (int)$g['min_bet'] ?>" max="<?= (int)$g['max_bet'] ?>" value="<?= (int)$g['min_bet'] ?>"></label>
       <button class="btn gold">Roll</button>
     </form>
@@ -4503,34 +4672,62 @@ function makeDie(color) {
   const m = new T.Mesh(new T.BoxGeometry(.62, .62, .62, 2, 2, 2), mats); m.castShadow = true; return m;
 }
 
-const CRAPS_SPOTS = { // felt coordinates (x across the table, z toward the player) for chip stacks
-  pass: [-2.2, 2.35], dontpass: [-2.2, 1.55], odds: [0.2, 2.75], field: [-.6, .55], any7: [3.6, -1.15], anycraps: [3.6, 1.85], yo: [4.75, .95],
-  hard4: [2.75, -.35], hard6: [4.45, -.35], hard8: [2.75, .35], hard10: [4.45, .35],
+// Felt coordinates: x runs across the table (-8..8), z toward the player (-4..4).
+const CR_COLX = { 4: -6.25, 5: -4.95, 6: -3.65, 8: -2.35, 9: -1.05, 10: .25 };
+const CRAPS_SPOTS = {
+  dontcome: [-7.4, -2.6], come: [-3, -.82], field: [-3, .42], big6: [-7.4, 0], big8: [-7.4, .66],
+  dontpass: [-5.6, 1.3], pass: [-3.2, 2.05], passodds: [-3.2, 2.9], dpodds: [-5.46, 1.18, 'dontpass'],
+  any7: [3.3, -3.65], hard6: [2.35, -3], hard10: [4.25, -3], hard8: [2.35, -2.3], hard4: [4.25, -2.3],
+  ace3: [1.875, -1.52], ace2: [2.825, -1.52], twelve: [3.775, -1.52], yo: [4.725, -1.52], horn: [2.35, -.75], ce: [4.25, -.75], anycraps: [3.3, -.1],
 };
-const POINT_X = { 4: -3.6, 5: -2.35, 6: -1.1, 8: .15, 9: 1.4, 10: 2.65 };
+for (const [n, x] of Object.entries(CR_COLX)) {
+  CRAPS_SPOTS['lay' + n] = [x, -3.7]; CRAPS_SPOTS['place' + n] = [x, -2.0]; CRAPS_SPOTS['buy' + n] = [x, -1.52];
+  CRAPS_SPOTS['come' + n] = [x - .34, -2.6]; CRAPS_SPOTS['dcome' + n] = [x + .34, -2.6];
+  CRAPS_SPOTS['comeodds' + n] = [x - .22, -2.72, 'come' + n]; CRAPS_SPOTS['dcomeodds' + n] = [x + .46, -2.72, 'dcome' + n];
+}
 export function craps(host) {
   const S = stage(host, { bg: 0x0a0d18, fog: [24, 50], fov: 36 });
   const { scene, camera } = S;
-  lights(scene, { keyPos: [0, 15, 5], keyI: 1300, rim: 0xffcf7a, rimI: 40, rimPos: [8, 6, 8] });
-  // felt with a printed layout
+  lights(scene, { keyPos: [-1, 15, 5], keyI: 1300, rim: 0xffcf7a, rimI: 40, rimPos: [8, 6, 8] });
+  // felt with a printed bubble-style layout
   const felt = feltTex('#0f5a45', (x, w, h) => {
-    const X = v => (v + 8) / 16 * w, Z = v => (v + 4) / 8 * h;
-    x.strokeStyle = '#f5ecd7'; x.fillStyle = '#f5ecd7'; x.lineWidth = 6; x.textAlign = 'center'; x.textBaseline = 'middle';
-    const box = (x0, z0, x1, z1, label, size = 54, color) => { x.strokeRect(X(x0), Z(z0), X(x1) - X(x0), Z(z1) - Z(z0)); if (label) { x.fillStyle = color || '#f5ecd7'; x.font = `600 ${size}px Limelight, serif`; x.fillText(label, (X(x0) + X(x1)) / 2, (Z(z0) + Z(z1)) / 2); x.fillStyle = '#f5ecd7'; } };
-    [4, 5, 6, 8, 9, 10].forEach(n => box(POINT_X[n] - .6, -3.4, POINT_X[n] + .6, -1.7, n === 6 ? 'SIX' : n === 9 ? 'NINE' : String(n), 70));
-    box(-4.3, -1.5, 3.3, 1.25, '');
-    x.font = '600 60px Limelight, serif'; x.fillText('FIELD', X(-.6), Z(-.2));
-    x.font = '500 44px "Chivo Mono", monospace'; x.fillText('2 · 3 · 4 · 9 · 10 · 11 · 12', X(-.6), Z(.55));
-    x.font = '600 34px Figtree, sans-serif'; x.fillText('2 PAYS DOUBLE   12 PAYS TRIPLE', X(-.6), Z(1.0));
-    box(-4.8, 1.3, 3.3, 1.9, "DON'T PASS BAR  ⚀⚀", 46);
-    box(-5.4, 1.95, 3.3, 2.75, 'PASS LINE', 64);
-    box(-1, 2.8, 1.5, 3.6, 'ODDS', 40);
-    box(2.1, -1.5, 5.5, -.7, 'ANY SEVEN  4 TO 1', 40, '#ff8a8a');
-    box(2.1, -.7, 5.5, .7, '', 40);
-    x.font = '600 34px Figtree, sans-serif'; x.fillText('HARD 4  7:1', X(2.75), Z(-.35)); x.fillText('HARD 6  9:1', X(4.45), Z(-.35)); x.fillText('HARD 8  9:1', X(2.75), Z(.35)); x.fillText('HARD 10  7:1', X(4.45), Z(.35));
-    box(4.1, .7, 5.5, 1.3, 'YO 11  15:1', 32);
-    box(2.1, 1.3, 5.5, 2.3, 'ANY CRAPS  7 TO 1', 36);
-    x.font = '400 120px Limelight, serif'; x.fillStyle = 'rgba(245,236,215,.12)'; x.fillText('HARBOR CRAPS', X(0), Z(-.2) + 330);
+    const X = v => (v + 8) / 16 * w, Z = v => (v + 4) / 8 * h, INK = '#f5ecd7';
+    x.strokeStyle = INK; x.fillStyle = INK; x.lineWidth = 5; x.textAlign = 'center'; x.textBaseline = 'middle';
+    const text = (s, cx, cz, size, font = 'Figtree, sans-serif', weight = 600, color = INK) => { x.fillStyle = color; x.font = `${weight} ${size}px ${font}`; x.fillText(s, X(cx), Z(cz)); x.fillStyle = INK; };
+    const box = (x0, z0, x1, z1, label, size = 40, font, color, fill) => {
+      if (fill) { x.fillStyle = fill; x.fillRect(X(x0), Z(z0), X(x1) - X(x0), Z(z1) - Z(z0)); x.fillStyle = INK; }
+      x.strokeRect(X(x0), Z(z0), X(x1) - X(x0), Z(z1) - Z(z0));
+      if (label) text(label, (x0 + x1) / 2, (z0 + z1) / 2, size, font, 600, color);
+    };
+    // numbers: lay strip / number / place / buy
+    for (const [n, cx] of Object.entries(CR_COLX)) {
+      const x0 = cx - .65, x1 = cx + .65;
+      box(x0, -3.95, x1, -3.45, 'LAY', 26, undefined, INK, 'rgba(0,0,0,.18)');
+      box(x0, -3.45, x1, -2.25, n === '6' ? 'SIX' : n === '9' ? 'NINE' : n, 78, 'Limelight, serif', '#ffe7b0');
+      box(x0, -2.25, x1, -1.75, 'PLACE', 26, undefined, INK, 'rgba(255,217,138,.1)');
+      box(x0, -1.75, x1, -1.3, 'BUY', 24);
+    }
+    box(-7.9, -3.95, -6.9, -1.3, '');
+    x.save(); x.translate(X(-7.4), Z(-2.62)); x.rotate(-Math.PI / 2); x.font = '600 40px Limelight, serif'; x.fillText("DON'T COME BAR", 0, 0); x.restore();
+    box(-7.9, -1.3, .9, -.35, 'COME', 70, 'Limelight, serif');
+    box(-6.9, -.35, .9, 1.0, '');
+    text('FIELD', -3, -.08, 58, 'Limelight, serif', 400);
+    text('2 · 3 · 4 · 9 · 10 · 11 · 12', -3, .38, 40, '"Chivo Mono", monospace', 500);
+    text('2 PAYS DOUBLE  ·  12 PAYS TRIPLE', -3, .78, 24);
+    box(-7.9, -.35, -6.9, .33, 'BIG 6', 30, 'Limelight, serif', '#ff9a9a');
+    box(-7.9, .33, -6.9, 1.0, 'BIG 8', 30, 'Limelight, serif', '#ff9a9a');
+    box(-7.9, 1.0, .9, 1.6, "DON'T PASS BAR  ⚀⚀", 38);
+    box(-7.9, 1.6, .9, 2.5, 'PASS LINE', 64, 'Limelight, serif');
+    box(-4.2, 2.5, -2.2, 3.3, 'ODDS', 30);
+    // props
+    const P0 = 1.4, P1 = 5.2, PM = 3.3;
+    box(P0, -3.95, P1, -3.35, 'SEVEN  4 TO 1', 34, 'Limelight, serif', '#ff8a8a', 'rgba(0,0,0,.15)');
+    box(P0, -3.35, PM, -2.65, 'HARD 6  9:1', 28); box(PM, -3.35, P1, -2.65, 'HARD 10  7:1', 28);
+    box(P0, -2.65, PM, -1.95, 'HARD 8  9:1', 28); box(PM, -2.65, P1, -1.95, 'HARD 4  7:1', 28);
+    [['1·2', '15:1'], ['1·1', '30:1'], ['6·6', '30:1'], ['5·6', '15:1']].forEach(([a, b], i) => { const x0 = P0 + i * .95; box(x0, -1.95, x0 + .95, -1.1, ''); text(a, x0 + .475, -1.66, 30, '"Chivo Mono", monospace', 500); text(b, x0 + .475, -1.33, 24); });
+    box(P0, -1.1, PM, -.4, 'HORN', 30); box(PM, -1.1, P1, -.4, 'C & E', 30);
+    box(P0, -.4, P1, .2, 'ANY CRAPS  7 TO 1', 30, 'Limelight, serif', '#ff8a8a', 'rgba(0,0,0,.15)');
+    x.font = '400 72px Limelight, serif'; x.fillStyle = 'rgba(245,236,215,.14)'; x.fillText('HARBOR', X(PM), Z(1.0)); x.fillText('CRAPS', X(PM), Z(1.75));
   });
   const table = new T.Mesh(new T.PlaneGeometry(16, 8), new T.MeshStandardMaterial({ map: felt, roughness: .92 }));
   table.rotation.x = -Math.PI / 2; table.receiveShadow = true; scene.add(table);
@@ -4543,52 +4740,113 @@ export function craps(host) {
   // puck
   const puckTex = on => canvasTex(256, 256, (x, w) => { x.fillStyle = on ? '#f5f1e8' : '#16161c'; x.beginPath(); x.arc(w / 2, w / 2, w / 2, 0, 7); x.fill(); x.fillStyle = on ? '#16161c' : '#f5f1e8'; x.font = '700 90px Figtree, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(on ? 'ON' : 'OFF', w / 2, w / 2 + 4); });
   const puckOn = new T.MeshStandardMaterial({ map: puckTex(true), roughness: .4 }), puckOff = new T.MeshStandardMaterial({ map: puckTex(false), roughness: .4 });
-  const puck = new T.Mesh(new T.CylinderGeometry(.42, .42, .12, 40), [new T.MeshStandardMaterial({ color: 0x999999 }), puckOff, puckOff]);
+  const puck = new T.Mesh(new T.CylinderGeometry(.3, .3, .1, 40), [new T.MeshStandardMaterial({ color: 0x999999 }), puckOff, puckOff]);
   puck.castShadow = true; scene.add(puck);
+  let puckAt = -1;
   const setPuck = (point, animate = true) => {
-    const to = point ? new T.Vector3(POINT_X[point], .08, -2.55) : new T.Vector3(-6.4, .08, -2.9);
+    if (point === puckAt) return Promise.resolve();
+    puckAt = point;
+    const to = point ? new T.Vector3(CR_COLX[point], .07, -3.12) : new T.Vector3(-7.4, .07, -3.6);
     puck.material[1] = point ? puckOn : puckOff;
     if (!animate) { puck.position.copy(to); return Promise.resolve(); }
     const from = puck.position.clone();
-    return S.tween(600, u => { puck.position.lerpVectors(from, to, easeInOut(u)); puck.position.y = .08 + Math.sin(u * Math.PI) * .8; });
+    return S.tween(600, u => { puck.position.lerpVectors(from, to, easeInOut(u)); puck.position.y = .07 + Math.sin(u * Math.PI) * .8; });
   };
-  // chip stacks for working bets
+  // chip stacks for every bet on the layout (odds ride on top of their base bet, offset a little)
   const chipMat = [0x6c7bd6, 0x1b8a5a, 0xd6283f, 0x1c1c24, 0x7b3fb3, 0xd19a1a].map(c => new T.MeshStandardMaterial({ color: c, roughness: .45, metalness: .05 }));
-  const chipGeo = new T.CylinderGeometry(.24, .24, .06, 28);
+  const chipGeo = new T.CylinderGeometry(.22, .22, .06, 28);
   const stacks = {};
+  const chipsFor = amt => Math.min(10, Math.max(1, Math.round(Math.log10(Math.max(1, amt)) * 2.5)));
+  let lastSig = '';
   function setStacks(bets) {
+    const sig = JSON.stringify(bets || {}); if (sig === lastSig) return; lastSig = sig;
     for (const k in stacks) { scene.remove(stacks[k]); delete stacks[k]; }
-    for (const [k, amt] of Object.entries(bets || {})) {
-      const spot = CRAPS_SPOTS[k]; if (!spot) continue;
-      const g = new T.Group(); let n = Math.min(12, Math.max(1, Math.round(Math.log10(amt) * 3)));
+    const entries = Object.entries(bets || {}).sort((a, b) => !!(CRAPS_SPOTS[a[0]] || [])[2] - !!(CRAPS_SPOTS[b[0]] || [])[2]);
+    for (const [k, amt] of entries) {
+      const spot = CRAPS_SPOTS[k]; if (!spot || !amt) continue;
+      const g = new T.Group(), n = chipsFor(amt);
       for (let i = 0; i < n; i++) { const c = new T.Mesh(chipGeo, chipMat[(i + k.length) % chipMat.length]); c.position.y = .035 + i * .062; c.rotation.y = i * .7; c.castShadow = true; g.add(c); }
-      g.position.set(spot[0], 0, spot[1]); scene.add(g); stacks[k] = g;
+      const base = spot[2] && bets[spot[2]] ? chipsFor(bets[spot[2]]) * .062 : 0;
+      g.position.set(spot[0], base, spot[1]); scene.add(g); stacks[k] = g;
     }
   }
   const d1 = makeDie('#c8102e'), d2 = makeDie('#c8102e');
   d1.position.set(-6, .31, 3.2); d2.position.set(-5.3, .31, 3.4); scene.add(d1, d2);
-  // back the camera off on tall/narrow screens so the whole table stays in frame
+
+  /* ── the bubble: a glass dome on a chrome pedestal behind the table ── */
+  const BUB = new T.Vector3(0, 0, -12), FLOOR = 1.02;
+  const bubble = new T.Group(); bubble.position.copy(BUB); scene.add(bubble);
+  const chrome = new T.MeshStandardMaterial({ color: 0xd9d4c7, metalness: .9, roughness: .22 });
+  const ped = new T.Mesh(new T.CylinderGeometry(2.3, 2.7, 1, 64), new T.MeshStandardMaterial({ color: 0x1b1f2e, metalness: .5, roughness: .35 }));
+  ped.position.y = .5; ped.receiveShadow = true; bubble.add(ped);
+  const deck = new T.Mesh(new T.CylinderGeometry(2.05, 2.05, .04, 64), new T.MeshStandardMaterial({ map: feltTex('#0f5a45', (x, w, h) => {
+    x.strokeStyle = '#f5ecd7'; x.lineWidth = 10; x.beginPath(); x.ellipse(w / 2, h / 2, w * .42, h * .42, 0, 0, 7); x.stroke();
+  }), roughness: .9 }));
+  deck.position.y = 1; deck.receiveShadow = true; bubble.add(deck);
+  const ring = new T.Mesh(new T.TorusGeometry(2.08, .07, 16, 96), chrome); ring.rotation.x = Math.PI / 2; ring.position.y = 1.02; bubble.add(ring);
+  const bulbs = [];
+  for (let i = 0; i < 28; i++) {
+    const a = i / 28 * Math.PI * 2, m = new T.Mesh(new T.SphereGeometry(.07, 12, 8), new T.MeshStandardMaterial({ color: 0xffd98a, emissive: 0xffb627, emissiveIntensity: 1 }));
+    m.position.set(Math.cos(a) * 2.52, .55, Math.sin(a) * 2.52); bubble.add(m); bulbs.push(m);
+  }
+  const glass = new T.Mesh(new T.SphereGeometry(2.02, 64, 32, 0, Math.PI * 2, 0, Math.PI / 2),
+    new T.MeshPhysicalMaterial({ color: 0xdff4ff, transparent: true, opacity: .16, roughness: .02, metalness: 0, clearcoat: 1, side: T.DoubleSide, depthWrite: false }));
+  glass.position.y = 1.02; bubble.add(glass);
+  const glint = new T.PointLight(0x9fe8ff, 30, 12); glint.position.set(-2.5, 4.5, 2.5); bubble.add(glint);
+  const b1 = makeDie('#c8102e'), b2 = makeDie('#c8102e');
+  b1.position.set(-.45, FLOOR + .31, .2); b2.position.set(.45, FLOOR + .31, -.2); bubble.add(b1, b2);
+  // air bubbles that rise while the dice are popping
+  const airMat = new T.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: .35, roughness: 0, clearcoat: 1, depthWrite: false });
+  const air = Array.from({ length: 26 }, () => { const m = new T.Mesh(new T.SphereGeometry(.05 + Math.random() * .07, 10, 8), airMat); m.visible = false; bubble.add(m); return m; });
+  let airOn = 0;
+  S.tick((dt, t) => {
+    bulbs.forEach((b, i) => { b.material.emissiveIntensity = .4 + .6 * (Math.sin(t * (airOn ? 12 : 2.5) - i * .7) * .5 + .5); });
+    air.forEach(m => {
+      if (!m.visible) { if (airOn && Math.random() < .12) { const a = Math.random() * 7, r = Math.random() * 1.6; m.position.set(Math.cos(a) * r, FLOOR + .05, Math.sin(a) * r); m.visible = true; } return; }
+      m.position.y += dt * (2.2 + m.geometry.parameters.radius * 10);
+      if (m.position.y > FLOOR + Math.sqrt(Math.max(0, 4 - m.position.x * m.position.x - m.position.z * m.position.z)) - .1) m.visible = false;
+    });
+  });
+
+  // cameras: back off on tall/narrow screens so the whole table stays in frame
   const zoom = () => Math.max(1, 1.7 / camera.aspect);
-  const camHome = { copy: v => v.set(-1.5 * zoom(), 10.5 * zoom(), 9.8 * zoom()), clone() { return this.copy(new T.Vector3()); } };
-  const look = new T.Vector3(.5, 0, .2);
-  let camTarget = camHome.clone(), lookTarget = look.clone();
-  camHome.copy(camera.position); camera.lookAt(look);
+  let mode = 'table';
+  const homes = {
+    table: { pos: () => new T.Vector3(-1.2 * zoom(), 10.8 * zoom(), 9.6 * zoom()), look: () => new T.Vector3(-.8, 0, -.2) },
+    bubble: { pos: () => new T.Vector3(BUB.x, 4.1 + zoom() * 1.3, BUB.z + 5.4 * zoom()), look: () => new T.Vector3(BUB.x, 1.35, BUB.z) },
+  };
+  let camTarget = homes.table.pos(), lookTarget = homes.table.look();
+  const look = lookTarget.clone();
+  camera.position.copy(camTarget); camera.lookAt(look);
+  const goHome = () => { camTarget = homes[mode].pos(); lookTarget = homes[mode].look(); };
   S.tick(dt => { camera.position.lerp(camTarget, 1 - Math.pow(.05, dt)); look.lerp(lookTarget, 1 - Math.pow(.05, dt)); camera.lookAt(look); });
 
   function throwDie(die, value, lane) {
-    const rest = new T.Vector3(4.3 + Math.random() * 1.8, .31, lane * 1.5 + (Math.random() - .5) * 1.2);
+    const rest = new T.Vector3(5.7 + Math.random() * 1.4, .31, lane * 1.6 + (Math.random() - .5) * 1.2);
     const start = new T.Vector3(-6.5, 1.6, 2.8 + lane * .3);
-    const hit1 = new T.Vector3(1 + Math.random() * 1.2, .31, lane * 1.1 + (Math.random() - .5));
-    const wallHit = new T.Vector3(7.35, .55, lane * 1.3 + (Math.random() - .5) * 1.5);
+    const hit1 = new T.Vector3(1.2 + Math.random() * 1.6, .31, lane * 1.1 + (Math.random() - .5));
+    const wallHit = new T.Vector3(7.4, .55, lane * 1.3 + (Math.random() - .5) * 1.5);
     const b2 = new T.Vector3(lerp(wallHit.x, rest.x, .55), .31, lerp(wallHit.z, rest.z, .5));
     const legs = [[start, hit1, 1.9, .34], [hit1, wallHit, 1.1, .28], [wallHit, b2, .55, .2], [b2, rest, .22, .18]];
+    return animateDie(die, value, legs, rest, 2200);
+  }
+  function popDie(die, value, side) {
+    // hop around inside the dome, then drop to the deck
+    const pt = (y0, y1) => { const a = Math.random() * Math.PI * 2, r = Math.random() * 1.15; return new T.Vector3(Math.cos(a) * r, FLOOR + y0 + Math.random() * (y1 - y0), Math.sin(a) * r); };
+    const rest = new T.Vector3(side * (.35 + Math.random() * .5), FLOOR + .31, (Math.random() - .5) * 1.1);
+    const pts = [die.position.clone(), pt(1.2, 2.2), pt(.4, 1.9), pt(1, 2.3), pt(.3, 1.6), pt(.6, 1.4), rest];
+    const legs = []; for (let i = 0; i < pts.length - 1; i++) legs.push([pts[i], pts[i + 1], i === pts.length - 2 ? .5 : .25, i === pts.length - 2 ? .3 : .16]);
+    return animateDie(die, value, legs, rest, 2300);
+  }
+  function animateDie(die, value, legs, rest, dur) {
     const fin = new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 1, 0), Math.random() * Math.PI * 2).multiply(FACE_UP[value]);
     const axis = new T.Vector3(Math.random() - .5, Math.random() - .5, Math.random() - .5).normalize();
     const total = legs.reduce((a, l) => a + l[3], 0);
-    return S.tween(reduce ? 1 : 2200, u => {
-      let tAcc = 0, t = u * total;
-      for (const [a, b, h, d] of legs) {
-        if (t <= tAcc + d || d === legs[legs.length - 1][3] && b === rest) {
+    return S.tween(reduce ? 1 : dur, u => {
+      let tAcc = 0; const t = u * total;
+      for (let i = 0; i < legs.length; i++) {
+        const [a, b, h, d] = legs[i];
+        if (t <= tAcc + d || i === legs.length - 1) {
           const v = clamp((t - tAcc) / d, 0, 1);
           die.position.set(lerp(a.x, b.x, v), lerp(a.y, b.y, v) + Math.sin(v * Math.PI) * h, lerp(a.z, b.z, v));
           break;
@@ -4603,17 +4861,27 @@ export function craps(host) {
   const NORMALS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].map(v => new T.Vector3(...v));
   const topFace = die => { let best = -2, val = 0; NORMALS.forEach((n, i) => { const y = n.clone().applyQuaternion(die.quaternion).y; if (y > best) { best = y; val = FACE_VALUES[i]; } }); return val; };
   host._g3d = {
-    tops: () => [topFace(d1), topFace(d2)],   // read-only: which faces are showing (used by tests)
-    setState(st) { setStacks(st.bets); setPuck(st.point || 0, false); },
+    tops: () => mode === 'bubble' ? [topFace(b1), topFace(b2)] : [topFace(d1), topFace(d2)],   // read-only, for tests
+    setState(st) { setStacks(st.bets); setPuck(st.point || 0, puckAt !== -1); },
+    setMode(m, animate = true) {
+      mode = m === 'bubble' ? 'bubble' : 'table'; goHome();
+      if (!animate) { camera.position.copy(camTarget); look.copy(lookTarget); }
+    },
     async roll(d) {
-      camTarget.set(1.5 * zoom(), 7.5 * zoom(), 7.5 * zoom()); lookTarget.set(4.5, 0, 0);
       api().rattle && api().rattle();
-      await Promise.all([throwDie(d1, d.dice[0], -.5), throwDie(d2, d.dice[1], .5)]);
+      if (mode === 'bubble') {
+        airOn = 1;
+        await Promise.all([popDie(b1, d.dice[0], -1), popDie(b2, d.dice[1], 1)]);
+        airOn = 0;
+      } else {
+        camTarget.set(2 * zoom(), 7.5 * zoom(), 7.5 * zoom()); lookTarget.set(5, 0, 0);
+        await Promise.all([throwDie(d1, d.dice[0], -.5), throwDie(d2, d.dice[1], .5)]);
+      }
       api().thud && api().thud();
       await sleep(350);
       setStacks(d.bets);
       await setPuck(d.point || 0);
-      camHome.copy(camTarget); lookTarget.set(.5, 0, .2);
+      goHome();
     },
   };
   host.classList.add('ready');
@@ -5729,17 +5997,61 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
 .g3d-bar .history{justify-content:flex-end}
 /* craps */
 .cr-controls{display:grid;gap:10px;justify-items:center;margin:6px 0 12px}
+.cr-bar-r{display:flex;align-items:center;gap:8px}
 .cr-point{font:700 .8rem var(--f-body);letter-spacing:.16em;padding:8px 14px;border-radius:999px;background:#16161c;color:#f5f1e8;border:2px solid #555}
 .cr-point.on{background:#f5f1e8;color:#16161c;border-color:#ffd98a;box-shadow:0 0 16px rgba(255,217,138,.6)}
-.cr-board{display:grid;gap:8px;padding:12px;border-radius:18px;background:radial-gradient(ellipse at 50% 0%,#17705f,var(--felt) 60%,var(--felt2));border:8px solid #5a3a1c}
-.cr-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
-.cr-spot{position:relative;display:grid;gap:2px;justify-items:center;padding:12px 6px;border-radius:12px;border:1px solid rgba(255,255,255,.35);background:rgba(0,0,0,.18);color:#fff;cursor:pointer;transition:transform .12s,box-shadow .15s}
-.cr-spot b{font:400 1.05rem var(--f-display)}.cr-spot small{font-size:.7rem;opacity:.8;text-align:center}
+.cr-hist{justify-content:flex-start}.cr-hist li{background:#1d3b33;border:1px solid rgba(255,255,255,.2);width:30px;height:30px}.cr-hist li.seven{background:var(--red)}
+.cr-hint{margin:0;font-size:.8rem;color:var(--muted);text-align:center}
+.cr-log{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px;justify-content:center;min-height:6px}
+.cr-log li{font:600 .75rem var(--f-body);padding:4px 10px;border-radius:999px;background:var(--card2,rgba(255,255,255,.08));border:1px solid rgba(255,255,255,.15);animation:pop .3s}
+.cr-log li.w{background:#1b8a5a;color:#fff;border-color:#4fe0a0}.cr-log li.l{opacity:.65;text-decoration:line-through}
+.cr-board{display:grid;gap:8px;padding:12px;border-radius:18px;background:radial-gradient(ellipse at 50% 0%,#17705f,var(--felt) 60%,var(--felt2));border:8px solid #5a3a1c;color:#fff}
+.cr-nums{display:grid;grid-template-columns:minmax(64px,.7fr) repeat(6,minmax(0,1fr));gap:6px}
+.cr-dcbar{display:grid}
+.cr-col{display:grid;gap:4px;grid-template-rows:auto auto auto auto auto auto;align-content:start;padding:4px;border-radius:12px;border:1px solid rgba(255,255,255,.25);background:rgba(0,0,0,.12)}
+.cr-col.pt{box-shadow:inset 0 0 0 2px #ffd98a,0 0 14px rgba(255,217,138,.35)}
+.cr-num{position:relative;display:grid;place-items:center;min-height:74px;padding:6px 2px;border-radius:10px;background:rgba(255,255,255,.06)}
+.cr-num>b{font:400 clamp(1.3rem,3vw,2rem) var(--f-display);color:#ffe7b0;text-shadow:0 2px 0 rgba(0,0,0,.4)}
+.cr-puck{position:absolute;left:4px;top:4px;display:none;width:26px;height:26px;border-radius:50%;background:#f5f1e8;color:#16161c;font:800 .55rem var(--f-body);place-items:center;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+.cr-col.pt .cr-puck{display:grid}
+.cr-cp{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;min-height:4px}
+.cr-tok{font:600 .64rem var(--f-mono);padding:3px 6px;border-radius:999px;border:0;background:radial-gradient(circle,#fff3cf 55%,#d19a1a 56%);color:#1a1204;cursor:default}
+.cr-tok.dc{background:radial-gradient(circle,#e8e8f0 55%,#1c1c24 56%);color:#16161c}
+.cr-tok.win,.cr-num.win{animation:winpulse .6s ease 4 alternate}
+.cr-spot{position:relative;display:grid;gap:2px;justify-items:center;align-content:center;padding:12px 6px;border-radius:12px;border:1px solid rgba(255,255,255,.35);background:rgba(0,0,0,.18);color:#fff;cursor:pointer;transition:transform .12s,box-shadow .15s,opacity .15s;font:inherit}
+.cr-spot b{font:400 1.05rem var(--f-display);line-height:1.1}.cr-spot small{font-size:.68rem;opacity:.8;text-align:center;line-height:1.2}
+.cr-spot.mini{padding:6px 2px;border-radius:8px}.cr-spot.mini b{font:700 .72rem var(--f-body);letter-spacing:.04em;text-transform:uppercase}.cr-spot.mini small{font-size:.6rem}
+.cr-spot.lay{background:rgba(0,0,0,.35)}.cr-spot.place{background:rgba(255,217,138,.12)}
+.cr-spot.odds{background:rgba(255,255,255,.05);border-style:dashed}
+.cr-spot.dark{background:rgba(0,0,0,.4)}.cr-spot.tall{height:100%}
+.cr-spot.gold{background:linear-gradient(180deg,rgba(255,217,138,.22),rgba(255,217,138,.06));border-color:#ffd98a}
+.cr-spot.red b{color:#ff9a9a}
+.cr-spot.big b{font-size:1.25rem;color:#ff9a9a}
 .cr-spot:hover:not(:disabled){box-shadow:inset 0 0 0 2px var(--gold2);transform:translateY(-1px)}
-.cr-spot:disabled{opacity:.35;cursor:not-allowed}
+.cr-spot:disabled{opacity:.45;cursor:not-allowed}
 .cr-spot.working{box-shadow:inset 0 0 0 2px rgba(255,217,138,.6)}
+.cr-spot.off::after{content:'OFF';position:absolute;left:4px;top:4px;font:800 .55rem var(--f-body);padding:2px 5px;border-radius:999px;background:#16161c;color:#f5f1e8;border:1px solid #777}
+.cr-spot.sel{box-shadow:inset 0 0 0 3px var(--coral),0 0 16px rgba(255,111,89,.55)}
+.cr-spot.win{animation:winpulse .6s ease 4 alternate}
 .cr-spot .stake{right:-4px;top:-10px;min-width:40px;height:26px;padding:0 8px;font-size:.66rem}
+.cr-spot.mini .stake{right:-2px;top:-8px;min-width:30px;height:22px;padding:0 5px;font-size:.6rem}
 .cr-spot .stake.add{background:radial-gradient(circle,#e6f5ec 55%,#1b8a5a 56%)}
+.cr-art{display:flex;gap:3px}.cr-art .die{width:20px;height:20px}
+.cr-row{display:grid;gap:8px}
+.cr-come{grid-template-columns:1fr}
+.cr-field{grid-template-columns:minmax(80px,.6fr) 3fr minmax(80px,.6fr)}
+.cr-line{grid-template-columns:1.1fr .8fr 2fr .8fr}
+.cr-props{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:8px;border-radius:14px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.2)}
+.cr-props .wide{grid-column:span 2}
+.cr-board.takedown{outline:3px dashed var(--coral);outline-offset:2px}
+@media (max-width:720px){
+  .cr-nums{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .cr-dcbar{grid-column:1/-1}.cr-spot.tall{height:auto}
+  .cr-field{grid-template-columns:1fr 1fr}.cr-field .wide{grid-column:1/-1;order:-1}
+  .cr-line{grid-template-columns:1fr 1fr}.cr-line .wide{grid-column:1/-1;order:-1}
+  .cr-props{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .cr-spot.mini b{font-size:.62rem;letter-spacing:0}
+}
 /* pusher */
 .pusher .g3d{cursor:crosshair;aspect-ratio:4/3;max-height:70vh}
 .pu-tally{margin:0;font-size:.9rem;color:var(--muted)}.pu-tally b{font-family:var(--f-mono);color:var(--ink)}
@@ -5750,7 +6062,7 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
 .vs-3d.ready canvas{opacity:1}
 .vs.cab3d .vs-3d{display:block}
 .vs.cab3d .vs-reels{visibility:hidden}
-@media (max-width:720px){.g3d{aspect-ratio:4/3}.cr-row{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:720px){.g3d{aspect-ratio:4/3}}
 .art-3d{font:800 .8rem var(--f-body);letter-spacing:.1em;padding:3px 8px;border-radius:6px;background:linear-gradient(90deg,#5fe0cf,#8c7ae6);color:#0b1020;align-self:flex-start}
 
 /* ═════ rooms: every classic game gets a night-time scene ═════ */
@@ -7210,62 +7522,167 @@ function init3d(root) {
   initCraps(root); initPusher(root); initCabinetToggle(root);
 }
 
-/* ── craps: its own chip rack, because line bets stay up between rolls ── */
+/* ── craps: its own chip rack, because most bets stay up between rolls ── */
 function initCraps(root) {
   const el = $('[data-craps]', root);
   if (!el || el.dataset.ready) return;
   el.dataset.ready = '1';
   let st = JSON.parse(el.dataset.state || '{"point":0,"bets":{}}');
-  const MAX = +el.dataset.max, host = $('[data-g3d]', el), board = $('[data-cr-board]', el);
+  if (!st.bets || Array.isArray(st.bets)) st.bets = {};
+  const MAX = +el.dataset.max, MIN = +el.dataset.min || 1, host = $('[data-g3d]', el), board = $('[data-cr-board]', el);
   const rollBtn = $('[data-cr-roll]', el), msg = $('[data-cr-msg]', el), pointEl = $('[data-cr-point]', el);
+  const tdBtn = $('[data-cr-td]', el), tdGo = $('[data-cr-td-go]', el), hint = $('[data-cr-hint]', el), log = $('[data-cr-log]', el);
+  const modeBtn = $('[data-cr-mode]', el), hist = $('[data-cr-hist]', el);
+  const NUMS = [4, 5, 6, 8, 9, 10], ODDSX = { 4: 3, 5: 4, 6: 5, 8: 5, 9: 4, 10: 3 };
+  const ONE = ['field', 'any7', 'anycraps', 'ace2', 'ace3', 'yo', 'twelve', 'horn', 'ce'];
   let chip = +(($('[data-chip][aria-checked="true"]', el) || {}).dataset || {}).chip || 10;
-  const pending = new Map();
-  let busy = false;
-  host.addEventListener('g3d-ready', () => host._g3d && host._g3d.setState(st));
-  $$('[data-chip]', el).forEach(c => c.addEventListener('click', () => { $$('[data-chip]', el).forEach(x => x.setAttribute('aria-checked', 'false')); c.setAttribute('aria-checked', 'true'); chip = +c.dataset.chip; }));
-  const allowed = k => (k === 'pass' || k === 'dontpass') ? !st.point : k === 'odds' ? !!st.point && !!(st.bets.pass) : true;
+  const pending = new Map(), sel = new Set();
+  let busy = false, td = false;
+  const g3 = () => host && host._g3d;
+  const label = k => { const b = board.querySelector(`.cr-spot[data-bet="${k}"] b`); const m = /^(d?come)(\d+)$/.exec(k); return b ? b.textContent : m ? (m[1] === 'come' ? 'Come ' : "Don't come ") + m[2] : k; };
+  const removable = k => !(k === 'pass' || k === 'come' || /^come\d+$/.test(k) || ONE.includes(k));
+  const offOnComeOut = k => /^(place|buy|lay|hard|comeodds)\d+$/.test(k) || k === 'big6' || k === 'big8';
+  const unit = k => k === 'horn' ? 4 : k === 'ce' ? 2 : 1;
+  // why a spot can't take chips right now ('' means it can)
+  function blocked(k) {
+    const b = st.bets, pt = st.point; let m;
+    if (k === 'pass' || k === 'dontpass') return pt ? 'Line bets go down on the come-out roll only.' : '';
+    if (k === 'come' || k === 'dontcome') return pt ? '' : 'Come and Don\'t Come need a point to be on.';
+    if (k === 'passodds') return pt && b.pass ? '' : 'Pass odds need a pass line bet (already rolled) and a point.';
+    if (k === 'dpodds') return pt && b.dontpass ? '' : 'Lay odds need a don\'t pass bet (already rolled) and a point.';
+    if ((m = /^comeodds(\d+)$/.exec(k))) return b['come' + m[1]] ? '' : `Come odds need a come bet sitting on ${m[1]}.`;
+    if ((m = /^dcomeodds(\d+)$/.exec(k))) return b['dcome' + m[1]] ? '' : `Lay odds need a don't come bet on ${m[1]}.`;
+    return '';
+  }
+  function cap(k) {
+    const b = st.bets; let m;
+    if (k === 'passodds') return Math.min(MAX * 10, (b.pass || 0) * ODDSX[st.point]);
+    if (k === 'dpodds') return Math.min(MAX * 10, (b.dontpass || 0) * 6);
+    if ((m = /^comeodds(\d+)$/.exec(k))) return Math.min(MAX * 10, (b['come' + m[1]] || 0) * ODDSX[m[1]]);
+    if ((m = /^dcomeodds(\d+)$/.exec(k))) return Math.min(MAX * 10, (b['dcome' + m[1]] || 0) * 6);
+    return MAX;
+  }
+  const merged = () => { const o = { ...st.bets }; pending.forEach((v, k) => { o[k] = (o[k] || 0) + v; }); return o; };
+  const selTotal = () => [...sel].reduce((a, k) => a + (st.bets[k] || 0), 0);
   function paint() {
     $$('.cr-spot', board).forEach(b => {
       const k = b.dataset.bet, w = st.bets[k] || 0, p = pending.get(k) || 0;
-      b.disabled = !allowed(k) && !w;
+      b.disabled = busy || (td ? !(w && removable(k)) : (!!blocked(k) && !w && !p));
       b.classList.toggle('working', !!w);
-      let badge = $('.stake', b); if (badge) badge.remove();
+      b.classList.toggle('off', !st.point && !!w && offOnComeOut(k));
+      b.classList.toggle('sel', td && sel.has(k));
+      const badge = $('.stake', b); if (badge) badge.remove();
       if (w || p) b.insertAdjacentHTML('beforeend', `<span class="stake${p ? ' add' : ''}">${fmt(w)}${p ? ' +' + fmt(p) : ''}</span>`);
+    });
+    NUMS.forEach(n => {
+      const col = board.querySelector(`[data-cr-num="${n}"]`);
+      col.classList.toggle('pt', st.point === n);
+      const toks = [];
+      if (st.bets['come' + n]) toks.push(`<span class="cr-tok" data-tok="come${n}" title="Come bet on ${n}${st.bets['comeodds' + n] ? ' with odds' : ''}">C ${fmt(st.bets['come' + n])}</span>`);
+      if (st.bets['dcome' + n]) toks.push(`<span class="cr-tok dc" data-tok="dcome${n}" title="Don't come behind ${n}">DC ${fmt(st.bets['dcome' + n])}</span>`);
+      $('[data-cr-cp]', col).innerHTML = toks.join('');
     });
     $('[data-cr-new]', el).textContent = fmt([...pending.values()].reduce((a, b) => a + b, 0));
     $('[data-cr-working]', el).textContent = fmt(Object.values(st.bets).reduce((a, b) => a + b, 0));
     pointEl.textContent = st.point ? 'POINT ' + st.point : 'COME-OUT';
     pointEl.classList.toggle('on', !!st.point);
-    rollBtn.disabled = busy || (!pending.size && !Object.keys(st.bets).length);
+    rollBtn.disabled = busy || td || (!pending.size && !Object.keys(st.bets).length);
+    board.classList.toggle('takedown', td);
+    tdBtn.setAttribute('aria-pressed', td ? 'true' : 'false');
+    tdBtn.textContent = td ? 'Cancel' : 'Take bets down';
+    tdBtn.disabled = busy || (!td && !Object.keys(st.bets).some(removable));
+    tdGo.hidden = !td; tdGo.disabled = busy || !sel.size;
+    tdGo.textContent = `Return ${fmt(selTotal())} GC`;
+    hint.textContent = td ? 'Tap the bets you want back, then press Return. Pass line and come bets are contract bets and have to ride.'
+      : 'Tap a spot to add your chip. Right-click or long-press to pull back chips you haven\'t rolled yet.';
+    if (g3()) g3().setState({ point: st.point, bets: merged() });
   }
+  $$('[data-chip]', el).forEach(c => c.addEventListener('click', () => { $$('[data-chip]', el).forEach(x => x.setAttribute('aria-checked', 'false')); c.setAttribute('aria-checked', 'true'); chip = +c.dataset.chip; }));
   board.addEventListener('click', e => {
-    const b = e.target.closest('[data-bet]'); if (!b || busy) return;
+    const b = e.target.closest('.cr-spot'); if (!b || busy) return;
     const k = b.dataset.bet;
-    if (!allowed(k)) { toast(k === 'odds' ? 'Odds need a pass line bet and a point.' : 'Line bets go down on the come-out roll.', 'err'); return; }
-    const cur = (pending.get(k) || 0) + (st.bets[k] || 0);
-    const cap = k === 'odds' ? Math.min(MAX * 3, (st.bets.pass || 0) * 3) : MAX;
-    if (cur + chip > cap) { toast(`Max ${fmt(cap)} GC on ${b.querySelector('b').textContent}.`, 'err'); return; }
-    pending.set(k, (pending.get(k) || 0) + chip);
+    if (td) {
+      if (!st.bets[k] || !removable(k)) return;
+      const pair = k === 'dontpass' ? 'dpodds' : /^dcome\d+$/.test(k) ? 'dcomeodds' + k.slice(5) : null;
+      if (sel.has(k)) sel.delete(k); else { sel.add(k); if (pair && st.bets[pair]) sel.add(pair); }
+      paint(); return;
+    }
+    const why = blocked(k); if (why) { toast(why, 'err'); return; }
+    const u = unit(k), cur = (pending.get(k) || 0) + (st.bets[k] || 0), c = cap(k);
+    let amt = Math.ceil(chip / u) * u;
+    if (cur + amt > c) amt = Math.floor((c - cur) / u) * u;   // odds: fill up to the max
+    if (amt < MIN || amt <= 0) { toast(`${label(k)} is maxed at ${fmt(c)} GC.`, 'err'); return; }
+    if ([...pending.values()].reduce((a, v) => a + v, 0) + amt > MAX * 10) { toast(`Table limit is ${fmt(MAX * 10)} GC of new chips per roll.`, 'err'); return; }
+    pending.set(k, (pending.get(k) || 0) + amt);
+    if (amt !== chip && u > 1) toast(`${label(k)} is split ${u} ways, so that's ${fmt(amt)} GC.`);
     paint();
   });
   board.addEventListener('contextmenu', e => { const b = e.target.closest('[data-bet]'); if (b) { e.preventDefault(); pending.delete(b.dataset.bet); paint(); } });
   $('[data-cr-clear]', el).addEventListener('click', () => { pending.clear(); paint(); });
-  rollBtn.addEventListener('click', async () => {
-    if (busy) return;
-    busy = true; paint(); msg.textContent = 'Dice are out…';
+  tdBtn.addEventListener('click', () => { td = !td; sel.clear(); if (td) pending.clear(); paint(); });
+  const flash = key => {
+    let t = board.querySelector(`.cr-spot[data-bet="${key}"]`);
+    const m = /^(d?come)(\d+)$/.exec(key);
+    if (!t && m) t = board.querySelector(`[data-cr-num="${m[2]}"] .cr-num`);
+    if (t) { t.classList.remove('win'); void t.offsetWidth; t.classList.add('win'); }
+  };
+  function showLog(events) {
+    log.innerHTML = events.map(ev => `<li class="${ev.win === true ? 'w' : ev.win === false ? 'l' : ''}">${ev.text.replace(/[<>&]/g, '')}</li>`).join('');
+  }
+  async function roll() {
+    busy = true; paint(); msg.textContent = 'Dice are out…'; log.innerHTML = '';
     const fd = new FormData();
     fd.append('bets', JSON.stringify([...pending].map(([key, amount]) => ({ key, amount }))));
+    const balEl = document.querySelector('[data-balance]'), before = balEl ? +balEl.dataset.balance : null;
+    const adding = [...pending.values()].reduce((a, b) => a + b, 0);
     try {
       const d = await post(playUrl('craps'), fd);
+      if (before !== null && adding) setBalance(Math.max(0, before - adding));
       pending.clear();
-      if (host._g3d) await host._g3d.roll(d);
+      if (g3()) await g3().roll(d);
       st = { point: d.point, bets: d.bets || {} };
       msg.textContent = d.message;
-      d.events.filter(ev => ev.win).forEach(ev => { const b = board.querySelector(`[data-bet="${ev.key}"]`); if (b) { b.classList.remove('win'); void b.offsetWidth; b.classList.add('win'); } });
+      showLog(d.events);
+      d.events.filter(ev => ev.win).forEach(ev => flash(ev.key));
+      if (hist && d.dice) {
+        const t = d.dice[0] + d.dice[1];
+        hist.insertAdjacentHTML('afterbegin', `<li class="${t === 7 ? 'seven' : ''}" title="${d.dice[0]}-${d.dice[1]}">${t}</li>`);
+        while (hist.children.length > 16) hist.lastElementChild.remove();
+      }
       if (d.payout) burst(msg, Math.min(24, 8 + Math.round(d.payout / 100)));
       setBalance(d.balance);
     } catch (err) { toast(err.message, 'err'); msg.textContent = err.message; }
     busy = false; paint();
+  }
+  rollBtn.addEventListener('click', () => { if (!busy) roll(); });
+  tdGo.addEventListener('click', async () => {
+    if (busy || !sel.size) return;
+    busy = true; paint();
+    const fd = new FormData(); fd.append('move', 'takedown'); fd.append('keys', [...sel].join(','));
+    try {
+      const d = await post(playUrl('craps'), fd);
+      st = { point: d.point, bets: d.bets || {} };
+      msg.textContent = d.message; setBalance(d.balance);
+      sel.clear(); td = false;
+    } catch (err) { toast(err.message, 'err'); }
+    busy = false; paint();
+  });
+  // Table / Bubble camera
+  let mode = 'table'; try { mode = localStorage.getItem('gt_crmode') === 'bubble' ? 'bubble' : 'table'; } catch (e) {}
+  const paintMode = () => { modeBtn.textContent = mode === 'bubble' ? 'Table view' : 'Bubble view'; modeBtn.setAttribute('aria-label', 'Switch to ' + modeBtn.textContent); };
+  modeBtn.addEventListener('click', () => {
+    if (busy || !g3()) return;
+    mode = mode === 'bubble' ? 'table' : 'bubble';
+    try { localStorage.setItem('gt_crmode', mode); } catch (e) {}
+    g3().setMode(mode); paintMode();
+  });
+  host.addEventListener('g3d-ready', () => {
+    if (!g3()) return;
+    g3().setMode(mode, false); modeBtn.hidden = false; paintMode(); paint();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.code !== 'Space' || !el.isConnected || /INPUT|TEXTAREA|SELECT|BUTTON/.test(document.activeElement.tagName)) return;
+    e.preventDefault(); if (!rollBtn.disabled) roll();
   });
   paint();
 }
@@ -7538,4 +7955,4 @@ JS;
 }
 
 /* ═════════════════════════ GO ═════════════════════════ */
-route();
+if (!defined('GT_NO_ROUTE')) { route(); }

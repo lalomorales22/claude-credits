@@ -25,7 +25,7 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | | **Tiki Tides** | tiki-bar luau, low volatility, free spins ×2 | 95.4% |
 | | **Calavera Fiesta** | Día de los Muertos, 12–24 free spins ×2 | 95.1% |
 | 3D Games | **Coronado Roulette 3D** | real 3D wheel: rotor, frets, a ball that orbits, drops and settles | 97.3% |
-| | **Harbor Craps** | new: pass/don't pass, true-odds, field, props, hardways, 3D dice | 98.6% pass |
+| | **Harbor Craps** | full bubble craps: line, come, 3-4-5× odds, place/buy/lay on every number, Big 6/8, field, hardways, horn, C&E, every prop; 3D table or glass bubble dome | 98.6% pass |
 | | **Pier Pusher** | boardwalk coin pusher in 3D | 95% |
 | | *3D slot cabinet* | a toggle on every themed slot: curved drum reels, chrome, chasing bulbs | same as slot |
 | Scratch & Keno | | | |
@@ -52,6 +52,10 @@ Every classic game has its own themed room: an animated night-time scene behind 
 ### 3D games
 
 These are real 3D gameplay, built with three.js r170 (MIT). three.js is embedded in `index.php` (gzip+base64) and served from `?action=asset`, so everything still works offline from a single file. The 3D module only loads on pages that need it. The server still decides every outcome and the scene is steered to it: the roulette ball is guided into the pocket the server picked, and the dice tumble and settle on the rolled faces (a browser test checks 40 of 40 throws). Without WebGL, the 2D controls still play every game.
+
+### Full craps
+
+Harbor Craps deals the whole menu, bubble-craps style. You get Pass and Don't Pass, and Come and Don't Come, which travel to their own number. Odds are 3-4-5× behind the line and come bets, and 6× when laying. Every number has Place, Buy and Lay. Big 6 and Big 8, the field and all four hardways are on the board. The props are Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E. Place, buy, lay, big, hardway and come-odds bets are OFF on the come-out, like at a real table. **Take bets down** pulls back anything that isn't a contract bet. The 3D view flips between a full table (every chip stack sits on its printed spot) and a glass bubble dome where air jets pop the dice. A CLI simulation of 80k rolls per bet matched the textbook house edges within noise.
 
 ### Slot Hall
 
