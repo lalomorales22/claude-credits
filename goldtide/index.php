@@ -13,7 +13,7 @@
 declare(strict_types=1);
 
 const APP_VERSION    = '1.0.0';
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 define('DATA_DIR', __DIR__ . '/data');
 define('DB_FILE',  DATA_DIR . '/app.sqlite');
 define('PW_FILE',  __DIR__ . '/admin_password.txt');
@@ -220,6 +220,15 @@ function install(PDO $pdo, bool $fresh): void {
         status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','done','void')),
         outcome TEXT, payout INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT '{}', $ts);
     CREATE UNIQUE INDEX IF NOT EXISTS ux_bj_one_active ON bj_hands(player_id) WHERE status = 'active';
+    CREATE TABLE IF NOT EXISTS rounds (
+        id INTEGER PRIMARY KEY,
+        player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+        game TEXT NOT NULL,
+        bet INTEGER NOT NULL CHECK (bet > 0),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','done','void')),
+        outcome TEXT, payout INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT '{}', $ts);
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_rounds_one_active ON rounds(player_id, game) WHERE status = 'active';
+    CREATE INDEX IF NOT EXISTS ix_rounds_player_game ON rounds(player_id, game, id DESC);
     CREATE TABLE IF NOT EXISTS promo_codes (
         id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK (length(code) BETWEEN 3 AND 32),
         coins INTEGER NOT NULL CHECK (coins > 0), max_uses INTEGER NOT NULL DEFAULT 0 CHECK (max_uses >= 0),
@@ -261,9 +270,7 @@ function install(PDO $pdo, bool $fresh): void {
     ] as $s) { $seed->execute($s); }
 
     $g = $pdo->prepare('INSERT OR IGNORE INTO games (slug, name, blurb, min_bet, max_bet, sort_order) VALUES (?,?,?,?,?,?)');
-    $g->execute(['slots', 'Sunset Reels', 'Three reels, five paylines, one very shiny sun.', 10, 5000, 1]);
-    $g->execute(['blackjack', 'Harbor Blackjack', 'Six decks, dealer stands on all 17s, blackjack pays 3:2.', 10, 5000, 2]);
-    $g->execute(['roulette', 'Coronado Roulette', 'Single-zero European wheel. Spread your chips.', 10, 5000, 3]);
+    foreach (GAME_REGISTRY as $slug => [$name, , $blurb, $sort]) { $g->execute([$slug, $name, $blurb, 10, 5000, $sort]); }
 
     if (!(int)$pdo->query('SELECT COUNT(*) FROM admins')->fetchColumn()) {
         $pw = substr(strtr(base64_encode(random_bytes(24)), '+/=', 'xyz'), 0, 24);
@@ -652,6 +659,610 @@ function roulette_spin(): array {
         'message' => "$n " . strtoupper($color) . ($payout ? ' · returned ' . coins($payout) . ' GC' : ' · house takes it')];
 }
 
+/* ═════════════════════════ GAME REGISTRY ═════════════════════════
+ * The lobby, nav, router, admin and seeding all read this list.
+ * [name, category, blurb, sort]
+ */
+const GAME_REGISTRY = [
+    'slots'      => ['Sunset Reels', 'reels', 'Three reels, five paylines, one very shiny sun.', 1],
+    'scratch'    => ['Sunset Scratchers', 'reels', 'Scratch nine spots. Match three prizes and it\'s yours.', 2],
+    'keno'       => ['Kelp Keno', 'reels', 'Pick up to ten of forty. Ten numbers wash ashore.', 3],
+    'roulette'   => ['Coronado Roulette', 'tables', 'Single-zero European wheel. Spread your chips.', 10],
+    'baccarat'   => ['Bayfront Baccarat', 'tables', 'Player, banker, or tie. The classic high-roller card game.', 11],
+    'sicbo'      => ['Surf Sic Bo', 'tables', 'Three dice, a whole board of bets. Big, small, triples.', 12],
+    'bigwheel'   => ['Boardwalk Big Six', 'tables', 'The carnival money wheel. Pick a number, watch it tick.', 13],
+    'crabs'      => ['Crab Crawl Derby', 'tables', 'Six crabs, one finish line. Longshots pay 20 to 1.', 14],
+    'blackjack'  => ['Harbor Blackjack', 'cards', 'Six decks, dealer stands on all 17s, blackjack pays 3:2.', 20],
+    'videopoker' => ['Boardwalk Poker', 'cards', 'Jacks or Better video poker. Hold, draw, hope for royals.', 21],
+    'threecard'  => ['Coastline 3-Card', 'cards', 'Three-card poker against the dealer, with a Pair Plus side bet.', 22],
+    'hilo'       => ['Tide Hi-Lo', 'cards', 'Higher or lower? Every right call grows the multiplier.', 23],
+    'crash'      => ['Tide Crash', 'arcade', 'The wave keeps rising until it breaks. Cash out before it does.', 30],
+    'plinko'     => ['Pier Plinko', 'arcade', 'Drop a pearl through twelve rows of pegs. Up to 170×.', 31],
+    'mines'      => ['Reef Mines', 'arcade', 'Twenty-five tiles, hidden urchins. Find pearls, cash out.', 32],
+    'dice'       => ['Lighthouse Dice', 'arcade', 'Set your odds, roll over or under. You pick the risk.', 33],
+];
+const GAME_CATEGORIES = [
+    'reels' => ['Reels & Scratchers', 'Spin it, scratch it, pick it.'],
+    'tables' => ['Table Games', 'Chips on the felt, just like the floor.'],
+    'cards' => ['Card Room', 'Beat the dealer, make the hand.'],
+    'arcade' => ['Boardwalk Arcade', 'Fast rounds, big multipliers, your call when to stop.'],
+];
+
+/* ═════════════════════════ ROUND PLUMBING ═════════════════════════
+ * Every new game writes a row to `rounds`. Multi-step games keep an 'active'
+ * row (one per player per game) with hidden state the browser never sees.
+ * All helpers must run inside tx().
+ */
+function st(?array $r): array { return $r ? (json_decode((string)$r['state'], true) ?: []) : []; }
+function bal(int $pid): int { return (int)val('SELECT balance FROM players WHERE id = ?', [$pid]); }
+function round_active(int $pid, string $game): ?array {
+    return row("SELECT * FROM rounds WHERE player_id = ? AND game = ? AND status = 'active'", [$pid, $game]);
+}
+function round_last(int $pid, string $game): ?array {
+    if (!empty($GLOBALS['gt_skip_last'])) { return null; }
+    return row("SELECT * FROM rounds WHERE player_id = ? AND game = ? AND status != 'void' ORDER BY id DESC LIMIT 1", [$pid, $game]);
+}
+function round_open(int $pid, string $game, int $bet, array $state): array {
+    move_coins($pid, -$bet, 'wager', $game);
+    q('INSERT INTO rounds (player_id, game, bet, state) VALUES (?,?,?,?)', [$pid, $game, $bet, json_encode($state)]);
+    return row('SELECT * FROM rounds WHERE id = ?', [(int)db()->lastInsertId()]);
+}
+function round_raise(array $r, int $more, string $why): array {
+    move_coins((int)$r['player_id'], -$more, 'wager', $r['game'], $why . ' #' . $r['id']);
+    q('UPDATE rounds SET bet = bet + ? WHERE id = ?', [$more, $r['id']]);
+    return row('SELECT * FROM rounds WHERE id = ?', [$r['id']]);
+}
+function round_save(array $r, array $state): array {
+    q("UPDATE rounds SET state = ?, updated_at = datetime('now') WHERE id = ?", [json_encode($state), $r['id']]);
+    return row('SELECT * FROM rounds WHERE id = ?', [$r['id']]);
+}
+function round_close(array $r, array $state, int $payout, string $outcome): array {
+    $pid = (int)$r['player_id'];
+    if ($payout > 0) { move_coins($pid, $payout, 'payout', $r['game'], 'round #' . $r['id'] . ' ' . $outcome); }
+    record_round($pid, (int)$r['bet'], $payout);
+    q("UPDATE rounds SET status = 'done', outcome = ?, payout = ?, state = ?, updated_at = datetime('now') WHERE id = ?",
+        [$outcome, $payout, json_encode($state), $r['id']]);
+    return row('SELECT * FROM rounds WHERE id = ?', [$r['id']]);
+}
+/** A game that's decided in one request: wager, settle, done. */
+function round_oneshot(int $pid, string $game, int $bet, int $payout, string $outcome, array $state): array {
+    return round_close(round_open($pid, $game, $bet, $state), $state, $payout, $outcome);
+}
+
+/** Chip-board games post [{key, amount}, ...]; the no-JS form posts one bet_key + amount. */
+function parse_bets(array $g, callable $valid): array {
+    $raw = $_POST['bets'] ?? null;
+    $bets = is_string($raw) && $raw !== '' ? json_decode($raw, true)
+        : [['key' => $_POST['bet_key'] ?? '', 'amount' => $_POST['amount'] ?? '']];
+    if (!is_array($bets) || !$bets) { fail('Put some chips down first.'); }
+    if (count($bets) > 40) { fail('Max 40 spots per round.'); }
+    $clean = []; $total = 0;
+    foreach ($bets as $b) {
+        $key = is_array($b) ? (string)($b['key'] ?? '') : '';
+        if (!$valid($key)) { fail('That bet isn\'t on this table.'); }
+        $amt = clamp_bet($b['amount'] ?? '', $g);
+        $clean[$key] = ($clean[$key] ?? 0) + $amt;
+        if ($clean[$key] > (int)$g['max_bet']) { fail('Max ' . coins((int)$g['max_bet']) . ' GC on one spot.'); }
+        $total += $amt;
+    }
+    if ($total > (int)$g['max_bet'] * 10) { fail('Table limit is ' . coins((int)$g['max_bet'] * 10) . ' GC per round.'); }
+    return [$clean, $total];
+}
+
+function shoe(int $decks): array {
+    $cards = [];
+    for ($d = 0; $d < $decks; $d++) {
+        foreach (['S', 'H', 'D', 'C'] as $s) {
+            foreach (['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'] as $r) { $cards[] = $r . $s; }
+        }
+    }
+    return csprng_shuffle($cards);
+}
+function csprng_shuffle(array $a): array {
+    for ($i = count($a) - 1; $i > 0; $i--) { $j = random_int(0, $i); [$a[$i], $a[$j]] = [$a[$j], $a[$i]]; }
+    return $a;
+}
+function card_rank(string $c): int { return ['A' => 14, 'K' => 13, 'Q' => 12, 'J' => 11][substr($c, 0, -1)] ?? (int)substr($c, 0, -1); }
+function card_suit(string $c): string { return substr($c, -1); }
+
+/* ── Lighthouse Dice: 1% edge at every setting ── */
+function dice_play(): array {
+    $p = require_playable(); $g = game_cfg('dice');
+    $bet = clamp_bet($_POST['bet'] ?? '', $g);
+    $dir = ($_POST['dir'] ?? 'under') === 'over' ? 'over' : 'under';
+    $t = $_POST['target'] ?? '';
+    if (!is_numeric($t)) { fail('Pick a target.'); }
+    $target = round((float)$t, 2);
+    $chance = $dir === 'under' ? $target : 100 - $target;
+    if ($chance < 2 || $chance > 95) { fail('Win chance has to be between 2% and 95%.'); }
+    $mult = floor(99 / $chance * 10000) / 10000;
+    $roll = random_int(0, 9999) / 100;
+    $win = $dir === 'under' ? $roll < $target : $roll > $target;
+    $payout = $win ? (int)floor($bet * $mult) : 0;
+    $pid = (int)$p['id'];
+    $r = tx(fn() => round_oneshot($pid, 'dice', $bet, $payout, $win ? 'win' : 'lose',
+        ['roll' => $roll, 'target' => $target, 'dir' => $dir, 'mult' => $mult, 'chance' => $chance]));
+    return ['roll' => $roll, 'win' => $win, 'payout' => $payout, 'balance' => bal($pid),
+        'message' => sprintf('Rolled %.2f · ', $roll) . ($win ? 'win +' . coins($payout) . ' GC' : 'miss')];
+}
+
+/* ── Pier Plinko: 12 rows, 13 buckets. RTP ≈ 99% on every risk level. ── */
+const PLINKO = [
+    'low'  => [10, 3, 1.6, 1.4, 1.1, 1, 0.5, 1, 1.1, 1.4, 1.6, 3, 10],
+    'med'  => [33, 11, 4, 2, 1.1, 0.6, 0.3, 0.6, 1.1, 2, 4, 11, 33],
+    'high' => [170, 24, 8.1, 2, 0.7, 0.2, 0.2, 0.2, 0.7, 2, 8.1, 24, 170],
+];
+function plinko_play(): array {
+    $p = require_playable(); $g = game_cfg('plinko');
+    $bet = clamp_bet($_POST['bet'] ?? '', $g);
+    $risk = (string)($_POST['risk'] ?? 'med');
+    if (!isset(PLINKO[$risk])) { $risk = 'med'; }
+    $path = []; for ($i = 0; $i < 12; $i++) { $path[] = random_int(0, 1); }
+    $slot = array_sum($path);
+    $mult = PLINKO[$risk][$slot];
+    $payout = (int)floor($bet * $mult);
+    $pid = (int)$p['id'];
+    tx(fn() => round_oneshot($pid, 'plinko', $bet, $payout, $mult . 'x', ['path' => $path, 'slot' => $slot, 'risk' => $risk, 'mult' => $mult]));
+    return ['path' => $path, 'slot' => $slot, 'mult' => $mult, 'payout' => $payout, 'win' => $payout > $bet,
+        'balance' => bal($pid), 'message' => $mult . '× · ' . ($payout ? '+' . coins($payout) . ' GC' : 'nothing back')];
+}
+
+/* ── Kelp Keno: 40 balls, 10 drawn. Every pick count returns ~94–96%. ── */
+const KENO_PAY = [
+    1 => [0, 3.8],
+    2 => [0, 1.1, 9],
+    3 => [0, 0, 3.5, 38],
+    4 => [0, 0, 2, 8.5, 83],
+    5 => [0, 0, 1.3, 4, 19, 250],
+    6 => [0, 0, 0.6, 3, 8, 65, 650],
+    7 => [0, 0, 0.7, 1.5, 4.5, 29, 175, 1500],
+    8 => [0, 0, 0, 1.7, 3.5, 14, 70, 500, 3500],
+    9 => [0, 0, 0, 0.8, 3.5, 8.5, 33, 170, 1300, 8000],
+    10 => [0, 0, 0, 0.9, 1.8, 5.5, 21, 90, 500, 3500, 15000],
+];
+function keno_play(): array {
+    $p = require_playable(); $g = game_cfg('keno');
+    $bet = clamp_bet($_POST['bet'] ?? '', $g);
+    $picks = $_POST['picks'] ?? [];
+    if (is_string($picks)) { $picks = explode(',', $picks); }
+    $picks = array_values(array_unique(array_map('intval', (array)$picks)));
+    $picks = array_values(array_filter($picks, fn($n) => $n >= 1 && $n <= 40));
+    if (!$picks || count($picks) > 10) { fail('Pick between 1 and 10 numbers.'); }
+    sort($picks);
+    $drawn = array_slice(csprng_shuffle(range(1, 40)), 0, 10);
+    $hits = array_values(array_intersect($picks, $drawn));
+    $mult = KENO_PAY[count($picks)][count($hits)];
+    $payout = (int)floor($bet * $mult);
+    $pid = (int)$p['id'];
+    tx(fn() => round_oneshot($pid, 'keno', $bet, $payout, count($hits) . '/' . count($picks),
+        ['picks' => $picks, 'drawn' => $drawn, 'hits' => $hits, 'mult' => $mult]));
+    return ['drawn' => $drawn, 'hits' => $hits, 'payout' => $payout, 'win' => $payout > $bet, 'balance' => bal($pid),
+        'message' => count($hits) . ' of ' . count($picks) . ' hit · ' . ($payout ? '+' . coins($payout) . ' GC' : 'no prize')];
+}
+
+/* ── Sunset Scratchers: fixed ticket, 9 spots, match 3. RTP 91%, ~24% of tickets win. ── */
+const SCRATCH_TIERS = [1000 => 10, 100 => 100, 25 => 400, 10 => 1500, 5 => 4000, 2 => 8000, 1 => 10000]; // mult => chance per 100k
+function scratch_play(): array {
+    $p = require_playable(); $g = game_cfg('scratch');
+    $bet = clamp_bet($_POST['bet'] ?? '', $g);
+    $roll = random_int(1, 100000); $win = 0; $acc = 0;
+    foreach (SCRATCH_TIERS as $m => $n) { $acc += $n; if ($roll <= $acc) { $win = $m; break; } }
+    // build a card consistent with the outcome: exactly one triple on a win, no triple on a loss
+    $vals = array_keys(SCRATCH_TIERS);
+    $spots = $win ? [$win, $win, $win] : [];
+    $count = $win ? [$win => 3] : [];
+    while (count($spots) < 9) {
+        $v = $vals[random_int(0, count($vals) - 1)];
+        if ($v === $win || ($count[$v] ?? 0) >= 2) { continue; }
+        $count[$v] = ($count[$v] ?? 0) + 1;
+        $spots[] = $v;
+    }
+    $spots = csprng_shuffle($spots);
+    $payout = $bet * $win;
+    $pid = (int)$p['id'];
+    tx(fn() => round_oneshot($pid, 'scratch', $bet, $payout, $win ? $win . 'x' : 'no match', ['spots' => $spots, 'win' => $win]));
+    return ['spots' => $spots, 'win' => $payout > 0, 'payout' => $payout, 'balance' => bal($pid),
+        'message' => $win ? 'Three ' . coins($bet * $win) . 's! +' . coins($payout) . ' GC' : 'No match this time.'];
+}
+
+/* ── Boardwalk Big Six: classic 54-stop money wheel ── */
+const BIGSIX = ['1' => [24, 1], '2' => [15, 2], '5' => [7, 5], '10' => [4, 10], '20' => [2, 20], 'anchor' => [1, 45], 'sun' => [1, 45]];
+function bigsix_wheel(): array {
+    static $w = null;
+    if ($w) { return $w; }
+    $w = array_fill(0, 54, null);
+    $order = BIGSIX; uasort($order, fn($a, $b) => $a[0] <=> $b[0]); // rarest first, spread evenly
+    $shift = 0;
+    foreach ($order as $sym => [$n]) {
+        for ($i = 0; $i < $n; $i++) {
+            $pos = (int)round($i * 54 / $n + $shift) % 54;
+            while ($w[$pos] !== null) { $pos = ($pos + 1) % 54; }
+            $w[$pos] = (string)$sym;
+        }
+        $shift += 3;
+    }
+    return $w;
+}
+function bigwheel_play(): array {
+    $p = require_playable(); $g = game_cfg('bigwheel');
+    [$bets, $total] = parse_bets($g, fn($k) => isset(BIGSIX[$k]));
+    $wheel = bigsix_wheel();
+    $idx = random_int(0, 53);
+    $hit = $wheel[$idx];
+    $payout = isset($bets[$hit]) ? $bets[$hit] * (BIGSIX[$hit][1] + 1) : 0;
+    $pid = (int)$p['id'];
+    tx(fn() => round_oneshot($pid, 'bigwheel', $total, $payout, $hit, ['index' => $idx, 'hit' => $hit, 'bets' => $bets]));
+    return ['index' => $idx, 'hit' => $hit, 'win_keys' => $payout ? [$hit] : [], 'payout' => $payout, 'win' => $payout > 0,
+        'balance' => bal($pid), 'message' => 'Landed on ' . ($hit === 'anchor' || $hit === 'sun' ? 'the ' . $hit : $hit) . ($payout ? ' · +' . coins($payout) . ' GC' : '')];
+}
+
+/* ── Surf Sic Bo ── */
+const SICBO_TOTALS = [4 => 60, 5 => 30, 6 => 17, 7 => 12, 8 => 8, 9 => 6, 10 => 6, 11 => 6, 12 => 6, 13 => 8, 14 => 12, 15 => 17, 16 => 30, 17 => 60];
+function sicbo_valid(string $k): bool {
+    if (in_array($k, ['small', 'big', 'any_triple'], true)) { return true; }
+    if (!preg_match('/^(total|single|double|triple):(\d+)$/', $k, $m)) { return false; }
+    $n = (int)$m[2];
+    return $m[1] === 'total' ? isset(SICBO_TOTALS[$n]) : $n >= 1 && $n <= 6;
+}
+function sicbo_returns(string $k, array $d): int {
+    $sum = array_sum($d); $triple = $d[0] === $d[1] && $d[1] === $d[2];
+    $cnt = array_count_values($d);
+    if ($k === 'small') { return !$triple && $sum >= 4 && $sum <= 10 ? 2 : 0; }
+    if ($k === 'big') { return !$triple && $sum >= 11 && $sum <= 17 ? 2 : 0; }
+    if ($k === 'any_triple') { return $triple ? 31 : 0; }
+    [$t, $n] = explode(':', $k); $n = (int)$n;
+    return match ($t) {
+        'total' => $sum === $n ? SICBO_TOTALS[$n] + 1 : 0,
+        'single' => ($cnt[$n] ?? 0) ? 1 + $cnt[$n] : 0,
+        'double' => ($cnt[$n] ?? 0) >= 2 ? 11 : 0,
+        'triple' => ($cnt[$n] ?? 0) === 3 ? 181 : 0,
+        default => 0,
+    };
+}
+function sicbo_play(): array {
+    $p = require_playable(); $g = game_cfg('sicbo');
+    [$bets, $total] = parse_bets($g, 'sicbo_valid');
+    $dice = [random_int(1, 6), random_int(1, 6), random_int(1, 6)];
+    $payout = 0; $wins = [];
+    foreach ($bets as $k => $amt) { $x = sicbo_returns($k, $dice); if ($x) { $payout += $amt * $x; $wins[] = $k; } }
+    $pid = (int)$p['id'];
+    tx(fn() => round_oneshot($pid, 'sicbo', $total, $payout, implode('-', $dice), ['dice' => $dice, 'bets' => $bets, 'wins' => $wins]));
+    return ['dice' => $dice, 'win_keys' => $wins, 'payout' => $payout, 'win' => $payout > $total, 'balance' => bal($pid),
+        'message' => implode(' · ', $dice) . ' = ' . array_sum($dice) . ($payout ? ' · returned ' . coins($payout) . ' GC' : '')];
+}
+
+/* ── Crab Crawl Derby: pays decimal odds, win chance ∝ 1/odds, RTP ≈ 93.9% on every crab ── */
+const CRABS = [
+    ['Pinchy', 3, '#ff6f59'], ['Sandy', 4, '#e8b64c'], ['Coral', 5, '#ff9fb2'],
+    ['Captain Clack', 7, '#2bb3a3'], ['Barnacle Bill', 11, '#8c7ae6'], ['Sir Scuttles', 21, '#6fd3ff'],
+];
+function crabs_play(): array {
+    $p = require_playable(); $g = game_cfg('crabs');
+    [$bets, $total] = parse_bets($g, fn($k) => (bool)preg_match('/^crab:[0-5]$/', $k));
+    $weights = array_map(fn($c) => intdiv(2310000, $c[1]), CRABS); // 2310000 divides evenly by 3,4,5,7,11,21
+    $roll = random_int(1, array_sum($weights)); $winner = 0;
+    foreach ($weights as $i => $w) { if ($roll <= $w) { $winner = $i; break; } $roll -= $w; }
+    $rest = csprng_shuffle(array_values(array_diff(range(0, 5), [$winner])));
+    $order = [$winner, ...$rest];
+    $payout = ($bets["crab:$winner"] ?? 0) * CRABS[$winner][1];
+    $pid = (int)$p['id'];
+    tx(fn() => round_oneshot($pid, 'crabs', $total, $payout, CRABS[$winner][0], ['order' => $order, 'bets' => $bets]));
+    return ['order' => $order, 'win_keys' => ["crab:$winner"], 'payout' => $payout, 'win' => $payout > 0, 'balance' => bal($pid),
+        'message' => CRABS[$winner][0] . ' wins!' . ($payout ? ' +' . coins($payout) . ' GC' : '')];
+}
+
+/* ── Bayfront Baccarat: 8 decks, standard tableau, banker pays 0.95, tie 8:1 ── */
+function bac_val(array $cards): int { $t = 0; foreach ($cards as $c) { $r = card_rank($c); $t += $r === 14 ? 1 : ($r >= 10 ? 0 : $r); } return $t % 10; }
+function baccarat_play(): array {
+    $p = require_playable(); $g = game_cfg('baccarat');
+    [$bets, $total] = parse_bets($g, fn($k) => in_array($k, ['player', 'banker', 'tie'], true));
+    $s = shoe(8);
+    $P = [array_pop($s)]; $B = [array_pop($s)]; $P[] = array_pop($s); $B[] = array_pop($s);
+    $order = ['P', 'B', 'P', 'B'];
+    $pv = bac_val($P); $bv = bac_val($B);
+    if ($pv < 8 && $bv < 8) {
+        $p3 = null;
+        if ($pv <= 5) { $P[] = $p3 = array_pop($s); $order[] = 'P'; }
+        $bv = bac_val($B);
+        if ($p3 === null) { $draw = $bv <= 5; }
+        else {
+            $x = card_rank($p3); $x = $x === 14 ? 1 : ($x >= 10 ? 0 : $x);
+            $draw = match (true) { $bv <= 2 => true, $bv === 3 => $x !== 8, $bv === 4 => $x >= 2 && $x <= 7,
+                $bv === 5 => $x >= 4 && $x <= 7, $bv === 6 => $x === 6 || $x === 7, default => false };
+        }
+        if ($draw) { $B[] = array_pop($s); $order[] = 'B'; }
+    }
+    $pv = bac_val($P); $bv = bac_val($B);
+    $res = $pv > $bv ? 'player' : ($bv > $pv ? 'banker' : 'tie');
+    $payout = 0;
+    if ($res === 'tie') { $payout += ($bets['tie'] ?? 0) * 9 + ($bets['player'] ?? 0) + ($bets['banker'] ?? 0); }
+    elseif ($res === 'player') { $payout += ($bets['player'] ?? 0) * 2; }
+    else { $payout += (int)floor(($bets['banker'] ?? 0) * 1.95); }
+    $pid = (int)$p['id'];
+    tx(fn() => round_oneshot($pid, 'baccarat', $total, $payout, $res, ['player' => $P, 'banker' => $B, 'order' => $order, 'pv' => $pv, 'bv' => $bv, 'result' => $res, 'bets' => $bets]));
+    return ['result' => $res, 'win_keys' => [$res], 'payout' => $payout, 'win' => $payout > $total, 'cards' => count($P) + count($B),
+        'balance' => bal($pid), 'message' => ($res === 'tie' ? 'Tie' : ucfirst($res) . ' wins') . " {$pv}–{$bv}" . ($payout ? ' · returned ' . coins($payout) . ' GC' : '')];
+}
+
+/* ── Poker hand evaluation ── */
+const VP_PAY = ['royal' => 800, 'straight_flush' => 50, 'four' => 25, 'full_house' => 9, 'flush' => 6, 'straight' => 4, 'three' => 3, 'two_pair' => 2, 'jacks' => 1];
+const VP_NAMES = ['royal' => 'Royal Flush', 'straight_flush' => 'Straight Flush', 'four' => 'Four of a Kind', 'full_house' => 'Full House',
+    'flush' => 'Flush', 'straight' => 'Straight', 'three' => 'Three of a Kind', 'two_pair' => 'Two Pair', 'jacks' => 'Jacks or Better'];
+function vp_eval(array $cards): ?string {
+    $r = array_map('card_rank', $cards); rsort($r);
+    $flush = count(array_unique(array_map('card_suit', $cards))) === 1;
+    $u = array_values(array_unique($r));
+    $straight = count($u) === 5 && ($u[0] - $u[4] === 4 || $u === [14, 5, 4, 3, 2]);
+    $c = array_count_values($r); arsort($c); $counts = array_values($c);
+    if ($straight && $flush) { return $r[0] === 14 && $r[4] === 10 ? 'royal' : 'straight_flush'; }
+    if ($counts[0] === 4) { return 'four'; }
+    if ($counts[0] === 3 && $counts[1] === 2) { return 'full_house'; }
+    if ($flush) { return 'flush'; }
+    if ($straight) { return 'straight'; }
+    if ($counts[0] === 3) { return 'three'; }
+    if ($counts[0] === 2 && $counts[1] === 2) { return 'two_pair'; }
+    if ($counts[0] === 2 && array_key_first($c) >= 11) { return 'jacks'; }
+    return null;
+}
+
+/* ── Boardwalk Poker (Jacks or Better 9/6, ~99.5% with perfect holds) ── */
+function videopoker_act(): array {
+    $p = require_playable(); $g = game_cfg('videopoker');
+    $pid = (int)$p['id']; $move = (string)($_POST['move'] ?? '');
+    $bet = $move === 'deal' ? clamp_bet($_POST['bet'] ?? '', $g) : 0;
+    $r = tx(function () use ($pid, $move, $bet) {
+        $r = round_active($pid, 'videopoker');
+        if ($move === 'deal') {
+            if ($r) { throw new DomainException('Finish this hand first: pick holds and draw.'); }
+            $deck = shoe(1);
+            $hand = array_splice($deck, 0, 5);
+            return round_open($pid, 'videopoker', $bet, ['deck' => $deck, 'hand' => $hand, 'held' => []]);
+        }
+        if ($move !== 'draw' || !$r) { throw new DomainException('Deal a hand first.'); }
+        $s = st($r);
+        $held = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['hold'] ?? [])), fn($i) => $i >= 0 && $i <= 4)));
+        foreach (range(0, 4) as $i) { if (!in_array($i, $held, true)) { $s['hand'][$i] = array_shift($s['deck']); } }
+        $s['held'] = $held; unset($s['deck']);
+        $hand = vp_eval($s['hand']);
+        $s['result'] = $hand;
+        return round_close($r, $s, $hand ? (int)$r['bet'] * VP_PAY[$hand] : 0, $hand ?? 'nothing');
+    });
+    $s = st($r);
+    $done = $r['status'] === 'done';
+    $name = $done ? ($s['result'] ? VP_NAMES[$s['result']] : 'No win') : (($h = vp_eval($s['hand'])) ? 'You\'re holding ' . VP_NAMES[$h] : 'Pick your holds');
+    return ['payout' => (int)$r['payout'], 'win' => (int)$r['payout'] > 0, 'balance' => bal($pid),
+        'message' => $done ? $name . ((int)$r['payout'] ? ' · +' . coins((int)$r['payout']) . ' GC' : '') : $name];
+}
+
+/* ── Coastline 3-Card ── */
+function tc_eval(array $cards): array {
+    $r = array_map('card_rank', $cards); rsort($r);
+    $flush = count(array_unique(array_map('card_suit', $cards))) === 1;
+    $straight = count(array_unique($r)) === 3 && ($r[0] - $r[2] === 2 || $r === [14, 3, 2]);
+    if ($r === [14, 3, 2]) { $r = [3, 2, 1]; }
+    $c = array_count_values($r);
+    if ($straight && $flush) { return [5, $r]; }
+    if (count($c) === 1) { return [4, $r]; }
+    if ($straight) { return [3, $r]; }
+    if ($flush) { return [2, $r]; }
+    if (count($c) === 2) { $pair = array_search(2, $c, true); $kick = array_search(1, $c, true); return [1, [$pair, $kick]]; }
+    return [0, $r];
+}
+const TC_NAMES = ['High card', 'Pair', 'Flush', 'Straight', 'Three of a Kind', 'Straight Flush'];
+const TC_PAIRPLUS = [5 => 40, 4 => 30, 3 => 6, 2 => 4, 1 => 1];
+const TC_ANTE_BONUS = [5 => 5, 4 => 4, 3 => 1];
+function tc_cmp(array $a, array $b): int { return [$a[0], ...$a[1]] <=> [$b[0], ...$b[1]]; }
+function threecard_act(): array {
+    $p = require_playable(); $g = game_cfg('threecard');
+    $pid = (int)$p['id']; $move = (string)($_POST['move'] ?? '');
+    $ante = 0; $pp = 0;
+    if ($move === 'deal') {
+        $ante = clamp_bet($_POST['bet'] ?? '', $g);
+        $ppRaw = trim((string)($_POST['pairplus'] ?? ''));
+        $pp = $ppRaw === '' || $ppRaw === '0' ? 0 : clamp_bet($ppRaw, $g);
+    }
+    $r = tx(function () use ($pid, $move, $ante, $pp) {
+        $r = round_active($pid, 'threecard');
+        if ($move === 'deal') {
+            if ($r) { throw new DomainException('Play or fold the hand you\'re holding first.'); }
+            $d = shoe(1);
+            return round_open($pid, 'threecard', $ante + $pp, ['player' => array_splice($d, 0, 3), 'dealer' => array_splice($d, 0, 3), 'ante' => $ante, 'pp' => $pp]);
+        }
+        if (!$r || !in_array($move, ['play', 'fold'], true)) { throw new DomainException('Deal a hand first.'); }
+        $s = st($r);
+        $pe = tc_eval($s['player']); $de = tc_eval($s['dealer']);
+        $pay = 0; $notes = [];
+        if ($s['pp'] && isset(TC_PAIRPLUS[$pe[0]])) { $pay += $s['pp'] * (TC_PAIRPLUS[$pe[0]] + 1); $notes[] = 'Pair Plus pays'; }
+        if ($move === 'fold') {
+            $s['folded'] = true;
+            $outcome = 'fold';
+        } else {
+            $r = round_raise($r, (int)$s['ante'], 'play bet');
+            $s['play'] = (int)$s['ante'];
+            if (isset(TC_ANTE_BONUS[$pe[0]])) { $pay += $s['ante'] * TC_ANTE_BONUS[$pe[0]]; $notes[] = 'Ante bonus'; }
+            $qual = $de[0] >= 1 || $de[1][0] >= 12;
+            $s['qualified'] = $qual;
+            if (!$qual) { $pay += $s['ante'] * 2 + $s['play']; $outcome = 'no_qualify'; }
+            else {
+                $cmp = tc_cmp($pe, $de);
+                if ($cmp > 0) { $pay += ($s['ante'] + $s['play']) * 2; $outcome = 'win'; }
+                elseif ($cmp === 0) { $pay += $s['ante'] + $s['play']; $outcome = 'push'; }
+                else { $outcome = 'lose'; }
+            }
+        }
+        $s['notes'] = $notes; $s['pe'] = $pe[0]; $s['de'] = $de[0];
+        return round_close($r, $s, $pay, $outcome);
+    });
+    $s = st($r);
+    $msg = match ($r['outcome']) {
+        null => 'You have ' . strtolower(TC_NAMES[tc_eval($s['player'])[0]]) . '. Play or fold?',
+        'fold' => 'Folded.', 'no_qualify' => 'Dealer doesn\'t qualify. Ante pays, play pushes.',
+        'win' => 'You beat the dealer!', 'push' => 'Push.', 'lose' => 'Dealer takes it.', default => '',
+    };
+    if (!empty($s['notes'])) { $msg .= ' ' . implode(' + ', $s['notes']) . '!'; }
+    return ['payout' => (int)$r['payout'], 'win' => (int)$r['payout'] > (int)$r['bet'], 'balance' => bal($pid), 'message' => $msg];
+}
+
+/* ── Tide Hi-Lo: infinite deck, 1% edge per call, ties count for you ── */
+function hilo_draw(): array { return ['r' => random_int(1, 13), 's' => ['S', 'H', 'D', 'C'][random_int(0, 3)]]; }
+function hilo_card(array $c): string { return [1 => 'A', 11 => 'J', 12 => 'Q', 13 => 'K'][$c['r']] ?? (string)$c['r']; }
+function hilo_odds(int $rank): array { return ['hi' => (14 - $rank) / 13, 'lo' => $rank / 13]; }
+function hilo_act(): array {
+    $p = require_playable(); $g = game_cfg('hilo');
+    $pid = (int)$p['id']; $move = (string)($_POST['move'] ?? '');
+    $bet = $move === 'start' ? clamp_bet($_POST['bet'] ?? '', $g) : 0;
+    $r = tx(function () use ($pid, $move, $bet) {
+        $r = round_active($pid, 'hilo');
+        if ($move === 'start') {
+            if ($r) { throw new DomainException('You\'ve got a run going. Cash out or keep calling.'); }
+            return round_open($pid, 'hilo', $bet, ['card' => hilo_draw(), 'mult' => 1.0, 'steps' => 0, 'trail' => []]);
+        }
+        if (!$r) { throw new DomainException('Start a run first.'); }
+        $s = st($r);
+        if ($move === 'skip') {
+            if (($s['skips'] ?? 0) >= 5) { throw new DomainException('Out of skips this run.'); }
+            $s['skips'] = ($s['skips'] ?? 0) + 1;
+            $s['trail'][] = ['card' => $s['card'], 'call' => 'skip'];
+            $s['card'] = hilo_draw();
+            return round_save($r, $s);
+        }
+        if ($move === 'cashout') {
+            if ($s['steps'] < 1) { throw new DomainException('Make at least one call before cashing out.'); }
+            return round_close($r, $s, (int)floor($r['bet'] * $s['mult']), 'cashout');
+        }
+        if ($move !== 'hi' && $move !== 'lo') { throw new DomainException('Unknown move.'); }
+        $pOdds = hilo_odds($s['card']['r'])[$move];
+        $next = hilo_draw();
+        $ok = $move === 'hi' ? $next['r'] >= $s['card']['r'] : $next['r'] <= $s['card']['r'];
+        $s['trail'][] = ['card' => $s['card'], 'call' => $move, 'ok' => $ok];
+        $s['card'] = $next;
+        if (!$ok) { return round_close($r, $s, 0, 'wrong'); }
+        $s['mult'] = min(5000, floor($s['mult'] * 0.99 / $pOdds * 10000) / 10000);
+        $s['steps']++;
+        if ($s['mult'] >= 5000) { return round_close($r, $s, (int)floor($r['bet'] * $s['mult']), 'max'); }
+        return round_save($r, $s);
+    });
+    $s = st($r);
+    $msg = $r['status'] === 'active' ? 'Run at ' . number_format($s['mult'], 2) . '× · worth ' . coins((int)floor($r['bet'] * $s['mult'])) . ' GC'
+        : ($r['outcome'] === 'wrong' ? 'Wrong call. The tide took it.' : 'Cashed out at ' . number_format($s['mult'], 2) . '× · +' . coins((int)$r['payout']) . ' GC');
+    return ['payout' => (int)$r['payout'], 'win' => (int)$r['payout'] > 0, 'balance' => bal($pid), 'message' => $msg];
+}
+
+/* ── Reef Mines: 5×5, you choose 1–24 urchins, 1% edge ── */
+function mines_mult(int $n, int $k): float {
+    $m = 0.99;
+    for ($i = 0; $i < $k; $i++) { $m *= (25 - $i) / (25 - $n - $i); }
+    return floor($m * 100) / 100;
+}
+function mines_act(): array {
+    $p = require_playable(); $g = game_cfg('mines');
+    $pid = (int)$p['id']; $move = (string)($_POST['move'] ?? '');
+    $bet = $move === 'start' ? clamp_bet($_POST['bet'] ?? '', $g) : 0;
+    $n = (int)($_POST['mines'] ?? 3);
+    if ($move === 'start' && ($n < 1 || $n > 24)) { fail('Pick 1 to 24 urchins.'); }
+    $r = tx(function () use ($pid, $move, $bet, $n) {
+        $r = round_active($pid, 'mines');
+        if ($move === 'start') {
+            if ($r) { throw new DomainException('Finish the reef you\'re on first.'); }
+            return round_open($pid, 'mines', $bet, ['n' => $n, 'mines' => array_slice(csprng_shuffle(range(0, 24)), 0, $n), 'open' => []]);
+        }
+        if (!$r) { throw new DomainException('Start a round first.'); }
+        $s = st($r);
+        if ($move === 'cashout') {
+            if (!$s['open']) { throw new DomainException('Flip at least one tile first.'); }
+            return round_close($r, $s, (int)floor($r['bet'] * mines_mult($s['n'], count($s['open']))), 'cashout');
+        }
+        $t = (int)($_POST['tile'] ?? -1);
+        if ($move !== 'reveal' || $t < 0 || $t > 24 || in_array($t, $s['open'], true)) { throw new DomainException('Pick a covered tile.'); }
+        if (in_array($t, $s['mines'], true)) { $s['boom'] = $t; return round_close($r, $s, 0, 'boom'); }
+        $s['open'][] = $t;
+        if (count($s['open']) === 25 - $s['n']) {
+            return round_close($r, $s, (int)floor($r['bet'] * mines_mult($s['n'], count($s['open']))), 'cleared');
+        }
+        return round_save($r, $s);
+    });
+    $s = st($r);
+    $k = count($s['open']);
+    $msg = match ($r['outcome']) {
+        null => $k ? $k . ' pearl' . ($k > 1 ? 's' : '') . ' · ' . number_format(mines_mult($s['n'], $k), 2) . '×. Keep going or cash out.' : 'Tap a tile.',
+        'boom' => 'Urchin! Ouch.', default => 'Cashed ' . number_format(mines_mult($s['n'], $k), 2) . '× · +' . coins((int)$r['payout']) . ' GC',
+    };
+    return ['payout' => (int)$r['payout'], 'win' => (int)$r['payout'] > 0, 'boom' => $r['outcome'] === 'boom', 'balance' => bal($pid), 'message' => $msg];
+}
+
+/* ── Tide Crash ──
+ * Crash point: P(crash ≥ m) = 0.99 / m, so any cash-out target returns 99%.
+ * The multiplier grows as e^(0.08·t) on SERVER time; the client only draws it.
+ */
+const CRASH_K = 0.08;
+function crash_point(): float {
+    $u = random_int(1, 100000000) / 100000000;
+    return max(1.0, min(1000.0, floor(99 / $u) / 100));
+}
+function crash_now(array $s): float { return floor(exp(CRASH_K * (microtime(true) - $s['start'])) * 100) / 100; }
+/** Settle a running round if time has already decided it. Returns the (maybe closed) round. */
+function crash_resolve(array $r, bool $cashout = false): array {
+    $s = st($r);
+    $m = crash_now($s);
+    if ($s['auto'] > 0 && $s['auto'] <= $s['crash'] && $m >= $s['auto']) {
+        $s['cashed'] = $s['auto'];
+        return round_close($r, $s, (int)floor($r['bet'] * $s['auto']), 'cashout');
+    }
+    if ($m >= $s['crash']) { return round_close($r, $s, 0, 'crashed'); }
+    if ($cashout) { $s['cashed'] = $m; return round_close($r, $s, (int)floor($r['bet'] * $m), 'cashout'); }
+    return $r;
+}
+function crash_act(): array {
+    $p = require_playable(); $g = game_cfg('crash');
+    $pid = (int)$p['id']; $move = (string)($_POST['move'] ?? 'peek');
+    $bet = 0; $auto = 0.0;
+    if ($move === 'launch') {
+        $bet = clamp_bet($_POST['bet'] ?? '', $g);
+        $a = trim((string)($_POST['auto'] ?? ''));
+        if ($a !== '') {
+            if (!is_numeric($a) || (float)$a < 1.01 || (float)$a > 1000) { fail('Auto cash-out has to be between 1.01× and 1000×.'); }
+            $auto = floor((float)$a * 100) / 100;
+        }
+    }
+    $r = tx(function () use ($pid, $move, $bet, $auto) {
+        $r = round_active($pid, 'crash');
+        if ($r) { $r = crash_resolve($r, $move === 'cashout'); }
+        if ($move === 'launch') {
+            if ($r && $r['status'] === 'active') { throw new DomainException('Your wave is still rolling.'); }
+            return round_open($pid, 'crash', $bet, ['start' => microtime(true), 'crash' => crash_point(), 'auto' => $auto]);
+        }
+        return $r ?? round_last($pid, 'crash');
+    });
+    if (!$r) { fail('Launch a wave first.'); }
+    $s = st($r);
+    $live = $r['status'] === 'active';
+    $out = ['live' => $live, 'id' => (int)$r['id'], 'payout' => (int)$r['payout'], 'win' => (int)$r['payout'] > 0, 'balance' => bal($pid)];
+    if ($live) {
+        $out += ['elapsed' => microtime(true) - $s['start'], 'm' => crash_now($s), 'auto' => $s['auto'], 'k' => CRASH_K, 'message' => 'Riding the wave…'];
+    } else {
+        $out += ['crash' => $s['crash'], 'cashed' => $s['cashed'] ?? null,
+            'message' => $r['outcome'] === 'crashed' ? 'Wave broke at ' . number_format($s['crash'], 2) . '×' : 'Cashed at ' . number_format($s['cashed'], 2) . '× · +' . coins((int)$r['payout']) . ' GC'];
+    }
+    return $out;
+}
+
+const GAME_ENGINES = [
+    'dice' => 'dice_play', 'plinko' => 'plinko_play', 'keno' => 'keno_play', 'scratch' => 'scratch_play',
+    'bigwheel' => 'bigwheel_play', 'sicbo' => 'sicbo_play', 'crabs' => 'crabs_play', 'baccarat' => 'baccarat_play',
+    'videopoker' => 'videopoker_act', 'threecard' => 'threecard_act', 'hilo' => 'hilo_act', 'mines' => 'mines_act', 'crash' => 'crash_act',
+];
+
+function play_game(): never {
+    csrf_check();
+    $slug = (string)($_GET['g'] ?? '');
+    $fn = GAME_ENGINES[$slug] ?? null;
+    if (!$fn) { fail('No such game.', 404); }
+    $r = $fn();
+    if (wants_json()) { $r['html'] = game_panel($slug); ok($r); }
+    flash(!empty($r['win']) ? 'ok' : 'info', $r['message'] ?? 'Done.');
+    redirect(url($slug));
+}
+
 /* ═════════════════════════ FREE COINS ═════════════════════════ */
 
 function daily_status(array $p): array {
@@ -927,7 +1538,7 @@ function entities(): array {
             'list' => ['id', 'slug', 'name', 'enabled', 'min_bet', 'max_bet', 'sort_order', 'updated_at'],
             'search' => ['slug', 'name'], 'filters' => ['enabled'],
             'fields' => [
-                'slug' => ['type' => 'enum', 'options' => ['slots', 'blackjack', 'roulette'], 'required' => true, 'hint' => 'Which engine this table runs'],
+                'slug' => ['type' => 'enum', 'options' => array_keys(GAME_REGISTRY), 'required' => true, 'hint' => 'Which engine this table runs'],
                 'name' => ['type' => 'text', 'required' => true, 'max' => 60],
                 'blurb' => ['type' => 'textarea', 'max' => 300],
                 'enabled' => ['type' => 'bool', 'default' => 1],
@@ -980,6 +1591,20 @@ function entities(): array {
                 'player_id' => ['type' => 'fk', 'ref' => 'players', 'label_col' => 'username', 'required' => true],
                 'bet' => ['type' => 'int', 'min' => 1, 'required' => true],
                 'status' => ['type' => 'enum', 'options' => ['active', 'done', 'void'], 'default' => 'done', 'hint' => 'Setting an active hand to void refunds its bet'],
+                'outcome' => ['type' => 'text', 'max' => 30],
+                'payout' => ['type' => 'int', 'min' => 0, 'default' => 0],
+                'state' => ['type' => 'json', 'default' => '{}'],
+            ],
+        ],
+        'rounds' => [
+            'label' => 'Game rounds', 'ops' => 'crud',
+            'list' => ['id', 'player_id', 'game', 'bet', 'status', 'outcome', 'payout', 'updated_at'],
+            'search' => ['game', 'outcome'], 'filters' => ['status'],
+            'fields' => [
+                'player_id' => ['type' => 'fk', 'ref' => 'players', 'label_col' => 'username', 'required' => true],
+                'game' => ['type' => 'text', 'required' => true, 'max' => 20],
+                'bet' => ['type' => 'int', 'min' => 1, 'required' => true, 'hint' => 'Total staked this round'],
+                'status' => ['type' => 'enum', 'options' => ['active', 'done', 'void'], 'default' => 'done', 'hint' => 'Setting an active round to void refunds its stake'],
                 'outcome' => ['type' => 'text', 'max' => 30],
                 'payout' => ['type' => 'int', 'min' => 0, 'default' => 0],
                 'state' => ['type' => 'json', 'default' => '{}'],
@@ -1173,6 +1798,10 @@ function do_admin_save(array $admin): void {
                     q('INSERT INTO ledger (player_id, kind, amount, balance_after, detail) VALUES (?,?,?,?,?)',
                         [$id, 'admin', $delta, $data['balance'], 'adjusted by ' . $admin['username']]);
                 }
+                if ($t === 'rounds' && $existing['status'] === 'active' && $data['status'] === 'void') {
+                    move_coins((int)$existing['player_id'], (int)$existing['bet'], 'admin', $existing['game'], 'voided round #' . $id . ' refund');
+                    q("UPDATE rounds SET outcome = 'void', payout = bet WHERE id = ?", [$id]);
+                }
                 if ($t === 'bj_hands' && $existing['status'] === 'active' && $data['status'] === 'void') {
                     move_coins((int)$existing['player_id'], (int)$existing['bet'], 'admin', 'blackjack', 'voided hand #' . $id . ' refund');
                     q("UPDATE bj_hands SET outcome = 'void', payout = bet WHERE id = ?", [$id]);
@@ -1259,7 +1888,7 @@ function do_admin_bulk(array $admin): void {
         [$field, $value] = [$m[1], $m[2]];
         $f = $e['fields'][$field] ?? null;
         $allowed = $f ? ($f['type'] === 'bool' ? ['0', '1'] : ($f['type'] === 'enum' ? $f['options'] : [])) : [];
-        if (!in_array($value, $allowed, true) || ($t === 'bj_hands' && $field === 'status')) { fail('That bulk change isn\'t supported.'); }
+        if (!in_array($value, $allowed, true) || (in_array($t, ['bj_hands', 'rounds'], true) && $field === 'status')) { fail('That bulk change isn\'t supported.'); }
         $n = tx(function () use ($t, $ids, $field, $value, $admin) {
             $n = 0;
             foreach ($ids as $id) {
@@ -1371,7 +2000,9 @@ function layout(string $title, string $body, string $mode = 'public'): void {
   </a>
   <?php if ($mode === 'public'): ?>
   <nav class="nav" aria-label="Main">
-    <?= $nav('', 'Lobby') ?><?= $nav('slots', 'Slots') ?><?= $nav('blackjack', 'Blackjack') ?><?= $nav('roulette', 'Roulette') ?><?= $nav('leaderboard', 'Leaders') ?>
+    <?= $nav('', 'Lobby') ?>
+    <?php foreach (GAME_CATEGORIES as $ck => [$cl]): $inCat = isset(GAME_REGISTRY[$act]) && GAME_REGISTRY[$act][1] === $ck; ?><a href="<?= h(url()) ?>#cat-<?= h($ck) ?>"<?= $inCat ? ' aria-current="page"' : '' ?>><?= h(['reels' => 'Reels', 'tables' => 'Tables', 'cards' => 'Cards', 'arcade' => 'Arcade'][$ck]) ?></a><?php endforeach; ?>
+    <?= $nav('leaderboard', 'Leaders') ?>
   </nav>
   <div class="me">
     <?php if ($p): ?>
@@ -1443,7 +2074,13 @@ function page_lobby(): void {
     $p = current_player();
     $games = q('SELECT * FROM games WHERE enabled = 1 ORDER BY sort_order, id')->fetchAll();
     $top = q("SELECT username, balance FROM players WHERE status = 'active' ORDER BY balance DESC, id LIMIT 5")->fetchAll();
-    $art = ['slots' => sym('seven') . sym('sun') . sym('seven'), 'blackjack' => card_html('AS') . card_html('KH'), 'roulette' => mini_wheel()];
+    $art = ['slots' => sym('seven') . sym('sun') . sym('seven'), 'blackjack' => card_html('AS') . card_html('KH'), 'roulette' => mini_wheel(),
+        'scratch' => sym('sun') . sym('bell') . sym('sun'), 'keno' => '<span class="art-balls"><b>7</b><b>19</b><b class="hot">23</b><b>31</b></span>',
+        'baccarat' => card_html('9D') . card_html('QS'), 'sicbo' => die_svg(3) . die_svg(5) . die_svg(6), 'bigwheel' => mini_wheel(),
+        'crabs' => crab_svg('#ff6f59') . crab_svg('#2bb3a3'), 'videopoker' => card_html('AH') . card_html('KH') . card_html('QH'),
+        'threecard' => card_html('7C') . card_html('8C') . card_html('9C'), 'hilo' => card_html('JD') . '<span class="art-arrows">▲<br>▼</span>',
+        'crash' => '<svg viewBox="0 0 120 80" class="art-wide"><path d="M4 76C40 74 80 56 112 8" stroke="#2bb3a3" stroke-width="5" fill="none" stroke-linecap="round"/><circle cx="112" cy="8" r="6" fill="#ff6f59"/><text x="8" y="30" font-family="Limelight,serif" font-size="22" fill="#ffd98a">4.20×</text></svg>',
+        'plinko' => game_icon('plinko'), 'mines' => game_icon('mines') . game_icon('mines'), 'dice' => die_svg(6) . die_svg(1)];
     ob_start(); ?>
 <section class="hero">
   <div class="sunburst" aria-hidden="true"></div>
@@ -1463,18 +2100,24 @@ function page_lobby(): void {
 
 <?php if ($p): echo bonus_strip($p); endif; ?>
 
-<section class="games" aria-label="Games">
-  <?php foreach ($games as $i => $g): ?>
-  <a class="game-card reveal d<?= min(6, $i + 2) ?> g-<?= h($g['slug']) ?>" href="<?= h(url($g['slug'])) ?>">
-    <div class="game-art" aria-hidden="true"><?= $art[$g['slug']] ?? '' ?></div>
-    <h2 class="display md"><?= h($g['name']) ?></h2>
+<?php $byCat = []; foreach ($games as $g) { $c = GAME_REGISTRY[$g['slug']][1] ?? 'arcade'; $byCat[$c][] = $g; } ?>
+<?php foreach (GAME_CATEGORIES as $ck => [$cl, $cd]): if (empty($byCat[$ck])) { continue; } ?>
+<section class="cat reveal d4" id="cat-<?= h($ck) ?>" aria-labelledby="cat-h-<?= h($ck) ?>">
+  <header class="cat-head"><h2 class="display md" id="cat-h-<?= h($ck) ?>"><?= h($cl) ?></h2><p class="muted"><?= h($cd) ?></p></header>
+  <div class="games">
+  <?php foreach ($byCat[$ck] as $i => $g): ?>
+  <a class="game-card g-<?= h($g['slug']) ?>" href="<?= h(url($g['slug'])) ?>">
+    <div class="game-art" aria-hidden="true"><?= $art[$g['slug']] ?? game_icon($g['slug']) ?></div>
+    <h3 class="display md"><?= h($g['name']) ?></h3>
     <p><?= h($g['blurb']) ?></p>
     <p class="limits"><?= coin_svg(14) ?> <?= coins((int)$g['min_bet']) ?>–<?= coins((int)$g['max_bet']) ?> GC</p>
     <span class="play">Play &rarr;</span>
   </a>
   <?php endforeach; ?>
-  <?php if (!$games): ?><p class="panel">All tables are closed for maintenance. Check back soon.</p><?php endif; ?>
+  </div>
 </section>
+<?php endforeach; ?>
+<?php if (!$games): ?><p class="panel">All tables are closed for maintenance. Check back soon.</p><?php endif; ?>
 
 <section class="panel mini-leaders reveal d5">
   <h2 class="display md">High rollers</h2>
@@ -1595,6 +2238,7 @@ function page_slots(): void {
     <p class="fine">Lines: middle, top, bottom, and both diagonals. Two cherries count from the left reel. Theoretical return ≈ 95%.</p>
   </aside>
 </section>
+<?= games_rail('slots') ?>
 <?php layout($g['name'], ob_get_clean());
 }
 
@@ -1661,6 +2305,7 @@ function page_blackjack(): void {
     </ul>
   </aside>
 </section>
+<?= games_rail('blackjack') ?>
 <?php layout($g['name'], ob_get_clean());
 }
 
@@ -1733,6 +2378,7 @@ function page_roulette(): void {
     <p class="fine">Right-click (or long-press) a spot to pull chips back off it.</p>
   </aside>
 </section>
+<?= games_rail('roulette') ?>
 <?php layout($g['name'], ob_get_clean());
 }
 
@@ -1898,6 +2544,519 @@ function page_rules(): void {
 <?php layout('How it works', ob_get_clean());
 }
 
+/* ═════════════════════════ GAME PANELS ═════════════════════════
+ * Each panel is rendered by the server from the round in the database, so the
+ * page works with no JS at all. With JS, the play endpoint hands back the fresh
+ * panel HTML and the script just swaps it in and animates.
+ */
+const GAME_RULES = [
+    'scratch' => ['Buy a ticket, scratch all nine spots.', 'Three matching prizes wins that prize. Only one triple per ticket.', 'Top prize is 1,000× the ticket. About 1 in 4 tickets wins something.'],
+    'keno' => ['Pick 1 to 10 numbers from 40.', 'Ten numbers are drawn. The more you catch, the more you win.', 'The paytable changes with how many you pick. Big picks, big jackpots.'],
+    'baccarat' => ['Bet on Player, Banker, or Tie. Closest to 9 wins.', 'Cards are worth face value, tens and faces are 0, aces are 1. Only the last digit counts.', 'Player pays 1:1, Banker pays 0.95:1, Tie pays 8:1 (and Player/Banker bets push on a tie).', 'Third cards follow the standard tableau. No decisions needed.'],
+    'sicbo' => ['Three dice are shaken. Bet on what they show.', 'Small (4–10) and Big (11–17) pay 1:1 but lose on any triple.', 'Totals pay 6:1 up to 60:1, doubles 10:1, any triple 30:1, a specific triple 180:1.', 'Single numbers pay 1:1 per die that shows it.'],
+    'bigwheel' => ['Put chips on the symbols you like, then spin.', '54 stops: 24×1, 15×2, 7×5, 4×10, 2×20, one anchor, one sun.', 'Numbers pay their face value to 1. The anchor and sun pay 45 to 1.'],
+    'crabs' => ['Back one crab or several.', 'Odds are fixed. Favorites win more often, longshots pay more.', 'Payout is your chip times the odds shown (it includes your chip).'],
+    'videopoker' => ['Deal five cards, tap the ones to hold, then draw.', 'Win on a pair of Jacks or better. Full paytable is on the machine.', 'With perfect holds this 9/6 paytable returns about 99.5%.'],
+    'threecard' => ['Place an Ante (and an optional Pair Plus), get three cards.', 'Play (matching your Ante) or fold. Dealer needs Queen-high to qualify.', 'Ante bonus pays on a straight or better no matter what the dealer has.', 'Pair Plus pays on your hand alone: pair 1:1 up to straight flush 40:1.'],
+    'hilo' => ['Call whether the next card is higher or lower.', 'Ties count as a win either way. Aces are low.', 'Every right call multiplies your run. Cash out any time after your first call.', 'Up to five skips per run if you don\'t like a card.'],
+    'crash' => ['Launch your wave. The multiplier climbs from 1.00×.', 'Cash out any time before the wave breaks to lock in that multiplier.', 'Set an auto cash-out so the server grabs it for you, even if your connection hiccups.', 'Any cash-out target returns 99% over time.'],
+    'plinko' => ['Drop a pearl. It bounces left or right off twelve rows of pegs.', 'Where it lands is your multiplier.', 'Higher risk means bigger edges and smaller middles. All three return about 99%.'],
+    'mines' => ['Choose how many urchins hide in the reef (1–24).', 'Flip tiles. Every pearl raises the multiplier, an urchin ends the round.', 'Cash out whenever you want. More urchins, faster growth.'],
+    'dice' => ['Slide to set your target, pick roll over or under.', 'The roll is 0.00–99.99. Lower chance, higher payout.', 'Multiplier = 99 ÷ win chance, so every setting has the same 1% edge.'],
+];
+
+function game_panel(string $slug): string {
+    $p = current_player();
+    $g = row('SELECT * FROM games WHERE slug = ?', [$slug]);
+    if (!$p || !$g) { return ''; }
+    $fresh = row('SELECT * FROM players WHERE id = ?', [$p['id']]);
+    try { return ('panel_' . $slug)($fresh, $g); }
+    catch (Throwable $e) {
+        // a hand-edited or legacy round shouldn't take the whole table down: log it, render a fresh table
+        error_log('[' . date('c') . "] panel $slug: " . $e->getMessage());
+        $GLOBALS['gt_skip_last'] = true;
+        try { return ('panel_' . $slug)($fresh, $g); } finally { unset($GLOBALS['gt_skip_last']); }
+    }
+}
+
+function play_url(string $slug): string { return url('play', ['g' => $slug]); }
+function play_form_open(string $slug, string $class = ''): string {
+    return '<form method="post" action="' . h(play_url($slug)) . '" data-play class="' . h($class) . '">' . csrf_field();
+}
+function bet_box(array $g, int $default, string $name = 'bet', string $label = 'Bet'): string {
+    $d = max((int)$g['min_bet'], min((int)$g['max_bet'], $default ?: 100));
+    return '<div class="betbox"><label>' . h($label) . ' <input type="number" name="' . h($name) . '" min="' . (int)$g['min_bet'] . '" max="' . (int)$g['max_bet']
+        . '" step="1" value="' . $d . '" inputmode="numeric" required></label><div class="bet-quick" role="group" aria-label="Adjust bet">'
+        . '<button type="button" data-adj="half">½</button><button type="button" data-adj="double">2×</button>'
+        . '<button type="button" data-adj="min">min</button><button type="button" data-adj="max">max</button></div></div>';
+}
+function result_line(string $msg, bool $win = false): string {
+    return '<p class="result after' . ($win ? ' win' : '') . '" aria-live="polite">' . h($msg) . '</p>';
+}
+function die_svg(int $n, string $cls = ''): string {
+    $pips = [1 => [[50, 50]], 2 => [[28, 28], [72, 72]], 3 => [[26, 26], [50, 50], [74, 74]], 4 => [[28, 28], [72, 28], [28, 72], [72, 72]],
+        5 => [[26, 26], [74, 26], [50, 50], [26, 74], [74, 74]], 6 => [[28, 24], [72, 24], [28, 50], [72, 50], [28, 76], [72, 76]]][$n] ?? [];
+    $s = '<svg class="die ' . h($cls) . '" viewBox="0 0 100 100" role="img" aria-label="die showing ' . $n . '"><rect x="4" y="4" width="92" height="92" rx="20" fill="#fffaf0" stroke="#e8b64c" stroke-width="4"/>';
+    foreach ($pips as [$x, $y]) { $s .= '<circle cx="' . $x . '" cy="' . $y . '" r="9" fill="' . ($n === 1 ? '#d6283f' : '#1b1a2e') . '"/>'; }
+    return $s . '</svg>';
+}
+function crab_svg(string $color): string {
+    return '<svg class="crab" viewBox="0 0 64 44" aria-hidden="true"><g fill="' . h($color) . '"><ellipse cx="32" cy="27" rx="17" ry="11"/>'
+        . '<path d="M14 22c-8-2-11-9-8-14 3 3 7 3 9 0 2 5 1 10-1 14zM50 22c8-2 11-9 8-14-3 3-7 3-9 0-2 5-1 10 1 14z"/>'
+        . '<path d="M17 31l-9 5M17 34l-7 8M47 31l9 5M47 34l7 8" stroke="' . h($color) . '" stroke-width="3" stroke-linecap="round"/></g>'
+        . '<circle cx="26" cy="16" r="4" fill="#fff"/><circle cx="38" cy="16" r="4" fill="#fff"/><circle cx="26.5" cy="16.5" r="2" fill="#111"/><circle cx="38.5" cy="16.5" r="2" fill="#111"/>'
+        . '<path d="M27 30q5 4 10 0" stroke="#111" stroke-width="2" fill="none" stroke-linecap="round"/></svg>';
+}
+
+/** Shared chip-board UI for multi-bet table games. $spots = [key => html label]. */
+function chipboard(string $slug, array $g, string $boardHtml, array $spots, string $go = 'Spin'): string {
+    $chips = '';
+    $first = true;
+    foreach ([10, 50, 100, 500, 1000] as $c) {
+        if ($c < (int)$g['min_bet'] || $c > (int)$g['max_bet']) { continue; }
+        $chips .= '<button type="button" class="chip c' . $c . '" role="radio" aria-checked="' . ($first ? 'true' : 'false') . '" data-chip="' . $c . '">' . ($c >= 1000 ? ($c / 1000) . 'K' : $c) . '</button>';
+        $first = false;
+    }
+    $opts = '';
+    foreach ($spots as $k => $l) { $opts .= '<option value="' . h($k) . '">' . h(strip_tags($l)) . '</option>'; }
+    return '<div class="cb" data-chipboard="' . h($slug) . '" data-min="' . (int)$g['min_bet'] . '" data-max="' . (int)$g['max_bet'] . '">'
+        . '<div class="cb-bar"><div class="chips" role="radiogroup" aria-label="Chip value">' . $chips . '</div>'
+        . '<p class="staked">On the table: <strong data-staked>0</strong> GC</p>'
+        . '<div class="rl-actions"><button type="button" class="btn gold lg" data-cb-go disabled>' . h($go) . '</button>'
+        . '<button type="button" class="btn ghost" data-cb-undo disabled>Undo</button><button type="button" class="btn ghost" data-cb-clear disabled>Clear</button>'
+        . '<button type="button" class="btn ghost" data-cb-rebet hidden>Rebet</button></div></div>'
+        . $boardHtml
+        . '<noscript>' . play_form_open($slug, 'panel form') . '<label>Bet on <select name="bet_key">' . $opts . '</select></label>'
+        . '<label>Amount <input type="number" name="amount" min="' . (int)$g['min_bet'] . '" max="' . (int)$g['max_bet'] . '" value="' . (int)$g['min_bet'] . '"></label>'
+        . '<button class="btn gold">' . h($go) . '</button></form></noscript></div>';
+}
+
+/* ── dice ── */
+function panel_dice(array $p, array $g): string {
+    $last = round_last((int)$p['id'], 'dice'); $s = st($last);
+    $target = $s['target'] ?? 50; $dir = $s['dir'] ?? 'under';
+    ob_start(); ?>
+<div class="dice-stage">
+  <div class="dice-readout after"><?php if ($last): ?><span class="big-num <?= $last['payout'] > 0 ? 'pos' : 'neg' ?>" data-roll="<?= h($s['roll']) ?>"><?= number_format($s['roll'], 2) ?></span><?php else: ?><span class="big-num">–</span><?php endif; ?></div>
+  <div class="dice-track <?= h($dir) ?>" style="--t:<?= (float)$target ?>%" data-track>
+    <div class="dice-zone"></div>
+    <?php if ($last): ?><div class="dice-marker after <?= $last['payout'] > 0 ? 'win' : 'lose' ?>" style="--r:<?= (float)$s['roll'] ?>%"><span><?= number_format($s['roll'], 2) ?></span></div><?php endif; ?>
+    <div class="dice-scale"><span>0</span><span>25</span><span>50</span><span>75</span><span>100</span></div>
+  </div>
+  <?= $last ? result_line(sprintf('Rolled %.2f · ', $s['roll']) . ($last['payout'] ? 'won ' . coins((int)$last['payout']) . ' GC' : 'miss'), $last['payout'] > 0) : '<p class="result">Set your odds and roll.</p>' ?>
+</div>
+<?= play_form_open('dice', 'controls stacked') ?>
+  <label class="slider">Target <input type="range" name="target" min="2" max="98" step="0.5" value="<?= h($target) ?>" data-dice-target></label>
+  <div class="seg" role="radiogroup" aria-label="Direction">
+    <label><input type="radio" name="dir" value="under" <?= $dir === 'under' ? 'checked' : '' ?> data-dice-dir> Roll under</label>
+    <label><input type="radio" name="dir" value="over" <?= $dir === 'over' ? 'checked' : '' ?> data-dice-dir> Roll over</label>
+  </div>
+  <div class="stat-row"><span>Win chance <b data-dice-chance>–</b></span><span>Pays <b data-dice-mult>–</b></span></div>
+  <?= bet_box($g, (int)($last['bet'] ?? 100)) ?>
+  <button class="btn gold xl">Roll</button>
+</form>
+<?php return ob_get_clean();
+}
+
+/* ── plinko ── */
+function panel_plinko(array $p, array $g): string {
+    $last = round_last((int)$p['id'], 'plinko'); $s = st($last);
+    $risk = $s['risk'] ?? 'med';
+    $svg = '<svg class="plinko-board" viewBox="0 0 600 540" data-plinko-board>';
+    for ($r = 0; $r < 12; $r++) {
+        for ($i = 0; $i < $r + 3; $i++) { $svg .= '<circle cx="' . (300 + ($i - ($r + 2) / 2) * 44) . '" cy="' . (40 + $r * 38) . '" r="4.5" class="peg"/>'; }
+    }
+    $svg .= '<circle class="ball" r="9" cx="300" cy="8" data-ball/></svg>';
+    ob_start(); ?>
+<div class="plinko-wrap" data-risks="<?= h(json_encode(PLINKO)) ?>" <?= $last ? 'data-path="' . h(json_encode($s['path'])) . '"' : '' ?>>
+  <?= $svg ?>
+  <div class="buckets" data-buckets>
+    <?php foreach (PLINKO[$risk] as $k => $m): ?><span class="bucket b<?= abs($k - 6) ?><?= $last && $s['slot'] === $k ? ' hit after' : '' ?>"><?= $m ?>×</span><?php endforeach; ?>
+  </div>
+  <?= $last ? result_line($s['mult'] . '× · ' . ($last['payout'] ? coins((int)$last['payout']) . ' GC back' : 'nothing back'), $last['payout'] > $last['bet']) : '<p class="result">Pick your risk and drop.</p>' ?>
+</div>
+<?= play_form_open('plinko', 'controls') ?>
+  <div class="seg" role="radiogroup" aria-label="Risk">
+    <?php foreach (['low' => 'Low', 'med' => 'Medium', 'high' => 'High'] as $k => $l): ?><label><input type="radio" name="risk" value="<?= $k ?>" <?= $risk === $k ? 'checked' : '' ?> data-risk> <?= $l ?></label><?php endforeach; ?>
+  </div>
+  <?= bet_box($g, (int)($last['bet'] ?? 100)) ?>
+  <button class="btn gold xl">Drop</button>
+</form>
+<?php return ob_get_clean();
+}
+
+/* ── keno ── */
+function panel_keno(array $p, array $g): string {
+    $last = round_last((int)$p['id'], 'keno'); $s = st($last);
+    $picks = $s['picks'] ?? []; $drawn = $s['drawn'] ?? []; $hits = $s['hits'] ?? [];
+    ob_start(); ?>
+<?= play_form_open('keno', 'keno-form') ?>
+<div class="keno-grid" data-keno>
+  <?php for ($n = 1; $n <= 40; $n++): $di = array_search($n, $drawn, true); ?>
+    <label class="kt<?= $di !== false ? ' drawn' : '' ?><?= in_array($n, $hits, true) ? ' hit' : '' ?>"<?= $di !== false ? ' style="--i:' . $di . '"' : '' ?>><input type="checkbox" name="picks[]" value="<?= $n ?>" <?= in_array($n, $picks, true) ? 'checked' : '' ?>><span><?= $n ?></span></label>
+  <?php endfor; ?>
+</div>
+<div class="keno-side">
+  <?= $last ? result_line(count($hits) . ' of ' . count($picks) . ' caught · ' . ($last['payout'] ? '+' . coins((int)$last['payout']) . ' GC' : 'no prize'), $last['payout'] > $last['bet']) : '<p class="result">Pick up to 10 numbers.</p>' ?>
+  <table class="data compact keno-pay" data-keno-pay="<?= h(json_encode(KENO_PAY)) ?>"><thead><tr><th>Catch</th><th class="n">Pays</th></tr></thead><tbody></tbody></table>
+  <div class="controls">
+    <button type="button" class="btn ghost sm" data-keno-quick>Quick pick</button>
+    <button type="button" class="btn ghost sm" data-keno-clear>Clear</button>
+  </div>
+  <?= bet_box($g, (int)($last['bet'] ?? 100)) ?>
+  <button class="btn gold xl wide">Draw</button>
+</div>
+</form>
+<?php return ob_get_clean();
+}
+
+/* ── scratchers ── */
+function panel_scratch(array $p, array $g): string {
+    $last = round_last((int)$p['id'], 'scratch'); $s = st($last);
+    $tickets = array_values(array_filter([10, 50, 100, 500, 1000, 5000], fn($t) => $t >= (int)$g['min_bet'] && $t <= (int)$g['max_bet']));
+    ob_start(); ?>
+<div class="ticket" data-ticket>
+  <div class="ticket-head"><span class="display md">Sunset Scratchers</span><span class="price"><?= $last ? coins((int)$last['bet']) . ' GC ticket' : 'Pick a ticket' ?></span></div>
+  <div class="spots">
+    <?php if ($last): foreach ($s['spots'] as $i => $v): ?>
+      <div class="spot<?= $s['win'] && $v === $s['win'] ? ' match' : '' ?>" data-spot="<?= $i ?>"><span class="prize"><?= coins((int)$last['bet'] * $v) ?></span><small>GC</small></div>
+    <?php endforeach; else: for ($i = 0; $i < 9; $i++): ?><div class="spot blank"><span class="prize">?</span></div><?php endfor; endif; ?>
+  </div>
+  <p class="ticket-foot">Match 3 like prizes to win that prize.</p>
+</div>
+<?= $last ? result_line($s['win'] ? 'Winner! ' . coins((int)$last['payout']) . ' GC' : 'No match this time.', $s['win'] > 0) : '<p class="result">Grab a ticket.</p>' ?>
+<?= play_form_open('scratch', 'controls') ?>
+  <?php foreach ($tickets as $t): ?><button class="btn <?= $t === ($last['bet'] ?? $tickets[0]) ? 'gold' : 'ghost' ?>" name="bet" value="<?= $t ?>"><?= coins($t) ?> GC ticket</button><?php endforeach; ?>
+</form>
+<button type="button" class="btn ghost sm reveal-all" data-reveal-all hidden>Reveal all</button>
+<?php return ob_get_clean();
+}
+
+/* ── big six ── */
+function panel_bigwheel(array $p, array $g): string {
+    $last = round_last((int)$p['id'], 'bigwheel'); $s = st($last);
+    $labels = ['1' => '1', '2' => '2', '5' => '5', '10' => '10', '20' => '20', 'anchor' => '⚓', 'sun' => '☀'];
+    $board = '<div class="bw-board" data-board>';
+    $spots = [];
+    foreach (BIGSIX as $k => [$n, $pay]) {
+        $k = (string)$k;
+        $board .= '<button type="button" class="bw-spot s-' . h($k) . ($last && $s['hit'] === $k ? ' win' : '') . '" data-bet="' . h($k) . '"><b>' . $labels[$k] . '</b><small>' . $pay . ' to 1</small></button>';
+        $spots[$k] = $labels[$k] . " ($pay to 1)";
+    }
+    $board .= '</div>';
+    ob_start(); ?>
+<div class="bw-stage">
+  <div class="wheel-box bw">
+    <div class="pointer" aria-hidden="true"></div>
+    <svg class="wheel" viewBox="-110 -110 220 220" data-bigwheel="<?= h(json_encode(bigsix_wheel())) ?>" <?= $last ? 'data-index="' . (int)$s['index'] . '"' : '' ?> aria-hidden="true"></svg>
+  </div>
+  <?= $last ? result_line('Landed on ' . $labels[$s['hit']] . ($last['payout'] ? ' · +' . coins((int)$last['payout']) . ' GC' : ''), $last['payout'] > 0) : '<p class="result">Chips on a symbol, then spin.</p>' ?>
+</div>
+<?= chipboard('bigwheel', $g, $board, $spots) ?>
+<?php return ob_get_clean();
+}
+
+/* ── sic bo ── */
+function panel_sicbo(array $p, array $g): string {
+    $last = round_last((int)$p['id'], 'sicbo'); $s = st($last);
+    $wins = $s['wins'] ?? [];
+    $spots = []; $b = '<div class="sb-board" data-board>';
+    $btn = function (string $k, string $label, string $cls = '') use (&$spots, $wins) {
+        $spots[$k] = $label;
+        return '<button type="button" class="sb ' . $cls . (in_array($k, $wins, true) ? ' win' : '') . '" data-bet="' . h($k) . '">' . $label . '</button>';
+    };
+    $b .= '<div class="sb-row sb-top">' . $btn('small', '<b>SMALL</b><small>4–10 · 1:1</small>', 'wide') . $btn('any_triple', '<b>ANY TRIPLE</b><small>30:1</small>', 'wide') . $btn('big', '<b>BIG</b><small>11–17 · 1:1</small>', 'wide') . '</div>';
+    $b .= '<div class="sb-row totals">';
+    foreach (SICBO_TOTALS as $t => $pay) { $b .= $btn("total:$t", '<b>' . $t . '</b><small>' . $pay . ':1</small>'); }
+    $b .= '</div><div class="sb-row faces">';
+    for ($n = 1; $n <= 6; $n++) { $b .= $btn("double:$n", die_svg($n, 'mini') . die_svg($n, 'mini') . '<small>10:1</small>'); }
+    for ($n = 1; $n <= 6; $n++) { $b .= $btn("triple:$n", die_svg($n, 'mini') . die_svg($n, 'mini') . die_svg($n, 'mini') . '<small>180:1</small>'); }
+    $b .= '</div><div class="sb-row singles">';
+    for ($n = 1; $n <= 6; $n++) { $b .= $btn("single:$n", die_svg($n, 'mid') . '<small>1:1 per die</small>'); }
+    $b .= '</div></div>';
+    ob_start(); ?>
+<div class="sb-stage">
+  <div class="dice-cup" data-dice>
+    <?php foreach ($s['dice'] ?? [3, 5, 6] as $i => $d): ?><?= die_svg((int)$d, 'big' . ($last ? ' tumble' : '')) ?><?php endforeach; ?>
+  </div>
+  <?= $last ? result_line(implode(' · ', $s['dice']) . ' = ' . array_sum($s['dice']) . ($last['payout'] ? ' · returned ' . coins((int)$last['payout']) . ' GC' : ''), $last['payout'] > $last['bet']) : '<p class="result">Place your bets, shake the dice.</p>' ?>
+</div>
+<?= chipboard('sicbo', $g, $b, $spots, 'Shake') ?>
+<?php return ob_get_clean();
+}
+
+/* ── crab derby ── */
+function panel_crabs(array $p, array $g): string {
+    $last = round_last((int)$p['id'], 'crabs'); $s = st($last);
+    $order = $s['order'] ?? null;
+    $spots = []; $track = '<div class="derby" data-derby' . ($order ? ' data-order="' . h(json_encode($order)) . '"' : '') . '>';
+    foreach (CRABS as $i => [$name, $odds, $color]) {
+        $place = $order ? array_search($i, $order, true) : null;
+        $pos = $order ? 100 - $place * 9 : 0;
+        $track .= '<div class="lane"><span class="lane-name">' . h($name) . '</span><div class="lane-track"><div class="runner" data-runner="' . $i . '" style="--x:' . $pos . '%">' . crab_svg($color)
+            . ($place === 0 ? '<span class="rosette">1st</span>' : '') . '</div></div></div>';
+    }
+    $track .= '<div class="finish" aria-hidden="true"></div></div>';
+    $board = '<div class="crab-board" data-board>';
+    foreach (CRABS as $i => [$name, $odds, $color]) {
+        $board .= '<button type="button" class="crab-spot' . ($order && $order[0] === $i ? ' win' : '') . '" data-bet="crab:' . $i . '" style="--c:' . h($color) . '">' . crab_svg($color) . '<b>' . h($name) . '</b><small>pays ' . $odds . '×</small></button>';
+        $spots["crab:$i"] = "$name ({$odds}×)";
+    }
+    $board .= '</div>';
+    ob_start(); ?>
+<?= $track ?>
+<?= $last ? result_line(CRABS[$order[0]][0] . ' wins!' . ($last['payout'] ? ' +' . coins((int)$last['payout']) . ' GC' : ''), $last['payout'] > 0) : '<p class="result">Back a crab and start the race.</p>' ?>
+<?= chipboard('crabs', $g, $board, $spots, 'Race') ?>
+<?php return ob_get_clean();
+}
+
+/* ── baccarat ── */
+function panel_baccarat(array $p, array $g): string {
+    $last = round_last((int)$p['id'], 'baccarat'); $s = st($last);
+    $res = $s['result'] ?? null;
+    $seq = function (string $side) use ($s) {
+        $out = ''; $n = 0; $pi = 0; $bi = 0;
+        foreach ($s['order'] ?? [] as $step => $who) {
+            if ($who === 'P') { if ($side === 'P') { $out .= card_html($s['player'][$pi], false, $step); } $pi++; }
+            else { if ($side === 'B') { $out .= card_html($s['banker'][$bi], false, $step); } $bi++; }
+        }
+        return $out;
+    };
+    $board = '<div class="bac-board" data-board>'
+        . '<button type="button" class="bac player' . ($res === 'player' ? ' win' : '') . '" data-bet="player"><b>PLAYER</b><small>1 to 1</small></button>'
+        . '<button type="button" class="bac tie' . ($res === 'tie' ? ' win' : '') . '" data-bet="tie"><b>TIE</b><small>8 to 1</small></button>'
+        . '<button type="button" class="bac banker' . ($res === 'banker' ? ' win' : '') . '" data-bet="banker"><b>BANKER</b><small>0.95 to 1</small></button></div>';
+    ob_start(); ?>
+<div class="felt bac-felt slow-deal">
+  <div class="bac-hands">
+    <div class="hand"><h2>Player <span class="total after"><?= $last ? (int)$s['pv'] : '' ?></span></h2><div class="cards"><?= $last ? $seq('P') : '' ?></div></div>
+    <div class="hand"><h2>Banker <span class="total after"><?= $last ? (int)$s['bv'] : '' ?></span></h2><div class="cards"><?= $last ? $seq('B') : '' ?></div></div>
+  </div>
+  <?= $last ? result_line(($res === 'tie' ? 'Tie' : ucfirst($res) . ' wins') . ' ' . $s['pv'] . '–' . $s['bv'] . ($last['payout'] ? ' · returned ' . coins((int)$last['payout']) . ' GC' : ''), $last['payout'] > $last['bet']) : '<p class="result">Bet Player, Banker, or Tie.</p>' ?>
+</div>
+<?= chipboard('baccarat', $g, $board, ['player' => 'Player', 'banker' => 'Banker', 'tie' => 'Tie'], 'Deal') ?>
+<?php return ob_get_clean();
+}
+
+/* ── video poker ── */
+function panel_videopoker(array $p, array $g): string {
+    $act = round_active((int)$p['id'], 'videopoker');
+    $r = $act ?? round_last((int)$p['id'], 'videopoker'); $s = st($r);
+    $live = (bool)$act;
+    $hitRow = !$live ? ($s['result'] ?? null) : null;
+    $mult = $r ? (int)$r['bet'] : max((int)$g['min_bet'], 100);
+    ob_start(); ?>
+<div class="vp-machine">
+  <table class="vp-pay"><tbody>
+    <?php foreach (VP_PAY as $k => $x): ?><tr class="<?= $hitRow === $k ? 'hit' : '' ?>"><td><?= h(VP_NAMES[$k]) ?></td><td class="n"><?= $x ?>×</td><td class="n"><?= coins($x * $mult) ?></td></tr><?php endforeach; ?>
+  </tbody></table>
+  <?= play_form_open('videopoker') ?>
+  <div class="vp-cards">
+    <?php if ($r): foreach ($s['hand'] as $i => $c): ?>
+      <label class="vp-card<?= !$live && in_array($i, $s['held'] ?? [], true) ? ' was-held' : '' ?>">
+        <?= card_html($c, false, $i) ?>
+        <?php if ($live): ?><input type="checkbox" name="hold[]" value="<?= $i ?>"><span class="hold-tag">HOLD</span><?php endif; ?>
+      </label>
+    <?php endforeach; else: for ($i = 0; $i < 5; $i++): ?><div class="vp-card"><?= card_html('', true, $i) ?></div><?php endfor; endif; ?>
+  </div>
+  <?php if ($live): ?>
+    <p class="result"><?= ($h = vp_eval($s['hand'])) ? 'Dealt: ' . h(VP_NAMES[$h]) . '. Pick holds.' : 'Tap cards to hold, then draw.' ?></p>
+    <div class="controls"><button class="btn gold xl" name="move" value="draw">Draw</button></div>
+  <?php else: ?>
+    <?= $r ? result_line(($s['result'] ? VP_NAMES[$s['result']] : 'No win') . ((int)$r['payout'] ? ' · +' . coins((int)$r['payout']) . ' GC' : ''), (int)$r['payout'] > 0) : '<p class="result">Place a bet and deal.</p>' ?>
+    <div class="controls"><?= bet_box($g, (int)($r['bet'] ?? 100)) ?><button class="btn gold xl" name="move" value="deal">Deal</button></div>
+  <?php endif; ?>
+  </form>
+</div>
+<?php return ob_get_clean();
+}
+
+/* ── three card poker ── */
+function panel_threecard(array $p, array $g): string {
+    $act = round_active((int)$p['id'], 'threecard');
+    $r = $act ?? round_last((int)$p['id'], 'threecard'); $s = st($r);
+    $live = (bool)$act;
+    ob_start(); ?>
+<div class="felt tc-felt">
+  <p class="felt-rule" aria-hidden="true">Dealer qualifies with Queen high</p>
+  <div class="hand dealer"><h2>Dealer <?php if ($r && !$live): ?><span class="total"><?= h(TC_NAMES[$s['de']]) ?></span><?php endif; ?></h2>
+    <div class="cards"><?php if ($r) { foreach ($s['dealer'] as $i => $c) { echo card_html($c, $live, $i + 3); } } ?></div></div>
+  <?php if ($r && !$live): ?>
+    <?= result_line(threecard_summary($r, $s), (int)$r['payout'] > (int)$r['bet']) ?>
+  <?php else: ?><p class="result"><?= $live ? 'You have ' . h(strtolower(TC_NAMES[tc_eval($s['player'])[0]])) . '. Play or fold?' : 'Ante up to deal.' ?></p><?php endif; ?>
+  <div class="hand player"><h2>You <?php if ($r): ?><span class="total"><?= h(TC_NAMES[tc_eval($s['player'])[0]]) ?></span><span class="bet-tag">Ante <?= coins((int)$s['ante']) ?><?= $s['pp'] ? ' · PP ' . coins((int)$s['pp']) : '' ?></span><?php endif; ?></h2>
+    <div class="cards"><?php if ($r) { foreach ($s['player'] as $i => $c) { echo card_html($c, false, $i); } } ?></div></div>
+  <?= play_form_open('threecard', 'controls') ?>
+  <?php if ($live): ?>
+    <button class="btn gold lg" name="move" value="play">Play (+<?= coins((int)$s['ante']) ?>)</button>
+    <button class="btn ghost lg" name="move" value="fold">Fold</button>
+  <?php else: ?>
+    <?= bet_box($g, (int)($s['ante'] ?? 100), 'bet', 'Ante') ?>
+    <label class="pp">Pair Plus <input type="number" name="pairplus" min="0" max="<?= (int)$g['max_bet'] ?>" step="1" value="<?= (int)($s['pp'] ?? 0) ?>" inputmode="numeric"></label>
+    <button class="btn gold lg" name="move" value="deal">Deal</button>
+  <?php endif; ?>
+  </form>
+</div>
+<?php return ob_get_clean();
+}
+function threecard_summary(array $r, array $s): string {
+    $m = match ($r['outcome']) {
+        'fold' => 'Folded.', 'no_qualify' => 'Dealer didn\'t qualify. Ante paid.', 'win' => 'You beat the dealer!', 'push' => 'Push.', 'lose' => 'Dealer wins.', default => '',
+    };
+    if (!empty($s['notes'])) { $m .= ' ' . implode(' + ', $s['notes']) . '!'; }
+    return $m . ((int)$r['payout'] ? ' Returned ' . coins((int)$r['payout']) . ' GC.' : '');
+}
+
+/* ── hi-lo ── */
+function panel_hilo(array $p, array $g): string {
+    $act = round_active((int)$p['id'], 'hilo');
+    $r = $act ?? round_last((int)$p['id'], 'hilo'); $s = st($r);
+    $live = (bool)$act;
+    $cardCode = fn(array $c) => hilo_card($c) . $c['s'];
+    ob_start(); ?>
+<div class="hilo-stage">
+  <div class="trail" aria-label="Previous cards">
+    <?php foreach (array_slice($s['trail'] ?? [], -8) as $t): ?>
+      <div class="trail-card <?= $t['call'] === 'skip' ? 'skipped' : (($t['ok'] ?? false) ? 'ok' : 'bad') ?>"><?= card_html($cardCode($t['card'])) ?><span><?= $t['call'] === 'skip' ? 'skip' : ($t['call'] === 'hi' ? '▲' : '▼') ?></span></div>
+    <?php endforeach; ?>
+  </div>
+  <div class="hilo-main"><?= $r ? card_html($cardCode($s['card'])) : card_html('', true) ?></div>
+  <?php if ($live): $o = hilo_odds($s['card']['r']); ?>
+    <p class="result">Run: <b><?= number_format($s['mult'], 2) ?>×</b> · worth <?= coins((int)floor($r['bet'] * $s['mult'])) ?> GC</p>
+    <?= play_form_open('hilo', 'controls') ?>
+      <button class="btn gold lg" name="move" value="hi">▲ Higher or same <small><?= round($o['hi'] * 100) ?>% · <?= number_format(0.99 / $o['hi'], 2) ?>×</small></button>
+      <button class="btn gold lg" name="move" value="lo">▼ Lower or same <small><?= round($o['lo'] * 100) ?>% · <?= number_format(0.99 / $o['lo'], 2) ?>×</small></button>
+      <button class="btn ghost" name="move" value="skip" <?= ($s['skips'] ?? 0) >= 5 ? 'disabled' : '' ?>>Skip (<?= 5 - ($s['skips'] ?? 0) ?>)</button>
+      <button class="btn coral lg" name="move" value="cashout" <?= $s['steps'] < 1 ? 'disabled' : '' ?>>Cash out</button>
+    </form>
+  <?php else: ?>
+    <?= $r ? result_line($r['outcome'] === 'wrong' ? 'Wrong call after ' . $s['steps'] . ' right. The tide took it.' : 'Cashed ' . number_format($s['mult'], 2) . '× · +' . coins((int)$r['payout']) . ' GC', (int)$r['payout'] > 0) : '<p class="result">Start a run.</p>' ?>
+    <?= play_form_open('hilo', 'controls') ?><?= bet_box($g, (int)($r['bet'] ?? 100)) ?><button class="btn gold xl" name="move" value="start">Start</button></form>
+  <?php endif; ?>
+</div>
+<?php return ob_get_clean();
+}
+
+/* ── mines ── */
+function panel_mines(array $p, array $g): string {
+    $act = round_active((int)$p['id'], 'mines');
+    $r = $act ?? round_last((int)$p['id'], 'mines'); $s = st($r);
+    $live = (bool)$act;
+    $open = $s['open'] ?? []; $n = (int)($s['n'] ?? 3);
+    ob_start(); ?>
+<div class="mines-stage">
+  <?= play_form_open('mines', 'reef') ?>
+  <input type="hidden" name="move" value="reveal">
+  <?php for ($i = 0; $i < 25; $i++):
+      $isOpen = in_array($i, $open, true);
+      $isMine = !$live && $r && in_array($i, $s['mines'] ?? [], true);
+      $cls = $isOpen ? 'pearl' : ($isMine ? 'urchin' . (($s['boom'] ?? -1) === $i ? ' boom' : ' ghost') : ''); ?>
+    <button class="reef-tile <?= $cls ?>" name="tile" value="<?= $i ?>" <?= !$live || $isOpen ? 'disabled' : '' ?> aria-label="Tile <?= $i + 1 ?><?= $isOpen ? ', pearl' : ($isMine ? ', urchin' : '') ?>"><?php if ($isOpen): ?><svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="12" fill="url(#pearl)"/></svg><?php elseif ($isMine): ?><svg viewBox="0 0 40 40"><g stroke="#2a1640" stroke-width="3" stroke-linecap="round"><path d="M20 3v34M3 20h34M8 8l24 24M32 8 8 32"/></g><circle cx="20" cy="20" r="10" fill="#4a2670"/></svg><?php endif; ?></button>
+  <?php endfor; ?>
+  <svg width="0" height="0" aria-hidden="true"><defs><radialGradient id="pearl" cx=".35" cy=".35"><stop offset="0" stop-color="#fff"/><stop offset=".6" stop-color="#f3e9ff"/><stop offset="1" stop-color="#c9b8e8"/></radialGradient></defs></svg>
+  </form>
+  <div class="mines-side">
+  <?php if ($live): $k = count($open); ?>
+    <p class="result">Pearls <?= $k ?> / <?= 25 - $n ?> · <b><?= number_format($k ? mines_mult($n, $k) : 1, 2) ?>×</b></p>
+    <p class="muted">Next pearl: <?= number_format(mines_mult($n, $k + 1), 2) ?>×</p>
+    <?= play_form_open('mines', 'controls') ?><button class="btn coral xl" name="move" value="cashout" <?= $k ? '' : 'disabled' ?>>Cash out <?= $k ? coins((int)floor($r['bet'] * mines_mult($n, $k))) : '' ?></button></form>
+  <?php else: ?>
+    <?= $r ? result_line($r['outcome'] === 'boom' ? 'Urchin! Round over.' : 'Cashed ' . number_format(mines_mult($n, count($open)), 2) . '× · +' . coins((int)$r['payout']) . ' GC', (int)$r['payout'] > 0) : '<p class="result">Pick your danger level.</p>' ?>
+    <?= play_form_open('mines', 'controls stacked') ?>
+      <label>Urchins <select name="mines"><?php foreach ([1, 2, 3, 5, 8, 10, 15, 20, 24] as $m): ?><option<?= $m === $n ? ' selected' : '' ?>><?= $m ?></option><?php endforeach; ?></select></label>
+      <?= bet_box($g, (int)($r['bet'] ?? 100)) ?>
+      <button class="btn gold xl" name="move" value="start">Dive in</button>
+    </form>
+  <?php endif; ?>
+  </div>
+</div>
+<?php return ob_get_clean();
+}
+
+/* ── crash ── */
+function panel_crash(array $p, array $g): string {
+    $act = round_active((int)$p['id'], 'crash');
+    if ($act) { $act = tx(fn() => crash_resolve($act)); if ($act['status'] !== 'active') { $act = null; } }
+    $r = $act ?? round_last((int)$p['id'], 'crash'); $s = st($r);
+    $live = (bool)$act;
+    $hist = q("SELECT state FROM rounds WHERE player_id = ? AND game = 'crash' AND status = 'done' ORDER BY id DESC LIMIT 12", [$p['id']])->fetchAll();
+    ob_start(); ?>
+<div class="crash-stage" data-crash <?= $live ? 'data-live="1" data-elapsed="' . h(microtime(true) - $s['start']) . '" data-auto="' . h($s['auto']) . '" data-bet="' . (int)$r['bet'] . '" data-k="' . CRASH_K . '"' : '' ?>>
+  <div class="crash-hist">
+    <?php foreach ($hist as $h): $c = (json_decode($h['state'], true)['crash'] ?? 1); ?><span class="<?= $c >= 2 ? 'hi' : 'lo' ?>"><?= number_format($c, 2) ?>×</span><?php endforeach; ?>
+  </div>
+  <svg class="crash-graph" viewBox="0 0 600 300" preserveAspectRatio="none" aria-hidden="true">
+    <defs><linearGradient id="waveg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#2bb3a3" stop-opacity=".55"/><stop offset="1" stop-color="#2bb3a3" stop-opacity="0"/></linearGradient></defs>
+    <path class="wave-fill" d="M0,300 L0,300 Z" fill="url(#waveg)" data-wave-fill/>
+    <path class="wave" d="M0,300" data-wave/>
+  </svg>
+  <div class="crash-mult <?= !$live && $r ? ($r['outcome'] === 'crashed' ? 'broke' : 'cashed') : '' ?>" data-mult>
+    <?php if ($live): ?>1.00×<?php elseif ($r): ?><?= number_format($s['crash'], 2) ?>×<?php else: ?>1.00×<?php endif; ?>
+  </div>
+  <?php if ($r && !$live): ?><?= result_line($r['outcome'] === 'crashed' ? 'Wave broke at ' . number_format($s['crash'], 2) . '×' . (isset($s['cashed']) ? '' : '') : 'You cashed at ' . number_format($s['cashed'], 2) . '× · +' . coins((int)$r['payout']) . ' GC · it broke at ' . number_format($s['crash'], 2) . '×', (int)$r['payout'] > 0) ?>
+  <?php else: ?><p class="result"><?= $live ? 'Riding the wave…' : 'Launch a wave.' ?></p><?php endif; ?>
+</div>
+<?= play_form_open('crash', 'controls') ?>
+<?php if ($live): ?>
+  <button class="btn coral xl" name="move" value="cashout" data-cashout>Cash out</button>
+  <button class="btn ghost" name="move" value="peek">Check wave</button>
+<?php else: ?>
+  <?= bet_box($g, (int)($r['bet'] ?? 100)) ?>
+  <label class="auto">Auto cash-out <input type="number" name="auto" min="1.01" max="1000" step="0.01" placeholder="off" value="<?= !empty($s['auto']) ? h($s['auto']) : '' ?>"></label>
+  <button class="btn gold xl" name="move" value="launch">Launch</button>
+<?php endif; ?>
+</form>
+<?php return ob_get_clean();
+}
+
+/* ═════════════════════════ GAME PAGES ═════════════════════════ */
+
+function games_rail(string $current): string {
+    $gs = q('SELECT slug, name FROM games WHERE enabled = 1 ORDER BY sort_order, id')->fetchAll();
+    $o = '<nav class="rail reveal d4" aria-label="More games"><span class="eyebrow">More games</span><div class="rail-list">';
+    foreach ($gs as $x) {
+        if (!isset(GAME_REGISTRY[$x['slug']])) { continue; }
+        $o .= '<a href="' . h(url($x['slug'])) . '"' . ($x['slug'] === $current ? ' aria-current="page"' : '') . '>' . game_icon($x['slug']) . '<span>' . h($x['name']) . '</span></a>';
+    }
+    return $o . '</div></nav>';
+}
+
+function game_icon(string $slug): string {
+    return match ($slug) {
+        'slots' => sym('seven'), 'scratch' => sym('sun'), 'keno' => sym('shell'), 'roulette' => mini_wheel(),
+        'baccarat' => '<span class="ico-card">B</span>', 'sicbo' => die_svg(5), 'bigwheel' => mini_wheel(), 'crabs' => crab_svg('#ff6f59'),
+        'blackjack' => '<span class="ico-card">A♠</span>', 'videopoker' => '<span class="ico-card red">K♥</span>', 'threecard' => '<span class="ico-card">3</span>',
+        'hilo' => '<span class="ico-card">▲▼</span>', 'crash' => '<svg viewBox="0 0 40 40"><path d="M3 34C14 33 24 26 36 6" stroke="#2bb3a3" stroke-width="4" fill="none" stroke-linecap="round"/><circle cx="36" cy="6" r="4" fill="#ff6f59"/></svg>',
+        'plinko' => '<svg viewBox="0 0 40 40"><g fill="#e8b64c"><circle cx="20" cy="8" r="2.5"/><circle cx="14" cy="16" r="2.5"/><circle cx="26" cy="16" r="2.5"/><circle cx="8" cy="24" r="2.5"/><circle cx="20" cy="24" r="2.5"/><circle cx="32" cy="24" r="2.5"/></g><circle cx="17" cy="33" r="4.5" fill="#fff"/></svg>',
+        'mines' => '<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="11" fill="#f3e9ff" stroke="#c9b8e8" stroke-width="2"/><circle cx="16" cy="16" r="3" fill="#fff"/></svg>',
+        'dice' => die_svg(6), default => '',
+    };
+}
+
+function page_game(string $slug): void {
+    $g = game_header($slug);
+    $p = current_player();
+    [$name, $cat, $blurb] = GAME_REGISTRY[$slug];
+    ob_start(); ?>
+<section class="table-wrap g-page g-<?= h($slug) ?>">
+  <header class="table-head reveal d1">
+    <p class="eyebrow"><a href="<?= h(url()) ?>#cat-<?= h($cat) ?>"><?= h(GAME_CATEGORIES[$cat][0]) ?></a></p>
+    <h1 class="display lg"><?= h($g['name']) ?></h1>
+    <p class="muted"><?= h($g['blurb']) ?> <span class="limits-inline"><?= coins((int)$g['min_bet']) ?>–<?= coins((int)$g['max_bet']) ?> GC</span></p>
+  </header>
+  <div class="game-stage reveal d2" data-panel="<?= h($slug) ?>">
+    <?php if ($p): ?><?= game_panel($slug) ?>
+    <?php else: ?><div class="gate"><div class="gate-art"><?= game_icon($slug) ?></div><p class="lead">Free account, <?= coins(isetting('starting_coins', 10000)) ?> Gold Coins, no card needed.</p><a class="btn gold lg" href="<?= h(url('register')) ?>">Sign up free to play</a> <a class="btn ghost lg" href="<?= h(url('login')) ?>">Log in</a></div><?php endif; ?>
+  </div>
+  <aside class="panel reveal d3 house-rules">
+    <h2 class="display md">How to play</h2>
+    <ul class="ticks"><?php foreach (GAME_RULES[$slug] ?? [] as $line): ?><li><?= h($line) ?></li><?php endforeach; ?></ul>
+  </aside>
+</section>
+<?= games_rail($slug) ?>
+<?php layout($g['name'], ob_get_clean());
+}
+
 /* ═════════════════════════ ADMIN PAGES ═════════════════════════ */
 
 function page_admin_login(): void {
@@ -2016,7 +3175,7 @@ function page_admin_list(array $admin): void {
     $keep = array_filter(array_intersect_key($_GET, array_flip(['t', 'q', 'from', 'to', 'per', 'sort', 'dir', ...$fkNames, ...array_map(fn($f) => "f_$f", $e['filters'])])), fn($v) => is_string($v) && $v !== '');
     $bulkSets = [];
     foreach ($e['fields'] as $n => $f) {
-        if (!can($e, 'u') || ($t === 'bj_hands' && $n === 'status')) { continue; }
+        if (!can($e, 'u') || (in_array($t, ['bj_hands', 'rounds'], true) && $n === 'status')) { continue; }
         if ($f['type'] === 'enum') { foreach ($f['options'] as $o) { $bulkSets["set:$n:$o"] = "Set $n → $o"; } }
         if ($f['type'] === 'bool') { $bulkSets["set:$n:1"] = "Set $n → yes"; $bulkSets["set:$n:0"] = "Set $n → no"; }
     }
@@ -2249,6 +3408,7 @@ function route(): void {
         'play_slots' => fn() => play('slots_spin', 'slots'),
         'play_blackjack' => fn() => play('blackjack_act', 'blackjack'),
         'play_roulette' => fn() => play('roulette_spin', 'roulette'),
+        'play' => fn() => play_game(),
         'claim_daily' => fn() => play('claim_daily', ''),
         'claim_refill' => fn() => play('claim_refill', ''),
         'redeem' => fn() => play('redeem_promo', ''),
@@ -2284,6 +3444,7 @@ function route(): void {
         'admin_export' => fn() => do_admin_export(require_admin()),
     ];
 
+    foreach (array_keys(GAME_ENGINES) as $slug) { $getRoutes[$slug] = fn() => page_game($slug); }
     if ($post && isset($postRoutes[$action])) { $postRoutes[$action](); return; }
     if (!$post && isset($getRoutes[$action])) { $getRoutes[$action](); return; }
     if (isset($postRoutes[$action]) || isset($getRoutes[$action])) {
@@ -2678,6 +3839,238 @@ dl.detail pre{margin:0;font:.8rem/1.5 var(--f-mono);white-space:pre-wrap;max-hei
 .foot{border-top:1px solid var(--line);padding:26px clamp(16px,4vw,48px) 40px;max-width:1280px;margin:0 auto;text-align:center}
 .foot .partner{font-family:var(--f-display);color:var(--gold-text);font-size:1rem}
 
+/* ═════ lobby categories + rail ═════ */
+.cat{margin-bottom:calc(var(--gap)*1.6);scroll-margin-top:90px}
+.cat-head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:12px;border-bottom:1px solid var(--line);padding-bottom:8px}
+.cat-head h2{margin:0;font-size:1.8rem}.cat-head p{margin:0}
+.games{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
+.game-card h3{margin:.3em 0 .2em;font-size:1.35rem;color:var(--gold-text)}
+.game-art .die{width:52px;height:52px}.game-art .die+.die{transform:rotate(12deg)}
+.game-art .crab{width:80px;height:56px}.game-art .crab+.crab{transform:scaleX(-1) translateY(10px)}
+.art-wide{width:140px!important;height:90px!important}
+.art-balls{display:flex;gap:6px}.art-balls b{display:grid;place-items:center;width:40px;height:40px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#fff,#e9e1cf);color:#1b1a2e;font:500 .95rem var(--f-mono);box-shadow:0 4px 10px rgba(0,0,0,.35)}
+.art-balls b.hot{background:radial-gradient(circle at 35% 30%,#ffe49a,#e8b64c)}
+.art-arrows{font-size:1.6rem;line-height:1.1;color:var(--coral);margin-left:10px}
+.ico-card{display:inline-grid;place-items:center;width:30px;height:40px;border-radius:5px;background:#fffdf7;color:#1c1c24;font:400 .8rem var(--f-display);box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.ico-card.red{color:#c41c32}
+.rail{margin-top:calc(var(--gap)*1.5)}
+.rail-list{display:flex;gap:8px;overflow-x:auto;padding:6px 2px 10px;scrollbar-width:thin}
+.rail-list a{display:flex;align-items:center;gap:8px;flex-shrink:0;padding:6px 14px 6px 6px;border:1px solid var(--line);border-radius:999px;background:var(--card);text-decoration:none;color:var(--ink)!important;font-weight:600;font-size:.88rem;transition:transform .2s,border-color .2s}
+.rail-list a:hover{transform:translateY(-2px);border-color:var(--gold)}
+.rail-list a[aria-current="page"]{background:var(--gold);color:var(--gold-ink)!important}
+.rail-list svg,.rail-list .ico-card{width:30px;height:30px;flex-shrink:0}.rail-list .ico-card{height:34px;width:26px;font-size:.62rem}
+.rail-list .mini-wheel{width:30px!important;height:30px!important}
+.limits-inline{font:500 .8rem var(--f-mono);border:1px solid var(--line);border-radius:999px;padding:1px 8px;margin-left:6px;white-space:nowrap}
+
+/* ═════ shared game stage ═════ */
+.game-stage{position:relative;padding:var(--pad);border-radius:28px;border:1px solid var(--line);background:
+  radial-gradient(600px 300px at 50% 0%,rgba(43,179,163,.14),transparent 70%),linear-gradient(180deg,var(--card-solid),var(--bg2));box-shadow:var(--shadow);min-width:0}
+.game-stage.busy form button:not([type=button]){pointer-events:none}
+.pending .after,.pending .stake{visibility:hidden}
+.pending .spot.match{box-shadow:none}
+.gate{display:grid;justify-items:center;gap:14px;text-align:center;padding:40px 10px}
+.gate-art svg,.gate-art .ico-card{width:110px;height:110px}.gate-art .ico-card{width:80px;font-size:1.6rem}
+.controls.stacked{flex-direction:column;align-items:stretch;max-width:420px;margin-inline:auto}
+.betbox{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;justify-content:center}
+.betbox label{display:grid;gap:4px;font-weight:700;font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.betbox input{width:140px;font:500 1.05rem var(--f-mono);text-align:center}
+.bet-quick{display:flex;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.bet-quick button{background:var(--bg2);color:var(--ink);border:0;border-right:1px solid var(--line);padding:10px 11px;font:600 .8rem var(--f-body);cursor:pointer}
+.bet-quick button:last-child{border-right:0}.bet-quick button:hover{background:var(--bg3)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:3px;background:var(--bg2);gap:2px;align-self:center}
+.seg label{position:relative;padding:8px 16px;border-radius:999px;cursor:pointer;font-weight:700;font-size:.88rem;display:block}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg label:has(input:checked){background:var(--gold);color:var(--gold-ink)}
+.seg label:has(input:focus-visible){outline:3px solid var(--gold2)}
+.stat-row{display:flex;gap:18px;justify-content:center;font-size:.9rem;color:var(--muted)}.stat-row b{font:500 1rem var(--f-mono);color:var(--ink)}
+.big-num{font:400 clamp(3rem,9vw,5.4rem)/1 var(--f-display);letter-spacing:.02em}
+.cb{margin-top:var(--gap)}
+.cb-bar{display:grid;gap:12px;justify-items:center;margin-bottom:14px}
+.btn small{font:500 .72rem var(--f-mono);opacity:.75;margin-left:4px}
+
+/* ═════ dice ═════ */
+.dice-stage{display:grid;justify-items:center;gap:14px;margin-bottom:10px}
+.dice-track{--t:50%;position:relative;width:100%;height:18px;border-radius:999px;margin:30px 0 26px;background:var(--bg3)}
+.dice-zone{position:absolute;inset:0;border-radius:999px}
+.dice-track.under .dice-zone{background:linear-gradient(90deg,var(--sea),var(--gold)) 0/var(--t) 100% no-repeat}
+.dice-track.over .dice-zone{background:linear-gradient(90deg,var(--gold),var(--coral)) right/calc(100% - var(--t)) 100% no-repeat}
+.dice-track::after{content:"";position:absolute;left:var(--t);top:-8px;width:4px;height:34px;margin-left:-2px;background:var(--ink);border-radius:2px}
+.dice-marker{position:absolute;left:var(--r);top:50%;transform:translate(-50%,-50%);width:26px;height:26px;border-radius:7px;background:#fffaf0;border:3px solid var(--gold);box-shadow:0 6px 14px rgba(0,0,0,.4);z-index:2}
+.dice-marker.win{border-color:var(--pos)}.dice-marker.lose{border-color:var(--neg)}
+.dice-marker span{position:absolute;bottom:130%;left:50%;transform:translateX(-50%);font:500 .8rem var(--f-mono);background:var(--card-solid);padding:2px 6px;border-radius:6px;white-space:nowrap}
+.dice-scale{position:absolute;top:26px;left:0;right:0;display:flex;justify-content:space-between;font:500 .72rem var(--f-mono);color:var(--muted)}
+.slider{display:grid;gap:6px;font-weight:700}
+input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:transparent;border:0}
+
+/* ═════ plinko ═════ */
+.plinko-wrap{max-width:620px;margin:0 auto}
+.plinko-board{width:100%;display:block}
+.plinko-board .peg{fill:var(--gold);filter:drop-shadow(0 0 3px rgba(232,182,76,.6))}
+.plinko-board .ball{fill:#fff;filter:drop-shadow(0 0 8px #ffd98a);transform:translate(300px,8px)}
+.buckets{display:grid;grid-template-columns:repeat(13,1fr);gap:3px;margin:-14px 2.3% 12px}
+.bucket{display:grid;place-items:center;height:34px;border-radius:6px;font:600 clamp(.5rem,1.3vw,.72rem) var(--f-mono);color:#1a1204;transition:transform .2s}
+.bucket.b6{background:#ff4d4d;color:#fff}.bucket.b5{background:#ff6f59}.bucket.b4{background:#ff9146}.bucket.b3{background:#ffb627}.bucket.b2{background:#ffd23f}.bucket.b1{background:#e9e36b}.bucket.b0{background:#c6e38f}
+.bucket.hit{outline:3px solid #fff;transform:translateY(4px) scale(1.06);box-shadow:0 0 18px #ffd98a}
+
+/* ═════ keno ═════ */
+.keno-form{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(220px,1fr);gap:var(--gap);align-items:start}
+.keno-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px}
+.kt{position:relative;cursor:pointer}
+.kt input{position:absolute;opacity:0}
+.kt span{display:grid;place-items:center;aspect-ratio:1;border-radius:50%;font:500 clamp(.8rem,1.8vw,1rem) var(--f-mono);background:var(--bg2);border:2px solid var(--line);transition:transform .15s,background .2s}
+.kt:hover span{transform:scale(1.06)}
+.kt input:checked+span{background:linear-gradient(180deg,var(--gold2),var(--gold));color:var(--gold-ink);border-color:var(--gold2)}
+.kt input:focus-visible+span{outline:3px solid var(--gold2)}
+.kt.drawn span{animation:ball-in .4s cubic-bezier(.2,.9,.3,1.5) backwards;animation-delay:calc(var(--i)*.18s);background:var(--sea);color:#fff;border-color:#8ee8dc}
+.kt.drawn.hit span{background:radial-gradient(circle at 35% 30%,#fff3cf,#e8b64c);color:#1a1204;border-color:#fff;box-shadow:0 0 16px var(--gold)}
+@keyframes ball-in{from{transform:scale(0) rotate(-90deg)}}
+.keno-side{display:grid;gap:12px}
+.keno-pay td{padding:4px 8px!important}
+
+/* ═════ scratchers ═════ */
+.ticket{max-width:460px;margin:0 auto;padding:18px;border-radius:18px;background:linear-gradient(160deg,#ff9a6b,#ff6f59 40%,#c0263a);box-shadow:var(--shadow),inset 0 0 0 3px rgba(255,255,255,.25);position:relative;overflow:hidden}
+.ticket::before{content:"";position:absolute;inset:-40%;background:repeating-conic-gradient(rgba(255,217,138,.18) 0 8deg,transparent 8deg 16deg);animation:turn2 60s linear infinite}
+.ticket>*{position:relative}
+.ticket-head{display:flex;justify-content:space-between;align-items:center;color:#fff}
+.ticket-head .display{color:#fff3cf}
+.ticket-head .price{font:500 .8rem var(--f-mono);background:rgba(0,0,0,.25);padding:3px 10px;border-radius:999px}
+.spots{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}
+.spot{position:relative;aspect-ratio:1.2;border-radius:12px;background:#fffaf0;display:grid;place-content:center;text-align:center;color:#1b1a2e;overflow:hidden}
+.spot .prize{font:400 clamp(1rem,3.5vw,1.45rem) var(--f-display)}.spot small{color:#6d6450}
+.spot.match{box-shadow:0 0 0 4px #ffd98a,0 0 20px #ffd98a;animation:hit .5s ease-in-out 3 alternate}
+.spot.blank .prize{opacity:.3}
+.foil{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;touch-action:none;border-radius:12px}
+.ticket-foot{margin:0;text-align:center;color:#fff3cf;font-weight:700;font-size:.85rem}
+.reveal-all{display:block;margin:10px auto 0}
+
+/* ═════ big six ═════ */
+.bw-stage{display:grid;justify-items:center;gap:6px}
+.wheel-box.bw{max-width:380px}
+.bw-board{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
+.bw-spot{position:relative;display:grid;gap:2px;justify-items:center;padding:14px 4px;border-radius:12px;border:2px solid rgba(255,255,255,.25);cursor:pointer;color:#1b1a2e;transition:transform .15s}
+.bw-spot b{font:400 1.5rem var(--f-display)}.bw-spot small{font:600 .7rem var(--f-body);opacity:.8}
+.bw-spot:hover{transform:translateY(-3px)}
+.s-1{background:#efe6d2}.s-2{background:#ffd23f}.s-5{background:#2bb3a3;color:#fff}.s-10{background:#ff6f59;color:#fff}.s-20{background:#8c7ae6;color:#fff}.s-anchor{background:#1b1a2e;color:#ffd98a}.s-sun{background:#ffb627}
+.win{animation:winpulse .6s ease 4 alternate}
+
+/* ═════ sic bo ═════ */
+.sb-stage{display:grid;justify-items:center}
+.dice-cup{display:flex;gap:16px;padding:18px 26px;border-radius:999px;background:radial-gradient(ellipse,#17705f,var(--felt2));border:6px solid #5a3a1c;box-shadow:inset 0 10px 30px rgba(0,0,0,.5)}
+.die.big{width:clamp(56px,11vw,84px);height:auto;filter:drop-shadow(0 8px 10px rgba(0,0,0,.45))}
+.die.tumble{animation:tumble .9s cubic-bezier(.2,.7,.3,1) backwards}
+.die.tumble:nth-child(2){animation-delay:.08s}.die.tumble:nth-child(3){animation-delay:.16s}
+@keyframes tumble{0%{transform:translateY(-60px) rotate(-340deg) scale(.6);opacity:0}60%{transform:translateY(6px) rotate(20deg)}80%{transform:translateY(-4px) rotate(-6deg)}}
+.sb-board{display:grid;gap:6px;padding:12px;border-radius:18px;background:radial-gradient(ellipse at 50% 0%,#17705f,var(--felt) 60%,var(--felt2));border:8px solid #5a3a1c}
+.sb-row{display:grid;gap:6px}
+.sb-row.sb-top{grid-template-columns:repeat(3,1fr)}.sb-row.totals{grid-template-columns:repeat(7,1fr)}.sb-row.faces{grid-template-columns:repeat(6,1fr)}.sb-row.singles{grid-template-columns:repeat(6,1fr)}
+.sb{position:relative;display:flex;flex-wrap:wrap;gap:2px;align-items:center;justify-content:center;flex-direction:column;padding:8px 4px;min-height:54px;border:1px solid rgba(255,255,255,.35);border-radius:8px;background:rgba(0,0,0,.18);color:#fff;cursor:pointer}
+.sb b{font:400 1.05rem var(--f-display)}.sb small{font:600 .66rem var(--f-body);opacity:.8}
+.sb:hover{box-shadow:inset 0 0 0 2px var(--gold2)}
+.sb .die.mini{width:18px;height:18px;display:inline}.sb .die.mid{width:30px;height:30px}
+.sb-row.faces .sb{flex-direction:row}
+.sb-row.faces .sb small{width:100%;text-align:center}
+
+/* ═════ crab derby ═════ */
+.derby{position:relative;display:grid;gap:6px;padding:14px 16px;border-radius:18px;background:linear-gradient(180deg,#f1d9a8,#e7c486);box-shadow:inset 0 0 0 4px rgba(90,58,28,.3),var(--shadow);overflow:hidden}
+.derby::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent 0 60px,rgba(255,255,255,.18) 60px 62px)}
+.lane{position:relative;display:grid;grid-template-columns:110px 1fr;align-items:center;min-height:46px;border-bottom:2px dashed rgba(90,58,28,.25)}
+.lane-name{font:700 .8rem var(--f-body);color:#5a3a1c}
+.lane-track{position:relative;height:44px}
+.runner{position:absolute;left:calc(var(--x) * .86);top:0;width:60px}
+.runner .crab{width:60px;height:42px}
+.runner.running .crab{animation:scuttle .18s steps(2) infinite}
+@keyframes scuttle{50%{transform:translateY(-3px) rotate(4deg)}}
+.rosette{position:absolute;right:-18px;top:-6px;background:var(--coral);color:#fff;font:800 .62rem var(--f-body);padding:3px 6px;border-radius:999px}
+.pending .rosette{visibility:hidden}
+.finish{position:absolute;right:calc(14% - 26px);top:0;bottom:0;width:10px;background:repeating-linear-gradient(0deg,#1b1a2e 0 10px,#fff 10px 20px)}
+.crab-board{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.crab-spot{position:relative;display:grid;justify-items:center;gap:2px;padding:10px 4px;border-radius:14px;border:2px solid var(--c);background:var(--card-solid);color:var(--ink);cursor:pointer;transition:transform .15s}
+.crab-spot:hover{transform:translateY(-3px)}.crab-spot .crab{width:48px;height:34px}
+.crab-spot b{font-size:.82rem}.crab-spot small{font:500 .75rem var(--f-mono);color:var(--muted)}
+
+/* ═════ baccarat ═════ */
+.bac-hands{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.slow-deal .card{animation-delay:calc(var(--i)*.5s)}
+.bac-board{display:grid;grid-template-columns:1fr .7fr 1fr;gap:10px}
+.bac{position:relative;display:grid;justify-items:center;padding:20px 8px;border-radius:16px;border:2px solid rgba(255,255,255,.3);cursor:pointer;color:#fff}
+.bac b{font:400 1.4rem var(--f-display);letter-spacing:.06em}.bac small{opacity:.8;font-weight:600}
+.bac.player{background:#1f4fa3}.bac.banker{background:#b3263a}.bac.tie{background:var(--green)}
+.bac:hover{box-shadow:inset 0 0 0 3px var(--gold2)}
+
+/* ═════ video poker ═════ */
+.vp-machine{padding:18px;border-radius:24px;background:linear-gradient(180deg,#1d2350,#0f1330);border:3px solid var(--gold);color:#f5ecd7}
+.vp-pay{width:100%;max-width:520px;margin:0 auto 14px;border-collapse:collapse;font:500 .82rem var(--f-mono);color:#ffd98a}
+.vp-pay td{padding:3px 10px;border-bottom:1px solid rgba(232,182,76,.15)}.vp-pay td.n{text-align:right}
+.vp-pay td:first-child{font-family:var(--f-body);font-weight:700;color:#f5ecd7}
+.vp-pay tr.hit{background:var(--coral);color:#fff}.vp-pay tr.hit td{color:#fff}
+.vp-cards{display:flex;justify-content:center;gap:clamp(6px,1.4vw,14px);margin:6px 0 4px}
+.vp-card{position:relative;display:grid;justify-items:center;gap:6px;cursor:pointer}
+.vp-card .card{margin-left:0!important;transition:transform .2s}
+.vp-card input{position:absolute;opacity:0}
+.hold-tag{font:800 .72rem var(--f-body);letter-spacing:.2em;padding:3px 8px;border-radius:6px;background:rgba(255,255,255,.08);color:transparent}
+.vp-card:has(input:checked) .card{transform:translateY(-12px)}
+.vp-card input:checked~.hold-tag{background:var(--gold);color:#1a1204}
+.vp-card input:focus-visible~.hold-tag{outline:3px solid var(--gold2)}
+.vp-card.was-held .card{box-shadow:0 0 0 3px var(--gold)}
+.vp-machine .result{color:#ffd98a}
+.vp-machine .betbox label{color:#cbbfa4}
+
+/* ═════ three card ═════ */
+.tc-felt .controls{margin-top:10px}
+.pp{display:grid;gap:4px;font-weight:700;font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:#cbbfa4}
+.pp input{width:120px;font-family:var(--f-mono);text-align:center;background:rgba(0,0,0,.35);color:#fff;border-color:rgba(232,182,76,.4)}
+.felt .betbox label{color:#cbbfa4}.felt .betbox input{background:rgba(0,0,0,.35);color:#fff;border-color:rgba(232,182,76,.4)}
+
+/* ═════ hi-lo ═════ */
+.hilo-stage{display:grid;justify-items:center;gap:12px}
+.hilo-main .card{--w:clamp(110px,20vw,150px);margin:0}
+.trail{display:flex;gap:6px;min-height:70px;flex-wrap:wrap;justify-content:center}
+.trail-card{display:grid;justify-items:center;gap:2px;font:700 .75rem var(--f-body)}
+.trail-card .card{--w:44px;margin:0;animation:none}
+.trail-card.ok>span{color:var(--pos)}.trail-card.bad>span{color:var(--neg)}.trail-card.skipped{opacity:.55}
+.hilo-stage .btn.lg{flex-direction:column;gap:2px}
+
+/* ═════ mines ═════ */
+.mines-stage{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(220px,1fr);gap:var(--gap);align-items:center}
+.reef{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:12px;border-radius:18px;background:radial-gradient(ellipse at 50% 30%,#1b6b8a,#0b2e4a);box-shadow:inset 0 10px 40px rgba(0,0,0,.5)}
+.reef-tile{aspect-ratio:1;border-radius:12px;border:0;cursor:pointer;background:linear-gradient(160deg,#3fa7b8,#1d6a86);box-shadow:inset 0 -5px 0 rgba(0,0,0,.25),0 4px 10px rgba(0,0,0,.3);transition:transform .15s,filter .15s;padding:12%}
+.reef-tile:not(:disabled):hover{transform:translateY(-3px);filter:brightness(1.15)}
+.reef-tile:disabled{cursor:default}
+.reef-tile svg{width:100%;height:100%}
+.reef-tile.pearl{background:linear-gradient(160deg,#fff3cf,#e8b64c);animation:flip .4s cubic-bezier(.2,.9,.3,1.4)}
+.reef-tile.urchin{background:linear-gradient(160deg,#ff9fb2,#8e2336)}.reef-tile.urchin.ghost{opacity:.55}
+.reef-tile.boom{animation:boom .5s ease;box-shadow:0 0 0 4px #ff4d4d,0 0 30px #ff4d4d}
+@keyframes flip{from{transform:rotateY(90deg)}}
+@keyframes boom{30%{transform:scale(1.25)}}
+.mines-side{display:grid;gap:10px;justify-items:center;text-align:center}
+
+/* ═════ crash ═════ */
+.crash-stage{position:relative;height:clamp(260px,42vw,380px);border-radius:20px;overflow:hidden;background:linear-gradient(180deg,#0b1a33,#0e2b44 60%,#0f4d45);border:1px solid var(--line);margin-bottom:14px}
+.crash-graph{position:absolute;inset:36px 0 0 0;width:100%;height:calc(100% - 36px)}
+.wave{fill:none;stroke:#5fe0cf;stroke-width:4;stroke-linecap:round;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 8px #2bb3a3)}
+.crash-stage.broke .wave{stroke:var(--coral);filter:drop-shadow(0 0 8px var(--coral))}
+.crash-mult{position:absolute;inset:0;display:grid;place-items:center;font:400 clamp(3rem,10vw,6rem) var(--f-display);color:#fff3cf;text-shadow:0 0 30px rgba(255,217,138,.5);pointer-events:none}
+.crash-mult.broke{color:var(--coral)}.crash-mult.cashed{color:#5fe0cf}
+.crash-stage .result{position:absolute;left:0;right:0;bottom:8px;color:#ffd98a}
+.crash-hist{position:absolute;top:8px;left:10px;right:10px;display:flex;gap:6px;overflow:hidden;z-index:2}
+.crash-hist span{font:500 .72rem var(--f-mono);padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.08);color:#f5ecd7;flex-shrink:0}
+.crash-hist span.hi{color:#5fe0cf}.crash-hist span.lo{color:#ff9f8f}
+.auto{display:grid;gap:4px;font-weight:700;font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.auto input{width:130px;font-family:var(--f-mono);text-align:center}
+
+@media (max-width:980px){
+  .keno-form,.mines-stage{grid-template-columns:1fr}
+}
+@media (max-width:720px){
+  .bw-board{grid-template-columns:repeat(4,1fr)}
+  .crab-board{grid-template-columns:repeat(3,1fr)}
+  .sb-row.totals{grid-template-columns:repeat(5,1fr)}.sb-row.faces{grid-template-columns:repeat(3,1fr)}.sb-row.singles{grid-template-columns:repeat(3,1fr)}
+  .lane{grid-template-columns:70px 1fr}.lane-name{font-size:.68rem}
+  .bac-hands{grid-template-columns:1fr}
+  .vp-card .card{--w:clamp(52px,16vw,80px)}
+  .bet-quick button{padding:10px 8px}
+}
+
 /* responsive */
 @media (max-width:980px){
   .table-wrap,.acct-grid,.rl-top{grid-template-columns:1fr}
@@ -3066,6 +4459,360 @@ if (rl) {
   });
   refresh();
 }
+
+/* ═════ GAME PANELS (shared) ═════
+ * Forms marked data-play post to ?action=play&g=slug. The server answers with the
+ * outcome plus the freshly rendered panel; we swap it in, run the game's animation
+ * hook, and only then reveal the result and update the balance.
+ */
+const hooks = {};
+const playUrl = slug => '?action=play&g=' + encodeURIComponent(slug);
+function enhance(root) {
+  initChipboards(root); initDice(root); initPlinko(root); initKeno(root); initBigWheel(root); initCrash(root);
+}
+async function runPlay(panel, url, fd) {
+  if (panel.dataset.busy) return null;
+  panel.dataset.busy = '1'; panel.classList.add('busy');
+  try {
+    const d = await post(url, fd);
+    const h = hooks[panel.dataset.panel] || {};
+    panel.innerHTML = d.html;
+    panel.classList.add('pending');
+    enhance(panel);
+    if (h.after && !reduce) await h.after(d, panel);
+    panel.classList.remove('pending');
+    if (d.boom) panel.animate([{ transform: 'translateX(0)' }, { transform: 'translateX(-10px)' }, { transform: 'translateX(10px)' }, { transform: 'translateX(0)' }], { duration: 320, iterations: 2 });
+    if (d.win) burst(panel.querySelector('.result') || panel, Math.min(28, 10 + Math.round((d.payout || 0) / 500)));
+    setBalance(d.balance);
+    return d;
+  } catch (err) { toast(err.message, 'err'); return null; }
+  finally { delete panel.dataset.busy; panel.classList.remove('busy'); }
+}
+document.addEventListener('submit', e => {
+  const f = e.target.closest('form[data-play]');
+  const panel = f && f.closest('[data-panel]');
+  if (!panel) return;
+  e.preventDefault();
+  const fd = new FormData(f);
+  if (e.submitter && e.submitter.name) fd.set(e.submitter.name, e.submitter.value);
+  runPlay(panel, f.action, fd);
+});
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-adj]');
+  if (!b) return;
+  const inp = b.closest('.betbox').querySelector('input');
+  const min = +inp.min, max = +inp.max, v = +inp.value || min;
+  inp.value = Math.max(min, Math.min(max, { half: Math.floor(v / 2), double: v * 2, min, max }[b.dataset.adj]));
+});
+
+/* ── chip board: shared by sic bo, big six, crabs, baccarat ── */
+const cbMem = {};
+function initChipboards(root) {
+  $$('[data-chipboard]', root).forEach(cb => {
+    if (cb.dataset.ready) return;
+    cb.dataset.ready = '1';
+    const slug = cb.dataset.chipboard, MAX = +cb.dataset.max, TABLE = MAX * 10;
+    const board = $('[data-board]', cb), go = $('[data-cb-go]', cb), undo = $('[data-cb-undo]', cb),
+      clear = $('[data-cb-clear]', cb), rebet = $('[data-cb-rebet]', cb), staked = $('[data-staked]', cb);
+    let chip = +((($('[data-chip][aria-checked="true"]', cb) || {}).dataset || {}).chip || cb.dataset.min);
+    let bets = new Map(), stack = [];
+    const total = () => [...bets.values()].reduce((a, b) => a + b, 0);
+    const refresh = () => {
+      $$('.stake', board).forEach(s => s.remove());
+      for (const [k, amt] of bets) {
+        const el = board.querySelector(`[data-bet="${CSS.escape(k)}"]`);
+        if (el) el.insertAdjacentHTML('beforeend', `<span class="stake">${amt >= 1000 ? (amt / 1000).toFixed(amt % 1000 ? 1 : 0) + 'K' : amt}</span>`);
+      }
+      staked.textContent = fmt(total());
+      go.disabled = !bets.size; undo.disabled = !stack.length; clear.disabled = !bets.size;
+      rebet.hidden = !cbMem[slug] || bets.size > 0;
+    };
+    $$('[data-chip]', cb).forEach(c => c.addEventListener('click', () => {
+      $$('[data-chip]', cb).forEach(x => x.setAttribute('aria-checked', 'false'));
+      c.setAttribute('aria-checked', 'true'); chip = +c.dataset.chip;
+    }));
+    board.addEventListener('click', e => {
+      const b = e.target.closest('[data-bet]'); if (!b) return;
+      $$('.win', board).forEach(x => x.classList.remove('win'));
+      const k = b.dataset.bet, cur = bets.get(k) || 0;
+      if (cur + chip > MAX) return toast(`Max ${fmt(MAX)} GC on one spot.`, 'err');
+      if (total() + chip > TABLE) return toast(`Table limit is ${fmt(TABLE)} GC per round.`, 'err');
+      bets.set(k, cur + chip); stack.push([k, chip]); refresh();
+    });
+    const pull = b => { const k = b.dataset.bet; if (!bets.has(k)) return; bets.delete(k); stack = stack.filter(([x]) => x !== k); refresh(); };
+    board.addEventListener('contextmenu', e => { const b = e.target.closest('[data-bet]'); if (b) { e.preventDefault(); pull(b); } });
+    let press;
+    board.addEventListener('pointerdown', e => { const b = e.target.closest('[data-bet]'); if (b && e.pointerType === 'touch') press = setTimeout(() => pull(b), 550); });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(t => board.addEventListener(t, () => clearTimeout(press)));
+    undo.addEventListener('click', () => { const l = stack.pop(); if (!l) return; const left = (bets.get(l[0]) || 0) - l[1]; left > 0 ? bets.set(l[0], left) : bets.delete(l[0]); refresh(); });
+    clear.addEventListener('click', () => { bets.clear(); stack = []; refresh(); });
+    rebet.addEventListener('click', () => { bets = new Map(cbMem[slug]); stack = [...bets]; refresh(); });
+    go.addEventListener('click', async () => {
+      if (!bets.size) return;
+      go.disabled = true;
+      const fd = new FormData();
+      fd.append('bets', JSON.stringify([...bets].map(([key, amount]) => ({ key, amount }))));
+      const snapshot = new Map(bets);
+      const d = await runPlay(cb.closest('[data-panel]'), playUrl(slug), fd);
+      if (d) cbMem[slug] = snapshot; else refresh();
+    });
+    refresh();
+  });
+}
+
+/* ── wheel drawing, shared by big six ── */
+function wedges(labels, colorOf, textOf, inner) {
+  const step = 360 / labels.length;
+  const pol = (r, deg) => { const a = (deg - 90) * Math.PI / 180; return [r * Math.cos(a), r * Math.sin(a)]; };
+  let svg = '<circle r="108" fill="#5a3a1c"/><circle r="103" fill="#2b1a0c"/>';
+  labels.forEach((l, i) => {
+    const a0 = i * step - step / 2, a1 = a0 + step;
+    const [x0, y0] = pol(100, a0), [x1, y1] = pol(100, a1), [x2, y2] = pol(inner, a1), [x3, y3] = pol(inner, a0);
+    const [fill, ink] = colorOf(l);
+    svg += `<path d="M${x0},${y0} A100,100 0 0 1 ${x1},${y1} L${x2},${y2} A${inner},${inner} 0 0 0 ${x3},${y3}Z" fill="${fill}" stroke="#e8b64c" stroke-width=".6"/>`;
+    const [tx, ty] = pol((100 + inner) / 2, i * step);
+    svg += `<text x="${tx}" y="${ty}" fill="${ink}" font-size="${labels.length > 40 ? 7.5 : 8.5}" font-family="Limelight,serif" text-anchor="middle" dominant-baseline="central" transform="rotate(${i * step} ${tx} ${ty})">${textOf(l)}</text>`;
+  });
+  svg += `<circle r="${inner}" fill="#0e4a43" stroke="#e8b64c" stroke-width="1.5"/>`;
+  for (let i = 0; i < 12; i++) { const [x, y] = pol(inner - 12, i * 30); svg += `<line x1="0" y1="0" x2="${x}" y2="${y}" stroke="#e8b64c" stroke-width="2.5" stroke-linecap="round"/>`; }
+  return svg + '<circle r="11" fill="#e8b64c"/><circle r="4.5" fill="#fff3c4"/>';
+}
+
+/* ── Big Six ── */
+const B6 = { '1': ['#efe6d2', '#1b1a2e'], '2': ['#ffd23f', '#1b1a2e'], '5': ['#2bb3a3', '#fff'], '10': ['#ff6f59', '#fff'], '20': ['#8c7ae6', '#fff'], anchor: ['#1b1a2e', '#ffd98a'], sun: ['#ffb627', '#1b1a2e'] };
+function initBigWheel(root) {
+  const w = $('[data-bigwheel]', root);
+  if (!w || w.dataset.ready) return;
+  w.dataset.ready = '1';
+  const labels = JSON.parse(w.dataset.bigwheel);
+  w.innerHTML = wedges(labels, l => B6[l], l => ({ anchor: '⚓', sun: '☀' }[l] || l), 64);
+  if (w.dataset.index) { w.style.transition = 'none'; w.style.transform = `rotate(${-(+w.dataset.index) * 360 / 54}deg)`; }
+}
+hooks.bigwheel = {
+  after: async (d, panel) => {
+    const w = $('[data-bigwheel]', panel);
+    const target = -d.index * 360 / 54 - 360 * 4;
+    w.style.transition = 'none'; w.style.transform = 'rotate(0deg)';
+    void w.getBoundingClientRect();
+    w.style.transition = 'transform 4.2s cubic-bezier(.15,.7,.15,1)';
+    w.style.transform = `rotate(${target}deg)`;
+    const clicks = setInterval(() => { const p = $('.pointer', panel); if (p) p.animate([{ transform: 'translateX(-50%) rotate(0)' }, { transform: 'translateX(-50%) rotate(-18deg)' }, { transform: 'translateX(-50%) rotate(0)' }], { duration: 120 }); }, 140);
+    await sleep(4300); clearInterval(clicks);
+    $$('.bw-spot', panel).forEach(b => b.classList.toggle('win', b.dataset.bet === d.hit));
+  },
+};
+
+/* ── dice ── */
+function initDice(root) {
+  const t = $('[data-dice-target]', root);
+  if (!t || t.dataset.ready) return;
+  t.dataset.ready = '1';
+  const f = t.form, track = $('[data-track]', root);
+  const upd = () => {
+    const v = +f.target.value, dir = f.dir.value, ch = dir === 'under' ? v : 100 - v, ok = ch >= 2 && ch <= 95;
+    $('[data-dice-chance]', root).textContent = ch.toFixed(1) + '%';
+    $('[data-dice-mult]', root).textContent = ok ? (Math.floor(99 / ch * 10000) / 10000).toFixed(4) + '×' : 'out of range';
+    track.style.setProperty('--t', v + '%');
+    track.classList.toggle('over', dir === 'over'); track.classList.toggle('under', dir === 'under');
+  };
+  f.addEventListener('input', upd); upd();
+}
+hooks.dice = {
+  after: async (d, panel) => {
+    panel.classList.remove('pending');
+    const m = $('.dice-marker', panel), num = $('.big-num', panel), res = $('.result', panel);
+    if (res) res.style.visibility = 'hidden';
+    if (m) m.animate([{ left: '50%' }, { left: d.roll + '%' }], { duration: 700, easing: 'cubic-bezier(.2,.8,.2,1.15)' });
+    if (num) await new Promise(ok => {
+      const t0 = performance.now();
+      const step = t => { const k = (t - t0) / 700; if (k < 1) { num.textContent = (Math.random() * 100).toFixed(2); requestAnimationFrame(step); } else { num.textContent = d.roll.toFixed(2); ok(); } };
+      requestAnimationFrame(step);
+    });
+    if (res) res.style.visibility = '';
+  },
+};
+
+/* ── plinko ── */
+function initPlinko(root) {
+  const wrap = $('[data-risks]', root);
+  if (!wrap || wrap.dataset.ready) return;
+  wrap.dataset.ready = '1';
+  const risks = JSON.parse(wrap.dataset.risks);
+  const form = root.querySelector('form[data-play]');
+  form && form.addEventListener('change', e => {
+    if (!e.target.matches('[data-risk]')) return;
+    $$('.bucket', wrap).forEach((b, i) => { b.textContent = risks[e.target.value][i] + '×'; b.classList.remove('hit'); });
+  });
+}
+hooks.plinko = {
+  after: async (d, panel) => {
+    const ball = $('[data-ball]', panel);
+    ball.setAttribute('cx', 0); ball.setAttribute('cy', 0);
+    const pts = [[300, 8]]; let acc = 0;
+    d.path.forEach((dir, r) => {
+      const y = 40 + r * 38;
+      pts.push([300 + acc * 22, y - 13]);
+      acc += dir ? 1 : -1;
+      pts.push([300 + acc * 22, y + 12]);
+    });
+    pts.push([300 + acc * 22, 530]);
+    const kf = pts.map(([x, y]) => ({ transform: `translate(${x}px,${y}px)` }));
+    await ball.animate(kf, { duration: 1700, easing: 'linear', fill: 'forwards' }).finished;
+    const b = $$('.bucket', panel)[d.slot];
+    if (b) b.animate([{ transform: 'translateY(0)' }, { transform: 'translateY(8px)' }, { transform: 'translateY(0)' }], { duration: 300 });
+  },
+};
+
+/* ── keno ── */
+function initKeno(root) {
+  const grid = $('[data-keno]', root);
+  if (!grid || grid.dataset.ready) return;
+  grid.dataset.ready = '1';
+  const pay = JSON.parse($('[data-keno-pay]', root).dataset.kenoPay);
+  const boxes = $$('input[type=checkbox]', grid);
+  const table = $('[data-keno-pay] tbody', root);
+  const paint = () => {
+    const n = boxes.filter(b => b.checked).length;
+    table.innerHTML = n ? pay[n].map((x, h) => x ? `<tr><td>${h} of ${n}</td><td class="n">${x}×</td></tr>` : '').reverse().join('') : '<tr><td colspan="2" class="muted">Pick numbers to see payouts</td></tr>';
+  };
+  grid.addEventListener('change', e => {
+    if (boxes.filter(b => b.checked).length > 10) { e.target.checked = false; toast('Ten numbers max.', 'err'); }
+    $$('.kt', grid).forEach(k => k.classList.remove('drawn', 'hit'));
+    paint();
+  });
+  $('[data-keno-quick]', root).addEventListener('click', () => {
+    const want = boxes.filter(b => b.checked).length || 6;
+    boxes.forEach(b => { b.checked = false; });
+    const pool = boxes.slice();
+    for (let i = 0; i < want; i++) pool.splice(Math.floor(Math.random() * pool.length), 1)[0].checked = true;
+    $$('.kt', grid).forEach(k => k.classList.remove('drawn', 'hit'));
+    paint();
+  });
+  $('[data-keno-clear]', root).addEventListener('click', () => { boxes.forEach(b => { b.checked = false; }); $$('.kt', grid).forEach(k => k.classList.remove('drawn', 'hit')); paint(); });
+  paint();
+}
+hooks.keno = { after: () => sleep(10 * 180 + 350) };
+
+/* ── scratchers ── */
+hooks.scratch = {
+  after: (d, panel) => new Promise(done => {
+    panel.classList.add('scratching');
+    const spots = $$('.spot', panel);
+    const all = $('[data-reveal-all]', panel);
+    let left = spots.length;
+    const finish = () => { if (--left === 0) { all.hidden = true; panel.classList.remove('scratching'); done(); } };
+    spots.forEach(spot => {
+      const c = document.createElement('canvas');
+      c.className = 'foil';
+      spot.appendChild(c);
+      const r = spot.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      c.width = r.width * dpr; c.height = r.height * dpr;
+      const x = c.getContext('2d');
+      x.scale(dpr, dpr);
+      const gr = x.createLinearGradient(0, 0, r.width, r.height);
+      gr.addColorStop(0, '#ffe49a'); gr.addColorStop(.5, '#d19a1a'); gr.addColorStop(1, '#ffd98a');
+      x.fillStyle = gr; x.fillRect(0, 0, r.width, r.height);
+      x.fillStyle = 'rgba(90,58,28,.55)'; x.font = '600 12px Figtree, sans-serif'; x.textAlign = 'center';
+      x.fillText('SCRATCH', r.width / 2, r.height / 2 + 4);
+      x.globalCompositeOperation = 'destination-out';
+      let down = false, moves = 0, gone = false;
+      const clearIt = () => { if (gone) return; gone = true; c.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 250 }).finished.then(() => c.remove()); finish(); };
+      const scratch = e => {
+        if (!down || gone) return;
+        const b = c.getBoundingClientRect();
+        x.beginPath(); x.arc(e.clientX - b.left, e.clientY - b.top, 16, 0, Math.PI * 2); x.fill();
+        if (++moves % 6 === 0) {
+          const px = x.getImageData(0, 0, c.width, c.height).data; let clear = 0;
+          for (let i = 3; i < px.length; i += 64) if (px[i] === 0) clear++;
+          if (clear / (px.length / 64) > .5) clearIt();
+        }
+      };
+      c.addEventListener('pointerdown', e => { down = true; c.setPointerCapture(e.pointerId); scratch(e); });
+      c.addEventListener('pointermove', scratch);
+      c.addEventListener('pointerup', () => { down = false; });
+      c.addEventListener('dblclick', clearIt);
+      c.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); clearIt(); } });
+      c.tabIndex = 0; c.setAttribute('role', 'button'); c.setAttribute('aria-label', 'Scratch this spot');
+      spot._clear = clearIt;
+    });
+    all.hidden = false;
+    all.addEventListener('click', () => spots.forEach(s => s._clear && s._clear()));
+  }),
+};
+
+/* ── sic bo, baccarat: CSS does the motion, we just wait for it ── */
+hooks.sicbo = { after: () => sleep(1000) };
+hooks.baccarat = { after: d => sleep(d.cards * 500 + 450) };
+
+/* ── crab derby ── */
+hooks.crabs = {
+  after: async (d, panel) => {
+    const runners = $$('[data-runner]', panel);
+    const anims = runners.map(r => {
+      const i = +r.dataset.runner, place = d.order.indexOf(i), end = 100 - place * 9;
+      const kf = [{ left: '0%' }]; let pos = 0;
+      for (let k = 1; k < 8; k++) { pos = Math.min(end - 2, pos + (end / 8) * (0.5 + Math.random())); kf.push({ left: `calc(${pos}% * .86)` }); }
+      kf.push({ left: `calc(${end}% * .86)` });
+      r.classList.add('running');
+      return r.animate(kf, { duration: 4200, easing: 'linear' }).finished.then(() => r.classList.remove('running'));
+    });
+    await Promise.all(anims);
+  },
+};
+
+/* ── tide crash: draws the curve from server time, polls the server for the break ── */
+function crashPath(k, tEnd, broke) {
+  const T = Math.max(8, tEnd * 1.08), M = Math.max(2, Math.exp(k * tEnd) * 1.15);
+  const X = t => t / T * 600, Y = m => 295 - (m - 1) / (M - 1) * 270;
+  let dPath = 'M0,295';
+  for (let i = 1; i <= 48; i++) { const t = tEnd * i / 48; dPath += ` L${X(t).toFixed(1)},${Y(Math.exp(k * t)).toFixed(1)}`; }
+  return [dPath, dPath + ` L${X(tEnd).toFixed(1)},300 L0,300 Z`];
+}
+function initCrash(root) {
+  const el = $('[data-crash]', root);
+  if (!el || el.dataset.ready) return;
+  el.dataset.ready = '1';
+  const wave = $('[data-wave]', el), fill = $('[data-wave-fill]', el), multEl = $('[data-mult]', el);
+  const K = 0.08;
+  if (!el.dataset.live) {
+    const m = parseFloat(multEl.textContent) || 1;
+    if (m > 1) { const [p, f] = crashPath(K, Math.log(m) / K); wave.setAttribute('d', p); fill.setAttribute('d', f); }
+    el.classList.toggle('broke', multEl.classList.contains('broke'));
+    return;
+  }
+  const k = +el.dataset.k, auto = +el.dataset.auto || 0, bet = +el.dataset.bet;
+  const t0 = performance.now() - (+el.dataset.elapsed) * 1000;
+  const panel = el.closest('[data-panel]'), cash = root.querySelector('[data-cashout]');
+  let lastPeek = 0, inflight = false, done = false;
+  const peek = async () => {
+    if (inflight || done) return;
+    inflight = true;
+    try {
+      const fd = new FormData(); fd.append('move', 'peek');
+      const d = await post(playUrl('crash'), fd);
+      if (!d.live && !done && el.isConnected) {
+        done = true;
+        panel.innerHTML = d.html; enhance(panel);
+        if (d.win) burst(panel.querySelector('.result') || panel, 16);
+        else panel.animate([{ transform: 'translateY(0)' }, { transform: 'translateY(6px)' }, { transform: 'translateY(0)' }], { duration: 300 });
+        setBalance(d.balance);
+      }
+    } catch (e) {}
+    inflight = false;
+  };
+  const frame = now => {
+    if (done || !el.isConnected) return;
+    const t = (now - t0) / 1000, m = Math.floor(Math.exp(k * t) * 100) / 100;
+    multEl.textContent = m.toFixed(2) + '×';
+    if (cash) cash.textContent = 'Cash out ' + fmt(Math.floor(bet * m));
+    const [p, f] = crashPath(k, t); wave.setAttribute('d', p); fill.setAttribute('d', f);
+    if (now - lastPeek > 600 || (auto && m >= auto)) { lastPeek = now; peek(); }
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
+enhance(document);
 
 /* ═════ ADMIN ═════ */
 if (document.documentElement.dataset.mode === 'admin') {

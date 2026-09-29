@@ -13,19 +13,40 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 
 ## what's inside
 
-**For players**
-- **Sunset Reels**: 3 reels, 5 paylines, ~95% theoretical return (the math is in the code comments)
-- **Harbor Blackjack**: 6-deck shoe, dealer peeks and stands on all 17s, blackjack pays 3:2, double down
-- **Coronado Roulette**: single-zero wheel, a full betting board with chips, undo/clear/rebet, and payouts at standard odds
+**For players: 16 games in four rooms**
+
+| room | game | what it is | return |
+|---|---|---|---|
+| Reels & Scratchers | **Sunset Reels** | 3 reels, 5 paylines | ~95% |
+| | **Sunset Scratchers** | scratch 9 spots with your finger/mouse, match 3 | 91% |
+| | **Kelp Keno** | pick 1–10 of 40, ten drawn | 94–96% |
+| Table Games | **Coronado Roulette** | single-zero wheel, full board | 97.3% |
+| | **Bayfront Baccarat** | player / banker / tie, full third-card tableau | 98.8% banker |
+| | **Surf Sic Bo** | three dice, 50 bets on the board | 97% small/big |
+| | **Boardwalk Big Six** | 54-stop carnival money wheel | 78–89% (it's a carnival wheel) |
+| | **Crab Crawl Derby** | six racing crabs at fixed odds, animated race | 93.9% |
+| Card Room | **Harbor Blackjack** | 6 decks, S17, 3:2, double | ~99.5% |
+| | **Boardwalk Poker** | Jacks or Better 9/6 video poker | 99.5% perfect play |
+| | **Coastline 3-Card** | ante/play vs dealer + Pair Plus | ~97% |
+| | **Tide Hi-Lo** | higher or lower, multiplier builds, cash out anytime | 99% |
+| Boardwalk Arcade | **Tide Crash** | live multiplier curve, cash out before it breaks, auto cash-out | 99% |
+| | **Pier Plinko** | 12 rows, low/med/high risk, up to 170× | ~99% |
+| | **Reef Mines** | 5×5 grid, pick 1–24 urchins, find pearls | 99% |
+| | **Lighthouse Dice** | slide your own odds, roll over/under | 99% |
+
+Every paytable was checked with exact math or a 200k-hand simulation. The formulas are in comments next to each engine.
+
 - **Free coins**: 10,000 GC welcome stack, a daily bonus with a 7-day streak, a "running low" refill every 4h, and **promo codes** you can hand out at events
 - **Leaderboards**: biggest stack, biggest single win, most rounds
 - **Take a break**: players can lock their own account for 1–90 days, and it can't be shortened
 - Dark ("night harbor") and light ("day at the pier") themes, fully responsive, keyboard accessible, and it honors reduced motion
+- Every game still plays with JavaScript off (plain forms). JS adds the animation.
 
 **For the house (`?action=admin`)**
 - Dashboard: players, active users, coins in play, today's wagers and hold, actual RTP per game over the last 7 days
-- Full CRUD on every table (players, games, promo codes, redemptions, ledger, blackjack hands, settings, admins, lockouts), with search, filters, sorting, pagination, bulk actions, and CSV export
-- Changing a player's balance writes an `admin` row to the coin ledger. Voiding a stuck blackjack hand refunds the bet.
+- Full CRUD on every table (players, games, game rounds, promo codes, redemptions, ledger, blackjack hands, settings, admins, lockouts), with search, filters, sorting, pagination, bulk actions, and CSV export
+- Changing a player's balance writes an `admin` row to the coin ledger. Voiding a stuck round (any game) refunds its stake.
+- Turn any game on or off, rename it, or change its min/max bet under **Games**. Disabled games vanish from the lobby.
 - Append-only audit log of every admin action, enforced by database triggers
 - Site settings for brand name, tagline, partner name ("Presented with ___"), announcement banner, starting coins, bonus amounts, minimum age, and opening/closing signups
 
@@ -38,7 +59,8 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 
 ## security
 
-- Every outcome is decided server-side with `random_int` (a CSPRNG). The browser only animates results, so nobody can edit JS to pump the leaderboard.
+- Every outcome is decided server-side with `random_int` (a CSPRNG). The browser only animates results, so nobody can edit JS to pump the leaderboard. Hidden state (mine positions, the crash point, the dealer's hole cards, the rest of the deck) never leaves the server.
+- Multi-step games keep one active round per player per game in the `rounds` table. Crash runs on server time, so lag can't be exploited.
 - All coin movement goes through one function inside `BEGIN IMMEDIATE` transactions, with a `CHECK (balance >= 0)` in the schema as a backstop.
 - bcrypt (cost 12), CSRF tokens on every POST, PDO prepared statements, a CSP with script nonces, HSTS on HTTPS, `SameSite=Strict` cookies, and session regeneration on login
 - Login lockout after 5 failures in 15 minutes (players and admins), promo-code brute-force lockout, signup rate limiting per IP, and a 2-hour admin idle timeout
