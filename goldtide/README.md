@@ -13,7 +13,7 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 
 ## what's inside
 
-**For players: 22 games in five rooms**
+**For players: 25 games in six rooms**
 
 | room | game | what it is | return |
 |---|---|---|---|
@@ -24,6 +24,10 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | | **Code Rain** | green digital-rain hacker world; rare free spins ×5 | 95.6% |
 | | **Tiki Tides** | tiki-bar luau, low volatility, free spins ×2 | 95.4% |
 | | **Calavera Fiesta** | Día de los Muertos, 12–24 free spins ×2 | 95.1% |
+| 3D Games | **Coronado Roulette 3D** | real 3D wheel: rotor, frets, a ball that orbits, drops and settles | 97.3% |
+| | **Harbor Craps** | new: pass/don't pass, true-odds, field, props, hardways, 3D dice | 98.6% pass |
+| | **Pier Pusher** | boardwalk coin pusher in 3D | 95% |
+| | *3D slot cabinet* | a toggle on every themed slot: curved drum reels, chrome, chasing bulbs | same as slot |
 | Scratch & Keno | | | |
 | | **Sunset Scratchers** | scratch 9 spots with your finger/mouse, match 3 | 91% |
 | | **Kelp Keno** | pick 1–10 of 40, ten drawn | 94–96% |
@@ -40,6 +44,10 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | | **Pearl Drop** ★ | the flagship plinko (see below) | 98.5–99% |
 | | **Reef Mines** | 5×5 grid, pick 1–24 urchins, find pearls | 99% |
 | | **Lighthouse Dice** | slide your own odds, roll over/under | 99% |
+
+### 3D games
+
+These are real 3D gameplay, built with three.js r170 (MIT). three.js is embedded in `index.php` (gzip+base64) and served from `?action=asset`, so everything still works offline from a single file. The 3D module only loads on pages that need it. The server still decides every outcome and the scene is steered to it: the roulette ball is guided into the pocket the server picked, and the dice tumble and settle on the rolled faces (a browser test checks 40 of 40 throws). Without WebGL, the 2D controls still play every game.
 
 ### Slot Hall
 
