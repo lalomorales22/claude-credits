@@ -2688,7 +2688,7 @@ function layout(string $title, string $body, string $mode = 'public'): void {
 <script nonce="<?= h($nonce) ?>">try{var t=localStorage.getItem('gt_theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;var d=localStorage.getItem('gt_density');if(d==='compact')document.documentElement.dataset.density=d;}catch(e){}</script>
 <style><?= app_css() ?></style>
 </head>
-<body>
+<body class="pg-<?= h($act === '' ? 'lobby' : preg_replace('/[^a-z0-9]/', '', $act)) ?>">
 <a class="skip" href="#main">Skip to content</a>
 <?php if ($mode === 'public' && setting('announcement') !== ''): ?>
 <div class="announce" role="status"><?= h(setting('announcement')) ?></div>
@@ -2789,7 +2789,7 @@ function page_lobby(): void {
         'plinko' => game_icon('plinko'), 'mines' => game_icon('mines') . game_icon('mines'), 'dice' => die_svg(6) . die_svg(1)];
     ob_start(); ?>
 <section class="hero">
-  <div class="sunburst" aria-hidden="true"></div>
+  <div class="mesa" aria-hidden="true"><?= mesa_svg() ?></div>
   <div class="hero-copy">
     <p class="eyebrow reveal d1">Free-to-play social casino</p>
     <h1 class="display xl reveal d2"><?= h(setting('site_name', 'Gold Tide')) ?></h1>
@@ -2803,6 +2803,8 @@ function page_lobby(): void {
     <p class="fine reveal d5">No purchases. No prizes. No cash value. Just the fun part.</p>
   </div>
 </section>
+
+<div class="weave" aria-hidden="true"></div>
 
 <?php if ($p): echo bonus_strip($p); endif; ?>
 
@@ -2820,7 +2822,7 @@ function page_lobby(): void {
 <?php endif; ?>
 <?php $byCat = []; foreach ($games as $g) { $c = GAME_REGISTRY[$g['slug']][1] ?? 'arcade'; $byCat[$c][] = $g; } ?>
 <?php foreach (GAME_CATEGORIES as $ck => [$cl, $cd]): if (empty($byCat[$ck])) { continue; } ?>
-<section class="cat reveal d4" id="cat-<?= h($ck) ?>" aria-labelledby="cat-h-<?= h($ck) ?>">
+<section class="cat cat-<?= h($ck) ?> reveal d4" id="cat-<?= h($ck) ?>" aria-labelledby="cat-h-<?= h($ck) ?>">
   <header class="cat-head"><h2 class="display md" id="cat-h-<?= h($ck) ?>"><?= h($cl) ?></h2><p class="muted"><?= h($cd) ?></p></header>
   <div class="games">
   <?php foreach ($byCat[$ck] as $i => $g): ?>
@@ -2848,6 +2850,22 @@ function page_lobby(): void {
   <a class="more" href="<?= h(url('leaderboard')) ?>">Full leaderboard &rarr;</a>
 </section>
 <?php layout('Lobby', ob_get_clean());
+}
+
+/** Lobby horizon: layered ridgelines of the inland mountains east of San Diego at dusk. Purely scenic, no cultural symbols. */
+function mesa_svg(): string {
+    mt_srand(11);
+    $stars = '';
+    for ($i = 0; $i < 60; $i++) { $stars .= '<circle cx="' . mt_rand(0, 1440) . '" cy="' . mt_rand(6, 190) . '" r="' . (mt_rand(4, 14) / 10) . '"' . ($i % 7 === 0 ? ' class="tw"' : '') . '/>'; }
+    mt_srand();
+    return '<svg viewBox="0 0 1440 420" preserveAspectRatio="xMidYMax slice">'
+        . '<defs><radialGradient id="mSun" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="var(--m-sun1)"/><stop offset=".62" stop-color="var(--m-sun2)"/><stop offset="1" stop-color="var(--m-sun2)" stop-opacity="0"/></radialGradient></defs>'
+        . '<g class="m-stars">' . $stars . '</g>'
+        . '<g transform="translate(0 64)"><circle cx="1060" cy="206" r="210" fill="url(#mSun)" class="m-glow"/><circle cx="1060" cy="206" r="78" class="m-sun"/>'
+        . '<path class="m-r1" d="M0 262C110 236 190 204 300 222S470 176 560 204 720 160 830 192 990 148 1090 182 1270 166 1350 194 1440 188 1440 188V420H0Z"/>'
+        . '<path class="m-r2" d="M0 300L80 276 150 288 250 250 330 272 420 238 510 266 600 252 690 284 780 256 880 276 980 240 1060 266 1150 250 1240 280 1330 262 1440 276V420H0Z"/>'
+        . '<path class="m-r3" d="M0 344C150 322 260 336 380 320S620 312 760 330 1000 306 1140 322 1360 336 1440 318V420H0Z"/></g>'
+        . '</svg>';
 }
 
 function pd_art(): string {
@@ -5372,6 +5390,65 @@ main{padding:clamp(18px,4vw,48px) clamp(16px,4vw,48px) 60px;max-width:1280px;mar
 @keyframes turn{to{transform:translateY(-50%) rotate(360deg)}}
 .hero-copy{max-width:640px}
 .welcome{font-size:1.15rem}
+
+/* ═════ LOBBY: desert dusk ═════
+ * Earth tones of the inland San Diego backcountry: canyon brown, terracotta, turquoise, sandstone, sage, ochre.
+ * The woven band is a generic geometric pattern. Partner motif slot: when a partner nation supplies and approves
+ * its own artwork, replace --weave (and the mesa_svg() ridgelines) with it. Nothing here copies a specific nation's designs.
+ */
+body.pg-lobby{
+  --bg:#1a0f0b;--bg2:#2a1811;--bg3:#3a2216;--ink:#f3e6d0;--muted:#bba58b;--line:rgba(217,164,65,.24);
+  --gold:#d9a441;--gold2:#f0c46a;--gold-ink:#1f1208;--coral:#c8553d;--sea:#3fb8a9;--link:#f0c46a;--gold-text:#f0c46a;
+  --card:rgba(46,26,18,.74);--card-solid:#2c1a12;--sage:#8fa37a;--clay:#a8432f;
+  --glow1:rgba(200,85,61,.30);--glow2:rgba(217,164,65,.22);--glow3:rgba(63,184,169,.14);
+  --m-sky1:#140d24;--m-sky2:#3a1b33;--m-sky3:#7a3526;--m-sun1:#ffd98a;--m-sun2:#e0703f;--m-r1:#5a3550;--m-r2:#3d2233;--m-r3:#1a0f0b;--m-star:#f3e6d0;
+  --weave:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='18' viewBox='0 0 64 18'%3E%3Crect width='64' height='18' fill='%232a1811'/%3E%3Crect y='1' width='64' height='1.5' fill='%23d9a441'/%3E%3Crect y='15.5' width='64' height='1.5' fill='%23d9a441'/%3E%3Cpath d='M16 4l5 5-5 5-5-5z' fill='%233fb8a9'/%3E%3Cpath d='M16 7l2 2-2 2-2-2z' fill='%232a1811'/%3E%3Cpath d='M48 4l5 5-5 5-5-5z' fill='%23c8553d'/%3E%3Cpath d='M48 7l2 2-2 2-2-2z' fill='%23f3e6d0'/%3E%3Cpath d='M21 9l3.5-3 3.5 3 3.5 3 3.5-3 3.5-3 3.5 3M53 9l3.5-3 3.5 3 3.5 3M-3 12l3.5-3 3.5-3 3.5 3' stroke='%23f3e6d0' stroke-width='1.3' fill='none'/%3E%3C/svg%3E");
+  background-image:radial-gradient(1000px 600px at 70% 30%,var(--glow1),transparent 60%),radial-gradient(900px 600px at 10% 90%,var(--glow3),transparent 60%),
+    repeating-linear-gradient(90deg,transparent 0 3px,rgba(243,230,208,.012) 3px 4px);
+}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]) body.pg-lobby{
+  --bg:#f3e4cc;--bg2:#ead3b0;--bg3:#e2c49a;--ink:#2b1a12;--muted:#6e5642;--line:rgba(140,70,30,.24);
+  --gold:#a8651a;--gold2:#c47f2a;--gold-ink:#fff7ea;--coral:#b4452c;--sea:#1d8a80;--link:#8a4a12;--gold-text:#8a4a12;
+  --card:rgba(255,248,236,.82);--card-solid:#fff7ea;--sage:#5f7a4e;--clay:#9c3b27;
+  --glow1:rgba(224,112,63,.22);--glow2:rgba(217,164,65,.25);--glow3:rgba(29,138,128,.12);
+  --m-sky1:#f7d9b0;--m-sky2:#f2b98a;--m-sky3:#e8946a;--m-sun1:#fff3c4;--m-sun2:#f0a04b;--m-r1:#b98a9a;--m-r2:#8f6a6e;--m-r3:#f3e4cc;--m-star:transparent}}
+:root[data-theme="light"] body.pg-lobby{
+  --bg:#f3e4cc;--bg2:#ead3b0;--bg3:#e2c49a;--ink:#2b1a12;--muted:#6e5642;--line:rgba(140,70,30,.24);
+  --gold:#a8651a;--gold2:#c47f2a;--gold-ink:#fff7ea;--coral:#b4452c;--sea:#1d8a80;--link:#8a4a12;--gold-text:#8a4a12;
+  --card:rgba(255,248,236,.82);--card-solid:#fff7ea;--sage:#5f7a4e;--clay:#9c3b27;
+  --glow1:rgba(224,112,63,.22);--glow2:rgba(217,164,65,.25);--glow3:rgba(29,138,128,.12);
+  --m-sky1:#f7d9b0;--m-sky2:#f2b98a;--m-sky3:#e8946a;--m-sun1:#fff3c4;--m-sun2:#f0a04b;--m-r1:#b98a9a;--m-r2:#8f6a6e;--m-r3:#f3e4cc;--m-star:transparent}
+.pg-lobby .hero{overflow-x:visible;min-height:min(60vh,560px);align-items:start;padding-bottom:clamp(130px,17vw,210px)}
+.mesa{position:absolute;z-index:-1;inset:-140px auto 0 50%;width:100vw;transform:translateX(-50%);background:linear-gradient(180deg,var(--m-sky1),var(--m-sky2) 45%,var(--m-sky3) 80%,var(--bg))}
+.mesa svg{position:absolute;inset:0;width:100%;height:100%}
+.m-stars circle{fill:var(--m-star);opacity:.7}.m-stars .tw{animation:twinkle 3.5s ease-in-out infinite}
+@keyframes twinkle{50%{opacity:.15}}
+.m-sun{fill:var(--m-sun1);filter:drop-shadow(0 0 30px var(--m-sun2))}.m-glow{opacity:.85}
+.m-r1{fill:var(--m-r1)}.m-r2{fill:var(--m-r2)}.m-r3{fill:var(--m-r3)}
+.pg-lobby .hero .display{color:#fff3e0;text-shadow:0 4px 30px rgba(0,0,0,.45)}
+.pg-lobby .hero .lead,.pg-lobby .hero .welcome,.pg-lobby .hero .fine{color:#f3e6d0;text-shadow:0 1px 10px rgba(0,0,0,.5)}
+.pg-lobby .hero .eyebrow{color:#f0c46a}
+:root[data-theme="light"] .pg-lobby .hero .display{color:#3a1d12;text-shadow:0 2px 20px rgba(255,240,210,.7)}
+:root[data-theme="light"] .pg-lobby .hero .lead,:root[data-theme="light"] .pg-lobby .hero .welcome,:root[data-theme="light"] .pg-lobby .hero .fine{color:#3a2418;text-shadow:none}
+:root[data-theme="light"] .pg-lobby .hero .eyebrow{color:#8a3a1a}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]) .pg-lobby .hero .display{color:#3a1d12;text-shadow:0 2px 20px rgba(255,240,210,.7)}
+  :root:not([data-theme="dark"]) .pg-lobby .hero .lead,:root:not([data-theme="dark"]) .pg-lobby .hero .welcome,:root:not([data-theme="dark"]) .pg-lobby .hero .fine{color:#3a2418;text-shadow:none}
+  :root:not([data-theme="dark"]) .pg-lobby .hero .eyebrow{color:#8a3a1a}}
+.weave{height:18px;margin:-18px 0 calc(var(--gap)*1.4);position:relative;left:50%;width:100vw;transform:translateX(-50%);background:var(--weave) repeat-x center/auto 18px;box-shadow:0 6px 20px rgba(0,0,0,.35)}
+.pg-lobby .cat-slots{--acc:#c8553d}.pg-lobby .cat-worlds{--acc:#3fb8a9}.pg-lobby .cat-reels{--acc:var(--sage)}
+.pg-lobby .cat-tables{--acc:#d9a441}.pg-lobby .cat-cards{--acc:var(--clay)}.pg-lobby .cat-arcade{--acc:#5fc6b8}
+.pg-lobby .cat-head{border-bottom:0;padding-bottom:16px;background:var(--weave) left bottom/auto 8px repeat-x;position:relative}
+.pg-lobby .cat-head h2{color:var(--gold-text)}
+.pg-lobby .cat-head h2::before{content:"";display:inline-block;width:.55em;height:.55em;margin-right:.45em;vertical-align:.12em;background:var(--acc);transform:rotate(45deg);box-shadow:0 0 0 3px var(--bg),0 0 0 5px var(--acc)}
+.pg-lobby .game-card{border-radius:22px 22px 22px 6px;background:linear-gradient(170deg,var(--card-solid),var(--card));border-color:color-mix(in srgb,var(--acc,var(--gold)) 32%,transparent);padding-top:28px}
+.pg-lobby .game-card::before{background:radial-gradient(circle at 88% 0%,color-mix(in srgb,var(--acc,var(--gold)) 34%,transparent),transparent 62%)}
+.pg-lobby .game-card::after{content:"";position:absolute;left:0;right:0;top:0;height:8px;background:var(--weave) left center/auto 8px repeat-x;opacity:.9}
+.pg-lobby .game-card:hover{border-color:var(--acc,var(--gold));box-shadow:0 20px 50px -22px color-mix(in srgb,var(--acc,var(--gold)) 70%,transparent)}
+.pg-lobby .game-card .play{color:var(--acc,var(--gold))}
+.pg-lobby .featured{background:radial-gradient(120% 100% at 85% 0%,#8a3f2a,#4a2233 45%,#1c1230);box-shadow:inset 0 0 0 2px rgba(217,164,65,.45),var(--shadow)}
+.pg-lobby .featured::after{content:"";position:absolute;left:0;right:0;bottom:0;height:10px;background:var(--weave) left center/auto 10px repeat-x}
+.pg-lobby .bonus-card{border-radius:18px 18px 18px 6px}
+@media (max-width:720px){.pg-lobby .hero{min-height:0;padding-bottom:170px}.mesa svg{height:100%}}
 
 /* bonus */
 .bonus-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:var(--gap);margin-bottom:calc(var(--gap)*1.5)}

@@ -45,6 +45,10 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | | **Reef Mines** | 5×5 grid, pick 1–24 urchins, find pearls | 99% |
 | | **Lighthouse Dice** | slide your own odds, roll over/under | 99% |
 
+### The lobby
+
+The lobby is a desert dusk over the inland San Diego backcountry: layered ridgelines, a setting sun and stars. The light theme turns it into a warm desert morning. The palette is earth tones: canyon brown, terracotta, turquoise, sandstone, sage and ochre. Each room gets its own accent color, and a geometric woven band runs under the hero, under each room heading and across the top of each card. The band is a generic pattern that doesn't copy any nation's designs, and it lives in one CSS variable (`--weave`). If a tribal partner wants their own artwork there, swap in what they supply and approve (the ridgelines are in `mesa_svg()`).
+
 ### Rooms
 
 Every classic game has its own themed room: an animated night-time scene behind the table and a sound palette. The harbor at night with a lighthouse beam (blackjack), a velvet VIP lounge with chandelier glow (baccarat), carnival bulbs and a turning Ferris wheel (big six), a kelp forest (keno), rolling surf (sic bo), fish crossing the reef (mines), a synthwave grid (video poker), a sunset with gulls (Sunset Reels), and more. Cards get a soft flip sound as they land, dice rattle, wheels tick, and every game has BIG / MEGA / EPIC win banners. One sound switch in the header mutes the whole site.
