@@ -1425,43 +1425,78 @@ const VSLOTS = [
     'tiki' => [
         'name' => 'Tiki Tides', 'blurb' => 'Laid-back luau. Frequent wins, volcano free spins at 2×.', 'sort' => 44,
         'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 64, 'S' => 40],
-        'pays' => ['H1' => [1.9, 5.7, 19], 'H2' => [1.5, 3.8, 11.4], 'H3' => [1.1, 2.9, 7.6], 'H4' => [0.95, 2.3, 5.7], 'L1' => [0.38, 0.95, 2.9], 'L2' => [0.38, 0.76, 2.3], 'L3' => [0.29, 0.76, 1.9], 'L4' => [0.29, 0.57, 1.5], 'L5' => [0.19, 0.57, 1.1]],
+        'pays' => ['H1' => [1.8, 5.5, 18.3], 'H2' => [1.5, 3.7, 11], 'H3' => [1.1, 2.7, 7.3], 'H4' => [0.91, 2.2, 5.5], 'L1' => [0.37, 0.91, 2.7], 'L2' => [0.37, 0.73, 2.2], 'L3' => [0.27, 0.73, 1.8], 'L4' => [0.27, 0.55, 1.5], 'L5' => [0.18, 0.55, 1.1]],
         'fs' => [3 => 10, 4 => 15, 5 => 20], 'mult' => 2,
+        'bonus' => ['type' => 'wheel', 'name' => 'Volcano Wheel'],
     ],
     'calavera' => [
         'name' => 'Calavera Fiesta', 'blurb' => 'Día de los Muertos under the marigolds. 12+ free spins at 2×.', 'sort' => 45,
         'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 52, 'S' => 40],
-        'pays' => ['H1' => [2.1, 6.2, 20.6], 'H2' => [1.6, 4.1, 12.3], 'H3' => [1.2, 3.1, 8.2], 'H4' => [1, 2.5, 6.2], 'L1' => [0.41, 1, 3.1], 'L2' => [0.41, 0.82, 2.5], 'L3' => [0.31, 0.82, 2.1], 'L4' => [0.31, 0.62, 1.6], 'L5' => [0.21, 0.62, 1.2]],
+        'pays' => ['H1' => [2, 6.1, 20.2], 'H2' => [1.6, 4, 12.1], 'H3' => [1.2, 3, 8.1], 'H4' => [1, 2.4, 6.1], 'L1' => [0.4, 1, 3], 'L2' => [0.4, 0.81, 2.4], 'L3' => [0.3, 0.81, 2], 'L4' => [0.3, 0.61, 1.6], 'L5' => [0.2, 0.61, 1.2]],
         'fs' => [3 => 12, 4 => 16, 5 => 24], 'mult' => 2,
+        'bonus' => ['type' => 'wheel', 'name' => 'Fiesta Wheel'],
     ],
     'abyss' => [
         'name' => 'Abyss Critters', 'blurb' => 'Glow-in-the-dark deep sea. Kraken wilds, pearl-clam free spins at 3×.', 'sort' => 40,
         'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 48, 'S' => 36],
-        'pays' => ['H1' => [2.1, 6.4, 21.5], 'H2' => [1.7, 4.3, 12.9], 'H3' => [1.3, 3.2, 8.6], 'H4' => [1.1, 2.6, 6.4], 'L1' => [0.43, 1.1, 3.2], 'L2' => [0.43, 0.86, 2.6], 'L3' => [0.32, 0.86, 2.1], 'L4' => [0.32, 0.64, 1.7], 'L5' => [0.21, 0.64, 1.3]],
+        'pays' => ['H1' => [2.1, 6.3, 21], 'H2' => [1.7, 4.2, 12.6], 'H3' => [1.3, 3.1, 8.4], 'H4' => [1, 2.5, 6.3], 'L1' => [0.42, 1, 3.1], 'L2' => [0.42, 0.84, 2.5], 'L3' => [0.31, 0.84, 2.1], 'L4' => [0.31, 0.63, 1.7], 'L5' => [0.21, 0.63, 1.3]],
         'fs' => [3 => 10, 4 => 15, 5 => 25], 'mult' => 3,
+        'bonus' => ['type' => 'pick', 'name' => 'Sunken Treasure', 'tile' => 'clam'],
     ],
     'tinfoil' => [
         'name' => 'Tinfoil Hat', 'blurb' => 'They don\'t want you to know about these free spins. UFO scatters, 3× bonus.', 'sort' => 41,
         'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 44, 'S' => 35],
-        'pays' => ['H1' => [2.3, 6.8, 22.7], 'H2' => [1.8, 4.5, 13.6], 'H3' => [1.4, 3.4, 9.1], 'H4' => [1.1, 2.7, 6.8], 'L1' => [0.45, 1.1, 3.4], 'L2' => [0.45, 0.91, 2.7], 'L3' => [0.34, 0.91, 2.3], 'L4' => [0.34, 0.68, 1.8], 'L5' => [0.23, 0.68, 1.4]],
+        'pays' => ['H1' => [2.2, 6.7, 22.3], 'H2' => [1.8, 4.5, 13.4], 'H3' => [1.3, 3.3, 8.9], 'H4' => [1.1, 2.7, 6.7], 'L1' => [0.45, 1.1, 3.3], 'L2' => [0.45, 0.89, 2.7], 'L3' => [0.33, 0.89, 2.2], 'L4' => [0.33, 0.67, 1.8], 'L5' => [0.22, 0.67, 1.3]],
         'fs' => [3 => 10, 4 => 14, 5 => 20], 'mult' => 3,
+        'bonus' => ['type' => 'pick', 'name' => 'Declassified', 'tile' => 'file'],
     ],
     'blacksite' => [
         'name' => 'Black Site Breach', 'blurb' => 'Crack the vault. Keycard wilds, classified-file free spins at 4×.', 'sort' => 42,
         'w' => ['H1' => 32, 'H2' => 52, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 40, 'S' => 32],
-        'pays' => ['H1' => [2.2, 6.7, 22.4], 'H2' => [1.8, 4.5, 13.4], 'H3' => [1.3, 3.4, 8.9], 'H4' => [1.1, 2.7, 6.7], 'L1' => [0.45, 1.1, 3.4], 'L2' => [0.45, 0.89, 2.7], 'L3' => [0.34, 0.89, 2.2], 'L4' => [0.34, 0.67, 1.8], 'L5' => [0.22, 0.67, 1.3]],
+        'pays' => ['H1' => [2.2, 6.6, 22], 'H2' => [1.8, 4.4, 13.2], 'H3' => [1.3, 3.3, 8.8], 'H4' => [1.1, 2.6, 6.6], 'L1' => [0.44, 1.1, 3.3], 'L2' => [0.44, 0.88, 2.6], 'L3' => [0.33, 0.88, 2.2], 'L4' => [0.33, 0.66, 1.8], 'L5' => [0.22, 0.66, 1.3]],
         'fs' => [3 => 10, 4 => 15, 5 => 20], 'mult' => 4,
+        'bonus' => ['type' => 'pick', 'name' => 'Vault Cracker', 'tile' => 'safe'],
     ],
     'coderain' => [
         'name' => 'Code Rain', 'blurb' => 'Green code falls forever. Rare free spins at a massive 5×.', 'sort' => 43,
         'w' => ['H1' => 30, 'H2' => 50, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 40, 'S' => 30],
-        'pays' => ['H1' => [2.3, 6.8, 22.7], 'H2' => [1.8, 4.5, 13.6], 'H3' => [1.4, 3.4, 9.1], 'H4' => [1.1, 2.7, 6.8], 'L1' => [0.45, 1.1, 3.4], 'L2' => [0.45, 0.91, 2.7], 'L3' => [0.34, 0.91, 2.3], 'L4' => [0.34, 0.68, 1.8], 'L5' => [0.23, 0.68, 1.4]],
+        'pays' => ['H1' => [2.2, 6.7, 22.4], 'H2' => [1.8, 4.5, 13.4], 'H3' => [1.3, 3.4, 9], 'H4' => [1.1, 2.7, 6.7], 'L1' => [0.45, 1.1, 3.4], 'L2' => [0.45, 0.9, 2.7], 'L3' => [0.34, 0.9, 2.2], 'L4' => [0.34, 0.67, 1.8], 'L5' => [0.22, 0.67, 1.3]],
         'fs' => [3 => 8, 4 => 12, 5 => 16], 'mult' => 5,
+        'bonus' => ['type' => 'pick', 'name' => 'Mainframe Hack', 'tile' => 'node'],
     ],
 ];
 const VS_SYMS = ['H1', 'H2', 'H3', 'H4', 'L1', 'L2', 'L3', 'L4', 'L5'];
 const VS_SCATTER_PAY = [3 => 2, 4 => 10, 5 => 50];
 const VS_MAX_WIN = 5000; // × total bet, per spin including its free spins
+/* Bonus game: a wild on each of reels 2, 3 and 4 in the base game.
+ * P(trigger) = Π over reels 2–4 of 1 − (1 − p_wild)³, which runs from about 1 in 430 (Tiki) to 1 in 1,500 (Code Rain).
+ * The pick bonus draws 3 prizes from VS_PICK (EV 6.76× each, 20.28× total). The wheel draws one stop from VS_WHEEL (EV 14.13×).
+ * The bonus value is independent of the grid, so RTP = base + free spins + P(trigger)·E[bonus]. Each paytable was re-solved to 95–95.6%.
+ */
+const VS_PICK = [2 => 3000, 3 => 2500, 5 => 1800, 8 => 1200, 10 => 800, 15 => 400, 25 => 200, 75 => 70, 250 => 25, 1000 => 5];   // per 10,000
+const VS_WHEEL = [5 => 220, 8 => 200, 10 => 170, 12 => 140, 15 => 110, 20 => 70, 25 => 50, 40 => 25, 75 => 10, 250 => 4, 1000 => 1]; // per 1,000
+const VS_WHEEL_SEGS = [5, 20, 8, 1000, 10, 40, 12, 75, 5, 25, 8, 250, 10, 15, 12, 25];
+const VS_JP = [25 => 'Mini', 75 => 'Minor', 250 => 'Major', 1000 => 'Grand'];
+function vs_weighted(array $table): int {
+    $roll = random_int(1, array_sum($table));
+    foreach ($table as $v => $n) { if (($roll -= $n) <= 0) { return (int)$v; } }
+    return (int)array_key_first($table);
+}
+function vs_bonus_hit(array $grid): bool {
+    return in_array('W', $grid[1], true) && in_array('W', $grid[2], true) && in_array('W', $grid[3], true);
+}
+/** Draw a bonus outcome. 'x' is × total bet. */
+function vs_bonus(array $t): array {
+    $b = $t['bonus'];
+    if ($b['type'] === 'wheel') {
+        $v = vs_weighted(VS_WHEEL);
+        $stops = array_keys(VS_WHEEL_SEGS, $v, true);
+        return ['type' => 'wheel', 'name' => $b['name'], 'segments' => VS_WHEEL_SEGS, 'stop' => $stops[random_int(0, count($stops) - 1)], 'x' => $v];
+    }
+    $picks = [vs_weighted(VS_PICK), vs_weighted(VS_PICK), vs_weighted(VS_PICK)];
+    $others = []; for ($i = 0; $i < 9; $i++) { $others[] = vs_weighted(VS_PICK); }
+    return ['type' => 'pick', 'name' => $b['name'], 'tile' => $b['tile'] ?? '', 'picks' => $picks, 'others' => $others, 'x' => array_sum($picks)];
+}
 
 function vs_draw(array $w, int $reel): string {
     $pool = $w;
@@ -1511,6 +1546,8 @@ function vs_play(): array {
     $base = vs_grid($t['w']);
     $ev = vs_eval($base, $t['pays']);
     $x = $ev['x'];
+    $bonus = null;
+    if (vs_bonus_hit($base)) { $bonus = vs_bonus($t); $x += $bonus['x']; $bonus['win'] = (int)floor($bet * $bonus['x']); }
     $fs = null;
     $n = count($ev['scatters']);
     if ($n >= 3) {
@@ -1531,14 +1568,16 @@ function vs_play(): array {
     $payout = (int)floor($bet * $x);
     $baseWin = (int)floor($bet * $ev['x']);
     $pid = (int)$p['id'];
-    tx(fn() => round_oneshot($pid, $slug, $bet, $payout, $fs ? 'free spins' : ($payout ? round($x, 2) . 'x' : 'no win'),
-        ['grid' => $base, 'x' => round($x, 4), 'fs' => $fs ? ['count' => $fs['count'], 'win' => $fs['win']] : null]));
+    tx(fn() => round_oneshot($pid, $slug, $bet, $payout, $bonus ? 'bonus ' . $bonus['x'] . 'x' : ($fs ? 'free spins' : ($payout ? round($x, 2) . 'x' : 'no win')),
+        ['grid' => $base, 'x' => round($x, 4), 'fs' => $fs ? ['count' => $fs['count'], 'win' => $fs['win']] : null, 'bonus' => $bonus ? ['name' => $bonus['name'], 'x' => $bonus['x'], 'win' => $bonus['win']] : null]));
     $wm = $payout / max(1, $bet);
-    return ['grid' => $base, 'wins' => $ev['wins'], 'scatters' => $ev['scatters'], 'base_win' => $baseWin, 'fs' => $fs,
+    $jp = $bonus ? array_values(array_filter($bonus['type'] === 'wheel' ? [$bonus['x']] : $bonus['picks'], fn($v) => isset(VS_JP[$v]))) : [];
+    return ['grid' => $base, 'wins' => $ev['wins'], 'scatters' => $ev['scatters'], 'base_win' => $baseWin, 'fs' => $fs, 'bonus' => $bonus,
         'payout' => $payout, 'bet' => $bet, 'x' => round($x, 2), 'capped' => $capped, 'win' => $payout > $bet, 'balance' => bal($pid),
         'tier' => $wm >= 50 ? 'epic' : ($wm >= 20 ? 'mega' : ($wm >= 8 ? 'big' : '')),
-        'message' => $fs ? $fs['count'] . ' free spins at ' . $t['mult'] . '×! Total +' . coins($payout) . ' GC'
-            : ($payout ? 'Win +' . coins($payout) . ' GC' : 'No win. Spin again?')];
+        'message' => $bonus ? $bonus['name'] . ($jp ? ' ' . strtoupper(VS_JP[max($jp)]) . ' JACKPOT' : ' bonus') . '! Total +' . coins($payout) . ' GC'
+            : ($fs ? $fs['count'] . ' free spins at ' . $t['mult'] . '×! Total +' . coins($payout) . ' GC'
+            : ($payout ? 'Win +' . coins($payout) . ' GC' : 'No win. Spin again?'))];
 }
 
 const VS_ART = [
@@ -3818,9 +3857,11 @@ function panel_videoslot(string $slug, array $p, array $g): string {
   <div class="vs-machine">
     <div class="vs-marquee">
       <span class="vs-title"><?= h($g['name']) ?></span>
-      <span class="vs-badges"><b>243 WAYS</b><b><?= $t['fs'][3] ?>+ FREE SPINS ×<?= (int)$t['mult'] ?></b></span>
+      <span class="vs-badges"><b>243 WAYS</b><b><?= $t['fs'][3] ?>+ FREE SPINS ×<?= (int)$t['mult'] ?></b><b><?= h(strtoupper($t['bonus']['name'])) ?> BONUS</b></span>
       <button type="button" class="icon-btn vs-snd" data-vs-sound aria-pressed="true" aria-label="Sound on"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" data-waves/></svg></button>
     </div>
+    <div class="vs-jp" aria-label="Bonus jackpots at your current bet"><?php foreach (VS_JP as $jx => $jn): ?><span class="jp-<?= strtolower($jn) ?>"><?= strtoupper($jn) ?> <b data-jp="<?= $jx ?>"><?= coins($jx * $bet) ?></b></span><?php endforeach; ?></div>
+    <div class="vs-bonus" data-vs-bonus hidden></div>
     <div class="vs-fsbar" data-vs-fsbar hidden><span>FREE SPINS</span><b data-fs-left>0</b><span>left · ×<?= (int)$t['mult'] ?> · won</span><b data-fs-won>0</b></div>
     <div class="vs-window">
       <div class="vs-reels" data-vs-reels role="img" aria-label="Slot reels">
@@ -3843,7 +3884,7 @@ function panel_videoslot(string $slug, array $p, array $g): string {
     <button class="btn gold xl vs-spin" data-vs-spin>Spin</button>
     <div class="vs-auto">
       <label>Autospin <select data-vs-auto-n><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select></label>
-      <label class="check"><input type="checkbox" data-vs-stopfs checked> Stop on free spins</label>
+      <label class="check"><input type="checkbox" data-vs-stopfs checked> Stop on free spins &amp; bonus</label>
       <label class="check"><input type="checkbox" data-vs-turbo> Turbo</label>
       <button type="button" class="btn ghost" data-vs-auto>Start</button>
       <button type="button" class="btn ghost" data-vs-3d hidden>3D cabinet</button>
@@ -3855,13 +3896,16 @@ function panel_videoslot(string $slug, array $p, array $g): string {
       <?php foreach (['W', 'S', ...VS_SYMS] as $sy): ?>
         <div class="vs-payrow" data-sym="<?= h($sy) ?>"><div class="vs-payicon"><?= vs_sym($slug, $sy) ?></div><div>
           <b><?= h($names[$sy]) ?></b>
-          <?php if ($sy === 'W'): ?><small>Wild on reels 2–4. Stands in for everything except the bonus.</small>
+          <?php if ($sy === 'W'): ?><small>Wild on reels 2–4. Stands in for everything except the scatter. A wild on each of reels 2, 3 and 4 starts the <?= h($t['bonus']['name']) ?> bonus.</small>
           <?php elseif ($sy === 'S'): ?><small>3 / 4 / 5 anywhere: <?= VS_SCATTER_PAY[3] ?>× / <?= VS_SCATTER_PAY[4] ?>× / <?= VS_SCATTER_PAY[5] ?>× bet and <?= $t['fs'][3] ?> / <?= $t['fs'][4] ?> / <?= $t['fs'][5] ?> free spins at ×<?= (int)$t['mult'] ?></small>
           <?php else: ?><small class="mono">5× <span data-pay="2"><?= $t['pays'][$sy][2] ?></span> · 4× <span data-pay="1"><?= $t['pays'][$sy][1] ?></span> · 3× <span data-pay="0"><?= $t['pays'][$sy][0] ?></span></small><?php endif; ?>
         </div></div>
       <?php endforeach; ?>
     </div>
-    <p class="fine">Pays shown are × your total bet, per way. 243 ways: a symbol pays when it lands anywhere on reels 1, 2, 3 (and 4, 5) in a row, and the win multiplies by how many times it shows on each reel. Free spins play automatically, can't retrigger, and every free-spin win is multiplied. Wins cap at <?= coins(VS_MAX_WIN) ?>× bet per spin. Return to player ≈ 95%.</p>
+    <p class="fine">Pays shown are × your total bet, per way. 243 ways: a symbol pays when it lands anywhere on reels 1, 2, 3 (and 4, 5) in a row, and the win multiplies by how many times it shows on each reel. Free spins play automatically, can't retrigger, and every free-spin win is multiplied. <?= $t['bonus']['type'] === 'pick'
+    ? h($t['bonus']['name']) . ' bonus: pick 3 of 12 tiles. Each tile hides 2×–1,000× your bet: 2× (30%), 3× (25%), 5× (18%), 8× (12%), 10× (8%), 15× (4%), Mini 25× (2%), Minor 75× (0.7%), Major 250× (0.25%), Grand 1,000× (0.05%).'
+    : h($t['bonus']['name']) . ' bonus: one spin of the wheel, 5×–1,000× your bet. The stops aren\'t equally likely: 5× (22%), 8× (20%), 10× (17%), 12× (14%), 15× (11%), 20× (7%), Mini 25× (5%), 40× (2.5%), Minor 75× (1%), Major 250× (0.4%), Grand 1,000× (0.1%).' ?>
+    Wins cap at <?= coins(VS_MAX_WIN) ?>× bet per spin. Return to player ≈ 95%, bonus included.</p>
   </details>
 </div>
 <?php return ob_get_clean();
@@ -6057,6 +6101,36 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
 .pu-tally{margin:0;font-size:.9rem;color:var(--muted)}.pu-tally b{font-family:var(--f-mono);color:var(--ink)}
 .pu-lane input{width:180px}
 /* 3D cabinet */
+.vs-jp{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:0 0 8px}
+.vs-jp span{display:grid;justify-items:center;padding:4px 6px;border-radius:10px;font:800 .62rem var(--f-body);letter-spacing:.16em;color:var(--vs-text);background:rgba(0,0,0,.4);border:1px solid color-mix(in srgb,var(--vs-accent) 35%,transparent)}
+.vs-jp b{font:600 .9rem var(--f-mono);letter-spacing:0;color:var(--vs-accent)}
+.vs-jp .jp-grand{border-color:var(--vs-accent);box-shadow:0 0 14px var(--vs-glow)}.vs-jp .jp-grand b{color:#fff;text-shadow:0 0 10px var(--vs-glow)}
+.vs-bonus{position:absolute;inset:0;z-index:6;border-radius:26px;display:grid;grid-template-rows:auto 1fr;gap:10px;padding:14px;background:radial-gradient(circle at 50% 40%,color-mix(in srgb,var(--vs-bg2) 88%,transparent),rgba(0,0,0,.92));backdrop-filter:blur(4px);animation:pop .35s}
+.vs-bonus[hidden]{display:none}
+.vb-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;color:var(--vs-text)}
+.vb-head>b{font:400 clamp(1.3rem,4vw,2.2rem) var(--vs-font);color:var(--vs-accent);text-shadow:0 0 18px var(--vs-glow)}
+.vb-head span{font:600 .9rem var(--f-body)}.vb-head span b{font-family:var(--f-mono);color:var(--vs-accent)}
+.vb-grid{display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:1fr;gap:8px;min-height:0}
+.vb-tile{display:grid;place-items:center;align-content:center;gap:2px;border-radius:14px;border:2px solid color-mix(in srgb,var(--vs-accent) 55%,transparent);background:linear-gradient(160deg,var(--vs-tile),var(--vs-tile2));color:var(--vs-text);cursor:pointer;padding:4px;min-height:0;transition:transform .15s,box-shadow .15s}
+.vb-tile svg{width:min(56px,70%);height:auto;max-height:100%}
+.vb-tile:hover:not(.open){transform:translateY(-2px) scale(1.03);box-shadow:0 0 18px var(--vs-glow)}
+.vb-tile.open{cursor:default;animation:vbflip .45s ease}
+.vb-tile.open b{font:400 clamp(1.1rem,3.4vw,1.9rem) var(--vs-font);color:var(--vs-accent)}.vb-tile.open small{font:500 .72rem var(--f-mono)}
+.vb-tile.jp{background:radial-gradient(circle,#fff3c4,var(--vs-accent) 60%,#8a5a00);color:#1a1204;box-shadow:0 0 26px var(--vs-glow)}.vb-tile.jp b{color:#1a1204}
+.vb-tile.miss{opacity:.4;animation:none}
+@keyframes vbflip{0%{transform:rotateY(90deg)}100%{transform:rotateY(0)}}
+.vb-wheel{position:relative;display:grid;place-items:center;min-height:0}
+.vb-svg{height:100%;max-height:min(440px,64vh);width:auto;max-width:100%;aspect-ratio:208/218;overflow:visible;filter:drop-shadow(0 10px 30px rgba(0,0,0,.6))}
+.vb-disc{transform-box:fill-box;transform-origin:center}
+.vb-rim{fill:var(--vs-frame2);stroke:var(--vs-frame);stroke-width:3}
+.vb-seg{stroke:rgba(0,0,0,.45);stroke-width:.8}.vb-seg.s0{fill:var(--vs-tile)}.vb-seg.s1{fill:color-mix(in srgb,var(--vs-accent) 30%,var(--vs-tile2))}
+.vb-seg.jp{fill:#d19a1a}.vb-seg.jp1000{fill:#ff6f59}.vb-seg.jp250{fill:#7b3fb3}
+.vb-seg.hit{fill:#fff;animation:winpulse .5s ease 5 alternate}
+.vb-lbl{font:700 10px var(--f-body);letter-spacing:.04em;fill:#fff;text-anchor:middle;dominant-baseline:middle;paint-order:stroke;stroke:rgba(0,0,0,.6);stroke-width:2px}
+.vb-hub{fill:var(--vs-frame);stroke:#fff;stroke-width:2}
+.vb-ptr{fill:#fff;stroke:var(--vs-frame2);stroke-width:1.5}.vb-lbl.j{font-size:9px}
+.vb-go{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border-radius:999px;padding:12px 18px}
+.vb-go:disabled{opacity:0;pointer-events:none}
 .vs-3d{position:absolute;inset:0;border-radius:18px;overflow:hidden;display:none;z-index:2}
 .vs-3d canvas{width:100%;height:100%;display:block;opacity:0;transition:opacity .5s}
 .vs-3d.ready canvas{opacity:1}
@@ -7362,7 +7436,7 @@ function initVideoSlot(root) {
   const cellHtml = s => `<div class="vs-cell" data-s="${s}"><svg viewBox="0 0 64 64" role="img" aria-label="${esc(cfg.names[s] || s)}">${cfg.art[s]}</svg></div>`;
   let busy = false, auto = false;
 
-  const paytable = () => { const b = +form.bet.value || 0; $$('[data-vs-paygrid] [data-pay]', el).forEach(x => { const s = x.closest('[data-sym]').dataset.sym; x.textContent = fmt(Math.floor(cfg.pays[s][+x.dataset.pay] * b)); }); };
+  const paytable = () => { const b = +form.bet.value || 0; $$('[data-vs-paygrid] [data-pay]', el).forEach(x => { const s = x.closest('[data-sym]').dataset.sym; x.textContent = fmt(Math.floor(cfg.pays[s][+x.dataset.pay] * b)); }); $$('[data-jp]', el).forEach(x => { x.textContent = fmt(+x.dataset.jp * b); }); };
   form.addEventListener('input', paytable); paytable();
 
   function spinReel(reel, final, i, teaseMs) {
@@ -7421,6 +7495,60 @@ function initVideoSlot(root) {
     return sleep(ms);
   }
 
+  const JP = { 25: 'MINI', 75: 'MINOR', 250: 'MAJOR', 1000: 'GRAND' };
+  // the bonus outcome is already decided by the server; this only lets the player reveal it
+  async function playBonus(b, bet) {
+    const box = $('[data-vs-bonus]', el);
+    const val = v => `<b>${JP[v] || v + '×'}</b><small>${fmt(Math.floor(v * bet))}</small>`;
+    box.className = 'vs-bonus ' + b.type; box.hidden = false;
+    sfx.scatter(K);
+    if (b.type === 'pick') {
+      box.innerHTML = `<div class="vb-head"><b>${esc(b.name)}</b><span>Pick <b data-vb-left>3</b> · won <b data-vb-won>0</b> GC</span></div>
+        <div class="vb-grid">${Array.from({ length: 12 }, (_, i) => `<button type="button" class="vb-tile" aria-label="Tile ${i + 1}"><svg viewBox="0 0 64 64" aria-hidden="true">${cfg.art.W}</svg></button>`).join('')}</div>`;
+      await new Promise(done => {
+        let n = 0, got = 0, timer = 0;
+        const arm = () => { timer = setTimeout(() => { const c = $$('.vb-tile:not(.open)', box); pick(c[Math.floor(Math.random() * c.length)]); }, auto ? (turbo() ? 350 : 800) : 15000); };
+        const pick = t => {
+          if (!t || n >= 3 || t.classList.contains('open')) return;
+          clearTimeout(timer);
+          const v = b.picks[n++]; got += v;
+          t.classList.add('open'); if (JP[v]) t.classList.add('jp'); t.innerHTML = val(v);
+          sfx.win(K, JP[v] ? 4 : 1); if (JP[v]) burst(t, 16);
+          $('[data-vb-left]', box).textContent = 3 - n; $('[data-vb-won]', box).textContent = fmt(Math.floor(got * bet));
+          if (n < 3) { arm(); return; }
+          setTimeout(() => {
+            let k = 0; $$('.vb-tile:not(.open)', box).forEach(x => { x.classList.add('open', 'miss'); x.innerHTML = val(b.others[k++]); });
+            setTimeout(done, turbo() ? 900 : 1900);
+          }, turbo() ? 250 : 600);
+        };
+        box.addEventListener('click', e => pick(e.target.closest('.vb-tile')));
+        arm();
+      });
+    } else {
+      const N = b.segments.length, seg = 360 / N, R = 96, pt = (a, r) => `${(Math.sin(a * Math.PI / 180) * r).toFixed(2)} ${(-Math.cos(a * Math.PI / 180) * r).toFixed(2)}`;
+      const wedges = b.segments.map((v, i) => { const a0 = i * seg - seg / 2, a1 = a0 + seg;
+        return `<path class="vb-seg ${JP[v] ? 'jp jp' + v : i % 2 ? 's1' : 's0'}" data-i="${i}" d="M0 0 L${pt(a0, R)} A${R} ${R} 0 0 1 ${pt(a1, R)} Z"/>`
+          + `<text transform="rotate(${i * seg}) translate(0 -60) rotate(-90)" class="vb-lbl${JP[v] ? ' j' : ''}">${JP[v] || v + '×'}</text>`; }).join('');
+      box.innerHTML = `<div class="vb-head"><b>${esc(b.name)}</b><span>Spin for up to the GRAND · ${fmt(1000 * bet)} GC</span></div>
+        <div class="vb-wheel"><svg class="vb-svg" viewBox="-104 -114 208 218" aria-hidden="true"><g class="vb-disc"><circle r="99" class="vb-rim"/>${wedges}</g><circle r="20" class="vb-hub"/><path class="vb-ptr" d="M-10 -112 L10 -112 L0 -86 Z"/></svg>
+        <button type="button" class="btn gold vb-go" data-vb-go>SPIN</button></div>`;
+      const go = $('[data-vb-go]', box);
+      await new Promise(r => { const t = setTimeout(() => go.click(), auto ? 600 : 15000); go.addEventListener('click', () => { clearTimeout(t); go.disabled = true; r(); }, { once: true }); });
+      const disc = $('.vb-disc', box), target = 360 * 6 - b.stop * seg + (Math.random() - .5) * seg * .6, dur = reduce ? 1 : (turbo() ? 2600 : 5000);
+      const t0 = performance.now(); let lastSeg = -1;
+      const tk = setInterval(() => { const u = Math.min(1, (performance.now() - t0) / dur), ang = target * (1 - Math.pow(1 - u, 3.2)), s = Math.floor((ang + seg / 2) / seg); if (s !== lastSeg) { lastSeg = s; sfx.tick(K); } }, 30);
+      await disc.animate([{ transform: 'rotate(0deg)' }, { transform: `rotate(${target}deg)` }], { duration: dur, easing: 'cubic-bezier(.15,.55,.12,1)', fill: 'forwards' }).finished;
+      clearInterval(tk);
+      const hit = $(`.vb-seg[data-i="${b.stop}"]`, box); if (hit) hit.classList.add('hit');
+      sfx.win(K, JP[b.x] ? 4 : 2); if (JP[b.x]) burst(disc, 24);
+      await sleep(turbo() ? 700 : 1400);
+    }
+    box.hidden = true; box.innerHTML = '';
+    const top = Math.max(...(b.type === 'pick' ? b.picks : [b.x]).filter(v => JP[v]), 0);
+    if (top) sfx.big(K);
+    await showBanner(`<b>${top ? JP[top] + ' JACKPOT' : 'BONUS WIN'}</b><span>${fmt(b.win)} GC · ${b.x}×</span>`, top ? 'tier epic' : 'fs', turbo() ? 1300 : 2400);
+  }
+
   async function spin() {
     if (busy) return null;
     sfx.unlock();
@@ -7436,12 +7564,20 @@ function initVideoSlot(root) {
     catch (err) { toast(err.message, 'err'); if (before !== null) setBalance(before); busy = false; spinBtn.disabled = false; el.classList.remove('spinning'); return null; }
     await showGrid(d.grid);
     await presentWins(d.wins, d.scatters, d.base_win);
+    let running = d.base_win;
+    if (d.bonus) {
+      el.classList.add('bonusing');
+      await showBanner(`<b>BONUS!</b><span>${esc(d.bonus.name)}</span>`, 'fs', turbo() ? 1000 : 1900);
+      await playBonus(d.bonus, bet);
+      running += d.bonus.win; countTo(running);
+      el.classList.remove('bonusing');
+    }
     if (d.fs) {
       sfx.scatter(K);
       el.classList.add('freespins');
       await showBanner(`<b>FREE SPINS</b><span>${d.fs.count} spins · every win ×${d.fs.mult}</span>`, 'fs', turbo() ? 1400 : 2600);
       fsbar.hidden = false;
-      let won = d.base_win;
+      let won = running;
       for (let i = 0; i < d.fs.spins.length; i++) {
         const s = d.fs.spins[i];
         $('[data-fs-left]', el).textContent = d.fs.spins.length - i - 1;
@@ -7450,7 +7586,7 @@ function initVideoSlot(root) {
         won += s.win;
         if (s.win) await presentWins(s.wins, s.scatters, won, `free spin ${i + 1}: +${fmt(s.win)}`);
         else await sleep(turbo() ? 120 : 300);
-        $('[data-fs-won]', el).textContent = fmt(won - d.base_win);
+        $('[data-fs-won]', el).textContent = fmt(won - running);
       }
       countTo(d.payout);
       await showBanner(`<b>FREE SPINS WON</b><span>${fmt(d.fs.win)} GC</span>`, 'fs', turbo() ? 1200 : 2200);
@@ -7477,7 +7613,7 @@ function initVideoSlot(root) {
       autoBtn.textContent = `Stop (${n - i})`;
       const d = await spin();
       if (!d) break;
-      if (stopFs && d.fs) { toast('Autospin stopped: free spins!', 'ok'); break; }
+      if (stopFs && (d.fs || d.bonus)) { toast(d.bonus ? 'Autospin stopped: bonus!' : 'Autospin stopped: free spins!', 'ok'); break; }
       await sleep(turbo() ? 80 : 350);
     }
     auto = false; autoBtn.classList.remove('coral'); autoBtn.textContent = 'Start';

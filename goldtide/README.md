@@ -18,12 +18,12 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | room | game | what it is | return |
 |---|---|---|---|
 | Slot Hall | **Sunset Reels** | the classic: 3 reels, 5 paylines | ~95% |
-| | **Abyss Critters** | deep-sea creatures, kraken wilds, 10–25 free spins ×3 | 95.1% |
-| | **Tinfoil Hat** | conspiracy theories: UFOs, bigfoot, lizard people; free spins ×3 | 95.7% |
-| | **Black Site Breach** | top-secret data heist: keycards, vaults, lasers; free spins ×4 | 95.1% |
-| | **Code Rain** | green digital-rain hacker world; rare free spins ×5 | 95.6% |
-| | **Tiki Tides** | tiki-bar luau, low volatility, free spins ×2 | 95.4% |
-| | **Calavera Fiesta** | Día de los Muertos, 12–24 free spins ×2 | 95.1% |
+| | **Abyss Critters** | deep-sea creatures, kraken wilds, 10–25 free spins ×3, Sunken Treasure pick bonus | 95.5% |
+| | **Tinfoil Hat** | conspiracy theories: UFOs, bigfoot, lizard people; free spins ×3, Declassified pick bonus | 95.0% |
+| | **Black Site Breach** | top-secret data heist: keycards, vaults, lasers; free spins ×4, Vault Cracker pick bonus | 95.3% |
+| | **Code Rain** | green digital-rain hacker world; rare free spins ×5, Mainframe Hack pick bonus | 95.0% |
+| | **Tiki Tides** | tiki-bar luau, low volatility, free spins ×2, Volcano Wheel | 95.6% |
+| | **Calavera Fiesta** | Día de los Muertos, 12–24 free spins ×2, Fiesta Wheel | 95.1% |
 | 3D Games | **Coronado Roulette 3D** | real 3D wheel: rotor, frets, a ball that orbits, drops and settles | 97.3% |
 | | **Harbor Craps** | full bubble craps: line, come, 3-4-5× odds, place/buy/lay on every number, Big 6/8, field, hardways, horn, C&E, every prop; 3D table or glass bubble dome | 98.6% pass |
 | | **Pier Pusher** | boardwalk coin pusher in 3D | 95% |
@@ -59,7 +59,7 @@ Harbor Craps deals the whole menu, bubble-craps style. You get Pass and Don't Pa
 
 ### Slot Hall
 
-Six themed 5-reel video slots on one shared engine: 243 ways (matching symbols pay left to right on adjacent reels), wilds on reels 2–4, and 3+ bonus symbols triggering free spins with a multiplier. Every cell is drawn independently, which gives the return-to-player an exact closed form. Each slot's table was solved to 95.0–95.8% and confirmed with 1.5M simulated spins. Each one has its own hand-drawn symbol set, animated backdrop (bubbles, digital rain, laser grid, UFO searchlights, torch embers, marigold petals), synthesized sound palette and volatility. You also get near-miss slowdowns when two bonus symbols land, a full free-spins mode, big/mega/epic win banners, autospin and turbo.
+Six themed 5-reel video slots on one shared engine: 243 ways (matching symbols pay left to right on adjacent reels), wilds on reels 2–4, and 3+ bonus symbols triggering free spins with a multiplier. Every cell is drawn independently, which gives the return-to-player an exact closed form. Each slot's table was solved to 95.0–95.8% and confirmed with 1.5M simulated spins. Each one has its own hand-drawn symbol set, animated backdrop (bubbles, digital rain, laser grid, UFO searchlights, torch embers, marigold petals), synthesized sound palette and volatility. Every slot also has a **bonus game with four jackpots**. It starts when a wild lands on each of reels 2, 3 and 4. The sea, conspiracy, black-site and hacker slots play a pick-3-of-12 bonus (Sunken Treasure, Declassified, Vault Cracker, Mainframe Hack). Tiki Tides and Calavera Fiesta spin a jackpot wheel. A marquee shows the Mini (25×), Minor (75×), Major (250×) and Grand (1,000×) values at your current bet. The server decides the prizes with the spin, and the player just reveals them. The bonus EV is part of the closed-form RTP and was re-checked with 1.5M simulated spins per slot. You also get near-miss slowdowns when two bonus symbols land, a full free-spins mode, big/mega/epic win banners, autospin and turbo.
 
 ### ★ Pearl Drop, the flagship
 
