@@ -13,11 +13,18 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 
 ## what's inside
 
-**For players: 16 games in four rooms**
+**For players: 22 games in five rooms**
 
 | room | game | what it is | return |
 |---|---|---|---|
-| Reels & Scratchers | **Sunset Reels** | 3 reels, 5 paylines | ~95% |
+| Slot Hall | **Sunset Reels** | the classic: 3 reels, 5 paylines | ~95% |
+| | **Abyss Critters** | deep-sea creatures, kraken wilds, 10–25 free spins ×3 | 95.1% |
+| | **Tinfoil Hat** | conspiracy theories: UFOs, bigfoot, lizard people; free spins ×3 | 95.7% |
+| | **Black Site Breach** | top-secret data heist: keycards, vaults, lasers; free spins ×4 | 95.1% |
+| | **Code Rain** | green digital-rain hacker world; rare free spins ×5 | 95.6% |
+| | **Tiki Tides** | tiki-bar luau, low volatility, free spins ×2 | 95.4% |
+| | **Calavera Fiesta** | Día de los Muertos, 12–24 free spins ×2 | 95.1% |
+| Scratch & Keno | | | |
 | | **Sunset Scratchers** | scratch 9 spots with your finger/mouse, match 3 | 91% |
 | | **Kelp Keno** | pick 1–10 of 40, ten drawn | 94–96% |
 | Table Games | **Coronado Roulette** | single-zero wheel, full board | 97.3% |
@@ -33,6 +40,10 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | | **Pearl Drop** ★ | the flagship plinko (see below) | 98.5–99% |
 | | **Reef Mines** | 5×5 grid, pick 1–24 urchins, find pearls | 99% |
 | | **Lighthouse Dice** | slide your own odds, roll over/under | 99% |
+
+### Slot Hall
+
+Six themed 5-reel video slots on one shared engine: 243 ways (matching symbols pay left to right on adjacent reels), wilds on reels 2–4, and 3+ bonus symbols triggering free spins with a multiplier. Every cell is drawn independently, which gives the return-to-player an exact closed form. Each slot's table was solved to 95.0–95.8% and confirmed with 1.5M simulated spins. Each one has its own hand-drawn symbol set, animated backdrop (bubbles, digital rain, laser grid, UFO searchlights, torch embers, marigold petals), synthesized sound palette and volatility. You also get near-miss slowdowns when two bonus symbols land, a full free-spins mode, big/mega/epic win banners, autospin and turbo.
 
 ### ★ Pearl Drop, the flagship
 

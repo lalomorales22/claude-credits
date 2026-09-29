@@ -13,7 +13,7 @@
 declare(strict_types=1);
 
 const APP_VERSION    = '1.0.0';
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 define('DATA_DIR', __DIR__ . '/data');
 define('DB_FILE',  DATA_DIR . '/app.sqlite');
 define('PW_FILE',  __DIR__ . '/admin_password.txt');
@@ -676,7 +676,13 @@ function roulette_spin(): array {
  * [name, category, blurb, sort]
  */
 const GAME_REGISTRY = [
-    'slots'      => ['Sunset Reels', 'reels', 'Three reels, five paylines, one very shiny sun.', 1],
+    'slots'      => ['Sunset Reels', 'slots', 'The classic: three reels, five paylines, one very shiny sun.', 1],
+    'abyss'      => ['Abyss Critters', 'slots', 'Glow-in-the-dark deep sea. Kraken wilds, pearl-clam free spins at 3×.', 2],
+    'tinfoil'    => ['Tinfoil Hat', 'slots', 'They don\'t want you to know about these free spins. UFO scatters, 3× bonus.', 3],
+    'blacksite'  => ['Black Site Breach', 'slots', 'Crack the vault. Keycard wilds, classified-file free spins at 4×.', 4],
+    'coderain'   => ['Code Rain', 'slots', 'Green code falls forever. Rare free spins at a massive 5×.', 5],
+    'tiki'       => ['Tiki Tides', 'slots', 'Laid-back luau. Frequent wins, volcano free spins at 2×.', 6],
+    'calavera'   => ['Calavera Fiesta', 'slots', 'Día de los Muertos under the marigolds. 12+ free spins at 2×.', 7],
     'scratch'    => ['Sunset Scratchers', 'reels', 'Scratch nine spots. Match three prizes and it\'s yours.', 2],
     'keno'       => ['Kelp Keno', 'reels', 'Pick up to ten of forty. Ten numbers wash ashore.', 3],
     'roulette'   => ['Coronado Roulette', 'tables', 'Single-zero European wheel. Spread your chips.', 10],
@@ -694,7 +700,8 @@ const GAME_REGISTRY = [
     'dice'       => ['Lighthouse Dice', 'arcade', 'Set your odds, roll over or under. You pick the risk.', 33],
 ];
 const GAME_CATEGORIES = [
-    'reels' => ['Reels & Scratchers', 'Spin it, scratch it, pick it.'],
+    'slots' => ['Slot Hall', 'Seven machines, seven worlds. 243 ways, wilds, free spins.'],
+    'reels' => ['Scratch & Keno', 'Scratch it, pick it, watch the numbers roll in.'],
     'tables' => ['Table Games', 'Chips on the felt, just like the floor.'],
     'cards' => ['Card Room', 'Beat the dealer, make the hand.'],
     'arcade' => ['Boardwalk Arcade', 'Fast rounds, big multipliers, your call when to stop.'],
@@ -1382,6 +1389,7 @@ const GAME_ENGINES = [
     'dice' => 'dice_play', 'plinko' => 'plinko_play', 'keno' => 'keno_play', 'scratch' => 'scratch_play',
     'bigwheel' => 'bigwheel_play', 'sicbo' => 'sicbo_play', 'crabs' => 'crabs_play', 'baccarat' => 'baccarat_play',
     'videopoker' => 'videopoker_act', 'threecard' => 'threecard_act', 'hilo' => 'hilo_act', 'mines' => 'mines_act', 'crash' => 'crash_act',
+    'abyss' => 'vs_play', 'tinfoil' => 'vs_play', 'blacksite' => 'vs_play', 'coderain' => 'vs_play', 'tiki' => 'vs_play', 'calavera' => 'vs_play',
 ];
 
 function play_game(): never {
@@ -1394,6 +1402,215 @@ function play_game(): never {
     flash(!empty($r['win']) ? 'ok' : 'info', $r['message'] ?? 'Done.');
     redirect(url($slug));
 }
+
+/* ═════════════════════════ SLOT HALL: themed 243-ways video slots ═════════════════════════
+ * 5 reels × 3 rows, every cell drawn independently by weight (wild only on reels 2–4).
+ * A win is a symbol on adjacent reels from the left; ways = product of matching cells per reel.
+ * 3+ scatters anywhere pay and trigger free spins at a fixed multiplier (no retriggers).
+ * Because cells are independent, RTP has a closed form:
+ *   RTP = ways + scatter + Σ P(n scatters)·spins(n)·mult·(ways + scatter)
+ * Each table below was solved to 95.0–95.8% and checked by simulation.
+ */
+const VSLOTS = [
+    'tiki' => [
+        'name' => 'Tiki Tides', 'blurb' => 'Laid-back luau. Frequent wins, volcano free spins at 2×.', 'sort' => 44,
+        'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 64, 'S' => 40],
+        'pays' => ['H1' => [1.9, 5.7, 19], 'H2' => [1.5, 3.8, 11.4], 'H3' => [1.1, 2.9, 7.6], 'H4' => [0.95, 2.3, 5.7], 'L1' => [0.38, 0.95, 2.9], 'L2' => [0.38, 0.76, 2.3], 'L3' => [0.29, 0.76, 1.9], 'L4' => [0.29, 0.57, 1.5], 'L5' => [0.19, 0.57, 1.1]],
+        'fs' => [3 => 10, 4 => 15, 5 => 20], 'mult' => 2,
+    ],
+    'calavera' => [
+        'name' => 'Calavera Fiesta', 'blurb' => 'Día de los Muertos under the marigolds. 12+ free spins at 2×.', 'sort' => 45,
+        'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 52, 'S' => 40],
+        'pays' => ['H1' => [2.1, 6.2, 20.6], 'H2' => [1.6, 4.1, 12.3], 'H3' => [1.2, 3.1, 8.2], 'H4' => [1, 2.5, 6.2], 'L1' => [0.41, 1, 3.1], 'L2' => [0.41, 0.82, 2.5], 'L3' => [0.31, 0.82, 2.1], 'L4' => [0.31, 0.62, 1.6], 'L5' => [0.21, 0.62, 1.2]],
+        'fs' => [3 => 12, 4 => 16, 5 => 24], 'mult' => 2,
+    ],
+    'abyss' => [
+        'name' => 'Abyss Critters', 'blurb' => 'Glow-in-the-dark deep sea. Kraken wilds, pearl-clam free spins at 3×.', 'sort' => 40,
+        'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 48, 'S' => 36],
+        'pays' => ['H1' => [2.1, 6.4, 21.5], 'H2' => [1.7, 4.3, 12.9], 'H3' => [1.3, 3.2, 8.6], 'H4' => [1.1, 2.6, 6.4], 'L1' => [0.43, 1.1, 3.2], 'L2' => [0.43, 0.86, 2.6], 'L3' => [0.32, 0.86, 2.1], 'L4' => [0.32, 0.64, 1.7], 'L5' => [0.21, 0.64, 1.3]],
+        'fs' => [3 => 10, 4 => 15, 5 => 25], 'mult' => 3,
+    ],
+    'tinfoil' => [
+        'name' => 'Tinfoil Hat', 'blurb' => 'They don\'t want you to know about these free spins. UFO scatters, 3× bonus.', 'sort' => 41,
+        'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 44, 'S' => 35],
+        'pays' => ['H1' => [2.3, 6.8, 22.7], 'H2' => [1.8, 4.5, 13.6], 'H3' => [1.4, 3.4, 9.1], 'H4' => [1.1, 2.7, 6.8], 'L1' => [0.45, 1.1, 3.4], 'L2' => [0.45, 0.91, 2.7], 'L3' => [0.34, 0.91, 2.3], 'L4' => [0.34, 0.68, 1.8], 'L5' => [0.23, 0.68, 1.4]],
+        'fs' => [3 => 10, 4 => 14, 5 => 20], 'mult' => 3,
+    ],
+    'blacksite' => [
+        'name' => 'Black Site Breach', 'blurb' => 'Crack the vault. Keycard wilds, classified-file free spins at 4×.', 'sort' => 42,
+        'w' => ['H1' => 32, 'H2' => 52, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 40, 'S' => 32],
+        'pays' => ['H1' => [2.2, 6.7, 22.4], 'H2' => [1.8, 4.5, 13.4], 'H3' => [1.3, 3.4, 8.9], 'H4' => [1.1, 2.7, 6.7], 'L1' => [0.45, 1.1, 3.4], 'L2' => [0.45, 0.89, 2.7], 'L3' => [0.34, 0.89, 2.2], 'L4' => [0.34, 0.67, 1.8], 'L5' => [0.22, 0.67, 1.3]],
+        'fs' => [3 => 10, 4 => 15, 5 => 20], 'mult' => 4,
+    ],
+    'coderain' => [
+        'name' => 'Code Rain', 'blurb' => 'Green code falls forever. Rare free spins at a massive 5×.', 'sort' => 43,
+        'w' => ['H1' => 30, 'H2' => 50, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 40, 'S' => 30],
+        'pays' => ['H1' => [2.3, 6.8, 22.7], 'H2' => [1.8, 4.5, 13.6], 'H3' => [1.4, 3.4, 9.1], 'H4' => [1.1, 2.7, 6.8], 'L1' => [0.45, 1.1, 3.4], 'L2' => [0.45, 0.91, 2.7], 'L3' => [0.34, 0.91, 2.3], 'L4' => [0.34, 0.68, 1.8], 'L5' => [0.23, 0.68, 1.4]],
+        'fs' => [3 => 8, 4 => 12, 5 => 16], 'mult' => 5,
+    ],
+];
+const VS_SYMS = ['H1', 'H2', 'H3', 'H4', 'L1', 'L2', 'L3', 'L4', 'L5'];
+const VS_SCATTER_PAY = [3 => 2, 4 => 10, 5 => 50];
+const VS_MAX_WIN = 5000; // × total bet, per spin including its free spins
+
+function vs_draw(array $w, int $reel): string {
+    $pool = $w;
+    if ($reel === 0 || $reel === 4) { unset($pool['W']); }
+    $roll = random_int(1, array_sum($pool));
+    foreach ($pool as $s => $n) { if (($roll -= $n) <= 0) { return $s; } }
+    return 'L5';
+}
+function vs_grid(array $w): array {
+    $g = [];
+    for ($r = 0; $r < 5; $r++) { for ($y = 0; $y < 3; $y++) { $g[$r][$y] = vs_draw($w, $r); } }
+    return $g;
+}
+/** Evaluate a grid: ways wins + scatter count. Returns multiples of total bet. */
+function vs_eval(array $grid, array $pays): array {
+    $wins = []; $total = 0.0;
+    foreach (VS_SYMS as $s) {
+        $ways = 1; $k = 0; $cells = [];
+        for ($r = 0; $r < 5; $r++) {
+            $c = 0;
+            foreach ($grid[$r] as $y => $v) { if ($v === $s || $v === 'W') { $c++; $cells[] = [$r, $y]; } }
+            if (!$c) { break; }
+            $ways *= $c; $k++;
+        }
+        if ($k >= 3) {
+            $cells = array_values(array_filter($cells, fn($x) => $x[0] < $k));
+            $m = $pays[$s][$k - 3] * $ways;
+            $total += $m;
+            $wins[] = ['sym' => $s, 'k' => $k, 'ways' => $ways, 'x' => $m, 'cells' => $cells];
+        }
+    }
+    $sc = [];
+    foreach ($grid as $r => $col) { foreach ($col as $y => $v) { if ($v === 'S') { $sc[] = [$r, $y]; } } }
+    $n = count($sc);
+    if ($n >= 3) { $total += VS_SCATTER_PAY[min($n, 5)]; }
+    usort($wins, fn($a, $b) => $b['x'] <=> $a['x']);
+    return ['wins' => $wins, 'x' => $total, 'scatters' => $sc];
+}
+
+function vs_play(): array {
+    $slug = (string)($_GET['g'] ?? '');
+    $t = VSLOTS[$slug] ?? null;
+    if (!$t) { fail('No such slot.', 404); }
+    $p = require_playable(); $g = game_cfg($slug);
+    $bet = clamp_bet($_POST['bet'] ?? '', $g);
+
+    $base = vs_grid($t['w']);
+    $ev = vs_eval($base, $t['pays']);
+    $x = $ev['x'];
+    $fs = null;
+    $n = count($ev['scatters']);
+    if ($n >= 3) {
+        $count = $t['fs'][min($n, 5)];
+        $spins = []; $fx = 0.0;
+        for ($i = 0; $i < $count; $i++) {
+            $gr = vs_grid($t['w']);
+            $e = vs_eval($gr, $t['pays']);
+            $m = $e['x'] * $t['mult'];
+            $fx += $m;
+            $spins[] = ['grid' => $gr, 'wins' => $e['wins'], 'scatters' => $e['scatters'], 'win' => (int)floor($bet * $m)];
+        }
+        $x += $fx;
+        $fs = ['count' => $count, 'mult' => $t['mult'], 'spins' => $spins, 'win' => (int)floor($bet * $fx)];
+    }
+    $capped = $x > VS_MAX_WIN;
+    $x = min($x, VS_MAX_WIN);
+    $payout = (int)floor($bet * $x);
+    $baseWin = (int)floor($bet * $ev['x']);
+    $pid = (int)$p['id'];
+    tx(fn() => round_oneshot($pid, $slug, $bet, $payout, $fs ? 'free spins' : ($payout ? round($x, 2) . 'x' : 'no win'),
+        ['grid' => $base, 'x' => round($x, 4), 'fs' => $fs ? ['count' => $fs['count'], 'win' => $fs['win']] : null]));
+    $wm = $payout / max(1, $bet);
+    return ['grid' => $base, 'wins' => $ev['wins'], 'scatters' => $ev['scatters'], 'base_win' => $baseWin, 'fs' => $fs,
+        'payout' => $payout, 'bet' => $bet, 'x' => round($x, 2), 'capped' => $capped, 'win' => $payout > $bet, 'balance' => bal($pid),
+        'tier' => $wm >= 50 ? 'epic' : ($wm >= 20 ? 'mega' : ($wm >= 8 ? 'big' : '')),
+        'message' => $fs ? $fs['count'] . ' free spins at ' . $t['mult'] . '×! Total +' . coins($payout) . ' GC'
+            : ($payout ? 'Win +' . coins($payout) . ' GC' : 'No win. Spin again?')];
+}
+
+const VS_ART = [
+    'abyss' => [
+        'W' => ['name' => 'Kraken', 'svg' => '<defs><radialGradient id="abyss-W-g1" cx="0.4" cy="0.3" r="0.75"><stop offset="0" stop-color="#f08cff"/><stop offset="0.55" stop-color="#b03ad8"/><stop offset="1" stop-color="#5a1484"/></radialGradient><linearGradient id="abyss-W-g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff0a0"/><stop offset="0.5" stop-color="#ffc83a"/><stop offset="1" stop-color="#c07a08"/></linearGradient><radialGradient id="abyss-W-g3"><stop offset="0" stop-color="#d45cff" stop-opacity="0.6"/><stop offset="1" stop-color="#d45cff" stop-opacity="0"/></radialGradient></defs><circle cx="32" cy="28" r="30" fill="url(#abyss-W-g3)"/><g fill="none" stroke-linecap="round"><path d="M18 34C8 36 3 44 8 50C12 54 17 50 14 46" stroke="#4a0f6e" stroke-width="8"/><path d="M46 34C56 36 61 44 56 50C52 54 47 50 50 46" stroke="#4a0f6e" stroke-width="8"/><path d="M18 34C8 36 3 44 8 50C12 54 17 50 14 46" stroke="#a62fd0" stroke-width="5"/><path d="M46 34C56 36 61 44 56 50C52 54 47 50 50 46" stroke="#a62fd0" stroke-width="5"/></g><path d="M13 32C13 14 21 6 32 6S51 14 51 32C51 41 43 44 32 44S13 41 13 32Z" fill="url(#abyss-W-g1)" stroke="#3a0a58" stroke-width="2"/><polygon points="22,9 25,1 29,7 32,0 35,7 39,1 42,9" fill="url(#abyss-W-g2)" stroke="#7a4a00" stroke-width="1.2" stroke-linejoin="round"/><circle cx="32" cy="4" r="1.6" fill="#5ff6ff"/><ellipse cx="22" cy="17" rx="5" ry="3" fill="#fff" opacity="0.4" transform="rotate(-35 22 17)"/><g fill="#ff7ad9"><circle cx="41" cy="15" r="2"/><circle cx="46" cy="21" r="1.4"/><circle cx="18" cy="26" r="1.4"/></g><circle cx="24.5" cy="29" r="6" fill="#fff"/><circle cx="39.5" cy="29" r="6" fill="#fff"/><circle cx="25" cy="29.5" r="4" fill="#00e5ff"/><circle cx="39" cy="29.5" r="4" fill="#00e5ff"/><circle cx="25" cy="29.5" r="2" fill="#001a2e"/><circle cx="39" cy="29.5" r="2" fill="#001a2e"/><circle cx="26.5" cy="27.5" r="1.3" fill="#fff"/><circle cx="40.5" cy="27.5" r="1.3" fill="#fff"/><path d="M22 22L28 24M42 22L36 24" stroke="#3a0a58" stroke-width="2" stroke-linecap="round"/><path d="M28 38Q32 41 36 38" fill="none" stroke="#3a0a58" stroke-width="2" stroke-linecap="round"/><rect x="9" y="46" width="46" height="15" rx="4" fill="url(#abyss-W-g2)" stroke="#6a3c00" stroke-width="1.6"/><text x="32" y="58" text-anchor="middle" font-family="Limelight" font-size="12" fill="#3a0a58">WILD</text>'],
+        'S' => ['name' => 'Pearl Clam', 'svg' => '<defs><radialGradient id="abyss-S-g1"><stop offset="0.55" stop-color="#5ff6ff" stop-opacity="0.45"/><stop offset="1" stop-color="#5ff6ff" stop-opacity="0"/></radialGradient><radialGradient id="abyss-S-g2" cx="0.35" cy="0.35" r="0.7"><stop offset="0" stop-color="#ffffff"/><stop offset="0.6" stop-color="#e0f4ff"/><stop offset="1" stop-color="#8fc8ff"/></radialGradient><linearGradient id="abyss-S-g3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffb3d1"/><stop offset="1" stop-color="#d84a86"/></linearGradient></defs><circle cx="32" cy="30" r="30" fill="url(#abyss-S-g1)"/><circle cx="32" cy="30" r="27" fill="none" stroke="#5ff6ff" stroke-width="2.5"/><path d="M9 33C9 15 20 7 32 7S55 15 55 33Z" fill="url(#abyss-S-g3)" stroke="#8a1f55" stroke-width="1.8" stroke-linejoin="round"/><g stroke="#a8306a" stroke-width="1.4" fill="none"><path d="M32 33L32 9M32 33L20 12M32 33L44 12M32 33L12 21M32 33L52 21"/></g><path d="M14 34C14 24 22 18 32 18S50 24 50 34Z" fill="#3a0c4a"/><circle cx="32" cy="28" r="13" fill="#bfefff" opacity="0.3"/><circle cx="32" cy="28" r="9.5" fill="url(#abyss-S-g2)" stroke="#6ab0e8" stroke-width="1"/><ellipse cx="29" cy="25" rx="3" ry="2" fill="#fff"/><path d="M6 35Q32 29 58 35Q54 50 32 51Q10 50 6 35Z" fill="#ec6fa0" stroke="#8a1f55" stroke-width="1.8" stroke-linejoin="round"/><g stroke="#b83a78" stroke-width="1.3" fill="none"><path d="M32 51L32 34M22 49L19 34M42 49L45 34M14 44L10 35M50 44L54 35"/></g><polygon points="8,49 14,48 13,56 16,62 8,58 4,61" fill="#0a8a9a"/><polygon points="56,49 50,48 51,56 48,62 56,58 60,61" fill="#0a8a9a"/><rect x="12" y="47" width="40" height="12" rx="2" fill="#11c6d8" stroke="#05606e" stroke-width="1.4"/><text x="32" y="56.5" text-anchor="middle" font-family="Figtree, sans-serif" font-weight="900" font-size="9" fill="#fff" letter-spacing="1">BONUS</text>'],
+        'H1' => ['name' => 'Anglerfish', 'svg' => '<defs><radialGradient id="abyss-H1-g1" cx="0.45" cy="0.35" r="0.7"><stop offset="0" stop-color="#4f6aa8"/><stop offset="1" stop-color="#141e3c"/></radialGradient><radialGradient id="abyss-H1-g2"><stop offset="0" stop-color="#fffbd0" stop-opacity="0.95"/><stop offset="0.4" stop-color="#ffe14a" stop-opacity="0.6"/><stop offset="1" stop-color="#ffe14a" stop-opacity="0"/></radialGradient></defs><path d="M12 36L3 24L6 36L3 48Z" fill="#2f4378" stroke="#5ff6ff" stroke-width="1.4" stroke-linejoin="round"/><path d="M22 18L26 10L30 17L34 11L37 17Z" fill="#ff6fa8" stroke="#8a1f55" stroke-width="1" stroke-linejoin="round"/><path d="M9 36C9 21 21 14 35 15C48 16 58 26 58 37C58 49 46 57 33 57C19 57 9 49 9 36Z" fill="url(#abyss-H1-g1)" stroke="#5ff6ff" stroke-width="1.6"/><path d="M36 36Q48 31 58 33L58 43Q50 52 36 45Z" fill="#3b0a24" stroke="#1a0010" stroke-width="1"/><path d="M38 36L40 40L42 35L44 39L46 34L48 38L50 33L52 37L54 33L56 36L57 33" fill="#fff" stroke="#fff" stroke-width="0.8" stroke-linejoin="round"/><path d="M39 45L41 42L43 46L45 42L47 46L49 41L51 45L53 40L55 43" fill="#fff" stroke="#fff" stroke-width="0.8" stroke-linejoin="round"/><path d="M20 44Q16 52 24 52Q24 47 20 44Z" fill="#ff6fa8" stroke="#8a1f55" stroke-width="1"/><ellipse cx="22" cy="26" rx="6" ry="3.5" fill="#fff" opacity="0.2" transform="rotate(-25 22 26)"/><g fill="#5ff6ff"><circle cx="18" cy="38" r="1.2"/><circle cx="24" cy="46" r="1"/><circle cx="15" cy="30" r="1"/></g><circle cx="38" cy="27" r="5.5" fill="#fff" stroke="#0a1024" stroke-width="1"/><circle cx="39.5" cy="27.5" r="3" fill="#0a1024"/><circle cx="40.5" cy="26" r="1.1" fill="#fff"/><path d="M31 22L43 23" stroke="#0a1024" stroke-width="2" stroke-linecap="round"/><path d="M36 16C34 5 46 0 52 8" fill="none" stroke="#2f4378" stroke-width="2.6" stroke-linecap="round"/><circle cx="52" cy="11" r="10" fill="url(#abyss-H1-g2)"/><circle cx="52" cy="11" r="4.5" fill="#ffd21f" stroke="#b07a00" stroke-width="1"/><circle cx="50.5" cy="9.5" r="1.6" fill="#fff"/>'],
+        'H2' => ['name' => 'Great White Shark', 'svg' => '<defs><linearGradient id="abyss-H2-g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a9bfd4"/><stop offset="1" stop-color="#4e6a88"/></linearGradient></defs><path d="M27 22L33 5L40 22Z" fill="#5c7898" stroke="#1d2e44" stroke-width="1.6" stroke-linejoin="round"/><path d="M50 30L61 14L57 34L62 52L49 40Z" fill="#5c7898" stroke="#1d2e44" stroke-width="1.6" stroke-linejoin="round"/><path d="M3 36C10 22 30 17 46 26C50 29 52 33 52 35C52 38 50 41 46 43C32 52 12 50 3 36Z" fill="url(#abyss-H2-g1)" stroke="#1d2e44" stroke-width="1.8" stroke-linejoin="round"/><path d="M5 38C14 47 32 49 46 42C34 43 18 43 5 38Z" fill="#f4f8fb"/><path d="M26 42L20 56L34 44Z" fill="#5c7898" stroke="#1d2e44" stroke-width="1.6" stroke-linejoin="round"/><path d="M5 37Q12 44 22 39Q14 40 5 37Z" fill="#7a1030"/><path d="M7 38L9 40.5L11 39L13 41.5L15 40L17 42L19 40.2L21 40" fill="none" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/><g stroke="#2d4460" stroke-width="1.3" stroke-linecap="round"><path d="M27 29L25 36M30 29L28 36M33 29L31 36"/></g><ellipse cx="22" cy="24" rx="8" ry="2.5" fill="#fff" opacity="0.45" transform="rotate(-12 22 24)"/><circle cx="15" cy="31" r="3" fill="#fff"/><circle cx="15.5" cy="31" r="1.9" fill="#0a1024"/><circle cx="16" cy="30.3" r="0.7" fill="#fff"/><path d="M11 27L19 28.5" stroke="#1d2e44" stroke-width="1.8" stroke-linecap="round"/>'],
+        'H3' => ['name' => 'Sea Turtle', 'svg' => '<defs><radialGradient id="abyss-H3-g1" cx="0.4" cy="0.35" r="0.7"><stop offset="0" stop-color="#6ccf6a"/><stop offset="1" stop-color="#1e6b3a"/></radialGradient></defs><g fill="#9ad67a" stroke="#2f5a26" stroke-width="1.5" stroke-linejoin="round"><path d="M18 26C8 18 3 20 4 26C8 30 14 32 20 32Z"/><path d="M46 26C56 18 61 20 60 26C56 30 50 32 44 32Z"/><path d="M21 46C14 50 12 57 16 58C20 56 24 52 25 48Z"/><path d="M43 46C50 50 52 57 48 58C44 56 40 52 39 48Z"/><path d="M29 52L32 60L35 52Z"/></g><ellipse cx="32" cy="10" rx="7.5" ry="7.5" fill="#9ad67a" stroke="#2f5a26" stroke-width="1.5"/><circle cx="28.5" cy="9" r="2" fill="#0a1024"/><circle cx="35.5" cy="9" r="2" fill="#0a1024"/><circle cx="29" cy="8.3" r="0.7" fill="#fff"/><circle cx="36" cy="8.3" r="0.7" fill="#fff"/><path d="M30 13Q32 14.5 34 13" fill="none" stroke="#2f5a26" stroke-width="1.2" stroke-linecap="round"/><ellipse cx="32" cy="35" rx="17" ry="19" fill="#c8a24a" stroke="#4a3510" stroke-width="1.8"/><ellipse cx="32" cy="35" rx="14.5" ry="16.5" fill="url(#abyss-H3-g1)"/><g fill="none" stroke="#b9ec8a" stroke-width="1.4" stroke-linejoin="round"><polygon points="32,28 38,32 38,39 32,43 26,39 26,32"/><path d="M32 28L32 19M38 32L45 27M38 39L45 44M32 43L32 51M26 39L19 44M26 32L19 27"/></g><ellipse cx="25" cy="25" rx="4" ry="2.5" fill="#fff" opacity="0.35" transform="rotate(-35 25 25)"/>'],
+        'H4' => ['name' => 'Octopus', 'svg' => '<defs><radialGradient id="abyss-H4-g1" cx="0.4" cy="0.3" r="0.75"><stop offset="0" stop-color="#ffc26a"/><stop offset="0.6" stop-color="#ff7f1f"/><stop offset="1" stop-color="#c24a08"/></radialGradient></defs><g fill="none" stroke-linecap="round"><g stroke="#7a2e04" stroke-width="7.5"><path d="M20 36C12 42 6 44 5 52"/><path d="M26 40C24 48 18 52 20 58"/><path d="M38 40C40 48 46 52 44 58"/><path d="M44 36C52 42 58 44 59 52"/></g><g stroke="#ff8a2a" stroke-width="4.5"><path d="M20 36C12 42 6 44 5 52"/><path d="M26 40C24 48 18 52 20 58"/><path d="M38 40C40 48 46 52 44 58"/><path d="M44 36C52 42 58 44 59 52"/></g></g><g fill="#ffe0b0"><circle cx="10" cy="45" r="1.1"/><circle cx="54" cy="45" r="1.1"/><circle cx="22" cy="51" r="1.1"/><circle cx="42" cy="51" r="1.1"/></g><path d="M12 26C12 12 21 5 32 5S52 12 52 26C52 36 44 42 32 42S12 36 12 26Z" fill="url(#abyss-H4-g1)" stroke="#7a2e04" stroke-width="2"/><ellipse cx="23" cy="14" rx="5" ry="3" fill="#fff" opacity="0.45" transform="rotate(-30 23 14)"/><g fill="#e0620e"><circle cx="40" cy="12" r="2"/><circle cx="45" cy="18" r="1.4"/><circle cx="36" cy="9" r="1.2"/></g><circle cx="25" cy="27" r="4.5" fill="#fff"/><circle cx="39" cy="27" r="4.5" fill="#fff"/><circle cx="25.5" cy="28" r="2.6" fill="#1a0a00"/><circle cx="38.5" cy="28" r="2.6" fill="#1a0a00"/><circle cx="26.5" cy="26.8" r="1" fill="#fff"/><circle cx="39.5" cy="26.8" r="1" fill="#fff"/><ellipse cx="18" cy="33" rx="3" ry="1.6" fill="#ff5a6a" opacity="0.6"/><ellipse cx="46" cy="33" rx="3" ry="1.6" fill="#ff5a6a" opacity="0.6"/><path d="M29 34Q32 37 35 34" fill="none" stroke="#7a2e04" stroke-width="1.8" stroke-linecap="round"/>'],
+        'L1' => ['name' => 'Jellyfish', 'svg' => '<defs><radialGradient id="abyss-L1-g1" cx="0.45" cy="0.3" r="0.8"><stop offset="0" stop-color="#ffd6f0"/><stop offset="1" stop-color="#ff5fb8"/></radialGradient></defs><circle cx="32" cy="24" r="20" fill="#ff7ac8" opacity="0.18"/><g fill="none" stroke="#ff9fd6" stroke-width="2.4" stroke-linecap="round" opacity="0.9"><path d="M18 32C15 40 21 46 17 56"/><path d="M26 33C24 42 29 48 26 58"/><path d="M38 33C40 42 35 48 38 58"/><path d="M46 32C49 40 43 46 47 56"/></g><g fill="none" stroke="#ffd0ec" stroke-width="3.5" stroke-linecap="round" opacity="0.8"><path d="M32 33C30 42 34 46 32 52"/></g><path d="M11 31C11 16 20 8 32 8S53 16 53 31Q48 35 43 31Q37.5 35 32 31Q26.5 35 21 31Q16 35 11 31Z" fill="url(#abyss-L1-g1)" stroke="#c2267e" stroke-width="1.8" stroke-linejoin="round" opacity="0.95"/><ellipse cx="22" cy="17" rx="5" ry="3" fill="#fff" opacity="0.6" transform="rotate(-30 22 17)"/><circle cx="27" cy="24" r="1.8" fill="#6a0a40"/><circle cx="37" cy="24" r="1.8" fill="#6a0a40"/>'],
+        'L2' => ['name' => 'Seahorse', 'svg' => '<defs><linearGradient id="abyss-L2-g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff07a"/><stop offset="1" stop-color="#f0a800"/></linearGradient></defs><path d="M24 22L15 26L18 32L14 38L24 38Z" fill="#ff9a3a" stroke="#8a5a00" stroke-width="1.3" stroke-linejoin="round"/><path d="M32 18C22 26 25 34 32 38C39 43 38 52 31 55C26 56 24 50 29 49" fill="none" stroke="#8a5a00" stroke-width="12" stroke-linecap="round"/><path d="M32 18C22 26 25 34 32 38C39 43 38 52 31 55C26 56 24 50 29 49" fill="none" stroke="url(#abyss-L2-g1)" stroke-width="9" stroke-linecap="round"/><path d="M28 30L33 29M30 36L35 35M34 42L38 43M33 48L37 50" stroke="#c88400" stroke-width="1.3" stroke-linecap="round"/><path d="M36 12L50 14Q53 16 50 18L38 21Z" fill="#ffd21f" stroke="#8a5a00" stroke-width="1.5" stroke-linejoin="round"/><circle cx="32" cy="14" r="9" fill="url(#abyss-L2-g1)" stroke="#8a5a00" stroke-width="1.6"/><path d="M26 7L28 2L31 6L34 2L35 7" fill="#ff9a3a" stroke="#8a5a00" stroke-width="1.2" stroke-linejoin="round"/><circle cx="34" cy="13" r="2.4" fill="#fff"/><circle cx="34.6" cy="13" r="1.4" fill="#1a1000"/><ellipse cx="28" cy="10" rx="2.5" ry="1.5" fill="#fff" opacity="0.6"/>'],
+        'L3' => ['name' => 'Pufferfish', 'svg' => '<defs><radialGradient id="abyss-L3-g1" cx="0.4" cy="0.35" r="0.7"><stop offset="0" stop-color="#eaffa0"/><stop offset="1" stop-color="#7cc41a"/></radialGradient></defs><path d="M50 34L61 25L59 34L61 43Z" fill="#a8e03a" stroke="#3d6a08" stroke-width="1.4" stroke-linejoin="round"/><polygon points="30.0,9.0 34.2,15.5 40.8,11.5 41.8,19.1 49.5,18.4 47.1,25.8 54.4,28.4 49.0,34.0 54.4,39.6 47.1,42.2 49.5,49.6 41.8,48.9 40.8,56.5 34.2,52.5 30.0,59.0 25.8,52.5 19.2,56.5 18.2,48.9 10.5,49.6 12.9,42.2 5.6,39.6 11.0,34.0 5.6,28.4 12.9,25.8 10.5,18.4 18.2,19.1 19.2,11.5 25.8,15.5" fill="#c8f060" stroke="#3d6a08" stroke-width="1.4" stroke-linejoin="round"/><circle cx="30" cy="34" r="19" fill="url(#abyss-L3-g1)" stroke="#3d6a08" stroke-width="1.8"/><path d="M14 40C18 50 36 54 46 44C38 48 22 48 14 40Z" fill="#fbffe0"/><ellipse cx="22" cy="24" rx="5" ry="3" fill="#fff" opacity="0.55" transform="rotate(-35 22 24)"/><circle cx="21" cy="31" r="4.5" fill="#fff" stroke="#3d6a08" stroke-width="1"/><circle cx="20" cy="31.5" r="2.4" fill="#102000"/><circle cx="19.3" cy="30.5" r="0.9" fill="#fff"/><ellipse cx="14" cy="40" rx="2.4" ry="2" fill="#ff7a8a"/><path d="M34 36Q40 34 40 40Q36 40 34 36Z" fill="#8fd02a" stroke="#3d6a08" stroke-width="1"/>'],
+        'L4' => ['name' => 'Starfish', 'svg' => '<defs><radialGradient id="abyss-L4-g1" cx="0.45" cy="0.4" r="0.6"><stop offset="0" stop-color="#ffb08a"/><stop offset="1" stop-color="#e8323a"/></radialGradient></defs><polygon points="32.0,9.0 38.5,25.1 55.8,26.3 42.5,37.4 46.7,54.2 32.0,45.0 17.3,54.2 21.5,37.4 8.2,26.3 25.5,25.1" fill="#8a1018" stroke="#8a1018" stroke-width="8" stroke-linejoin="round"/><polygon points="32.0,9.0 38.5,25.1 55.8,26.3 42.5,37.4 46.7,54.2 32.0,45.0 17.3,54.2 21.5,37.4 8.2,26.3 25.5,25.1" fill="url(#abyss-L4-g1)" stroke="#ff5a4a" stroke-width="5" stroke-linejoin="round"/><g fill="#ffe0c8"><circle cx="32" cy="16" r="1.4"/><circle cx="32" cy="22" r="1.4"/><circle cx="48" cy="30" r="1.4"/><circle cx="42" cy="32" r="1.4"/><circle cx="16" cy="30" r="1.4"/><circle cx="22" cy="32" r="1.4"/><circle cx="42" cy="50" r="1.4"/><circle cx="22" cy="50" r="1.4"/></g><ellipse cx="27" cy="24" rx="3" ry="1.8" fill="#fff" opacity="0.5" transform="rotate(-50 27 24)"/><circle cx="28" cy="35" r="1.8" fill="#3a0008"/><circle cx="36" cy="35" r="1.8" fill="#3a0008"/><path d="M29.5 39Q32 41 34.5 39" fill="none" stroke="#3a0008" stroke-width="1.4" stroke-linecap="round"/>'],
+        'L5' => ['name' => 'Clownfish', 'svg' => '<defs><radialGradient id="abyss-L5-g1" cx="0.4" cy="0.35" r="0.7"><stop offset="0" stop-color="#4fb4ff"/><stop offset="1" stop-color="#0b4fa8"/></radialGradient><clipPath id="abyss-L5-c1"><path d="M10 32C10 22 22 16 34 17C44 18 50 25 50 32C50 39 44 46 34 47C22 48 10 42 10 32Z"/></clipPath></defs><circle cx="32" cy="32" r="26" fill="url(#abyss-L5-g1)" stroke="#8fdcff" stroke-width="2"/><ellipse cx="22" cy="17" rx="7" ry="3.5" fill="#fff" opacity="0.3" transform="rotate(-30 22 17)"/><path d="M48 32L58 23L56 32L58 41Z" fill="#ff7a12" stroke="#1a0a00" stroke-width="1.5" stroke-linejoin="round"/><path d="M28 18L34 11L40 19Z" fill="#ff7a12" stroke="#1a0a00" stroke-width="1.5" stroke-linejoin="round"/><path d="M10 32C10 22 22 16 34 17C44 18 50 25 50 32C50 39 44 46 34 47C22 48 10 42 10 32Z" fill="#ff7a12"/><g clip-path="url(#abyss-L5-c1)" stroke="#1a0a00" stroke-width="1.2"><rect x="18" y="10" width="6" height="44" fill="#fff"/><rect x="32" y="10" width="6" height="44" fill="#fff"/><rect x="45" y="10" width="4" height="44" fill="#fff"/></g><path d="M10 32C10 22 22 16 34 17C44 18 50 25 50 32C50 39 44 46 34 47C22 48 10 42 10 32Z" fill="none" stroke="#1a0a00" stroke-width="1.8"/><path d="M26 40L30 46L33 40Z" fill="#ff7a12" stroke="#1a0a00" stroke-width="1.2" stroke-linejoin="round"/><circle cx="15" cy="29" r="2.8" fill="#fff"/><circle cx="14.6" cy="29.3" r="1.7" fill="#1a0a00"/><circle cx="14" cy="28.6" r="0.6" fill="#fff"/><path d="M11 36Q13 37 15 36" fill="none" stroke="#1a0a00" stroke-width="1.2" stroke-linecap="round"/>'],
+    ],
+    'tinfoil' => [
+        'W' => ['name' => 'Tinfoil Hat', 'svg' => '<defs><radialGradient id="tinfoil-W-glow" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#7dff8a" stop-opacity="0.55"/><stop offset="1" stop-color="#7dff8a" stop-opacity="0"/></radialGradient><linearGradient id="tinfoil-W-foil" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.45" stop-color="#b9c0cc"/><stop offset="0.7" stop-color="#eef1f6"/><stop offset="1" stop-color="#7c8596"/></linearGradient><linearGradient id="tinfoil-W-gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe27a"/><stop offset="1" stop-color="#e08a1e"/></linearGradient></defs><circle cx="32" cy="27" r="27" fill="url(#tinfoil-W-glow)"/><g transform="translate(32 26) scale(1.12) translate(-32 -26)"><line x1="32" y1="9" x2="32" y2="6" stroke="#cfd5de" stroke-width="1.6"/><circle cx="32" cy="6" r="2.4" fill="#7dff8a" stroke="#1d6b2a" stroke-width="0.8"/><polygon points="32,8 38,14 36,18 43,23 41,28 48,34 46,37 53,43 11,43 18,37 16,34 23,28 21,23 28,18 26,14" fill="url(#tinfoil-W-foil)" stroke="#4b5363" stroke-width="1.4" stroke-linejoin="round"/><polyline points="32,8 30,18 35,26 29,34 34,43" fill="none" stroke="#6d7688" stroke-width="1"/><polyline points="21,23 29,27 24,36 18,37" fill="none" stroke="#6d7688" stroke-width="0.9"/><polyline points="43,23 37,29 42,36 48,34" fill="none" stroke="#6d7688" stroke-width="0.9"/><polygon points="31,11 28,18 30,23" fill="#ffffff"/><polygon points="24,28 21,34 25,33" fill="#ffffff" opacity="0.9"/><polygon points="38,17 40,22 36,21" fill="#ffffff" opacity="0.8"/><ellipse cx="32" cy="43.5" rx="23" ry="3.6" fill="#9aa3b3" stroke="#4b5363" stroke-width="1.2"/></g><rect x="9" y="47" width="46" height="13" rx="3.5" fill="url(#tinfoil-W-gold)" stroke="#7a3f0a" stroke-width="1.2"/><text x="32" y="57.3" text-anchor="middle" font-family="Limelight" font-size="10.5" fill="#1b0f3a">WILD</text>'],
+        'S' => ['name' => 'UFO', 'svg' => '<defs><radialGradient id="tinfoil-S-halo" cx="0.5" cy="0.5" r="0.5"><stop offset="0.6" stop-color="#5dffb0" stop-opacity="0"/><stop offset="0.85" stop-color="#5dffb0" stop-opacity="0.45"/><stop offset="1" stop-color="#5dffb0" stop-opacity="0"/></radialGradient><linearGradient id="tinfoil-S-beam" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b6ff7a" stop-opacity="0.85"/><stop offset="1" stop-color="#b6ff7a" stop-opacity="0.1"/></linearGradient><linearGradient id="tinfoil-S-hull" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4f6fb"/><stop offset="0.5" stop-color="#aab2c2"/><stop offset="1" stop-color="#5a6275"/></linearGradient></defs><circle cx="32" cy="30" r="29" fill="url(#tinfoil-S-halo)"/><circle cx="32" cy="30" r="25" fill="none" stroke="#5dffb0" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.8"/><polygon points="24,32 40,32 50,52 14,52" fill="url(#tinfoil-S-beam)"/><ellipse cx="32" cy="21" rx="10" ry="9" fill="#6ff0ff" stroke="#1b6a86" stroke-width="1.2"/><ellipse cx="29" cy="17.5" rx="3.5" ry="2.3" fill="#ffffff" opacity="0.85"/><ellipse cx="32" cy="27" rx="25" ry="7.5" fill="url(#tinfoil-S-hull)" stroke="#353b4a" stroke-width="1.4"/><ellipse cx="32" cy="25" rx="16" ry="2.2" fill="#ffffff" opacity="0.7"/><circle cx="15" cy="28.5" r="2" fill="#ffe14a"/><circle cx="24" cy="30.5" r="2" fill="#ff5ad6"/><circle cx="32" cy="31.2" r="2" fill="#ffe14a"/><circle cx="40" cy="30.5" r="2" fill="#ff5ad6"/><circle cx="49" cy="28.5" r="2" fill="#ffe14a"/><polygon points="6,46 12,46 12,58 6,58 9,52" fill="#8a1f7a"/><polygon points="58,46 52,46 52,58 58,58 55,52" fill="#8a1f7a"/><rect x="10" y="45" width="44" height="12" rx="2" fill="#e03aa8" stroke="#6a0f55" stroke-width="1"/><text x="32" y="54.5" text-anchor="middle" font-family="Figtree" font-weight="900" font-size="9.5" fill="#ffffff">BONUS</text>'],
+        'H1' => ['name' => 'Grey Alien', 'svg' => '<defs><radialGradient id="tinfoil-H1-skin" cx="0.4" cy="0.3" r="0.8"><stop offset="0" stop-color="#d8ffd0"/><stop offset="0.55" stop-color="#8fdc8a"/><stop offset="1" stop-color="#3f8f55"/></radialGradient><radialGradient id="tinfoil-H1-glow" cx="0.5" cy="0.5" r="0.5"><stop offset="0.5" stop-color="#9dff6a" stop-opacity="0.45"/><stop offset="1" stop-color="#9dff6a" stop-opacity="0"/></radialGradient></defs><circle cx="32" cy="31" r="30" fill="url(#tinfoil-H1-glow)"/><path d="M32 5 C49 5 58 16 56 29 C54 42 41 56 32 59 C23 56 10 42 8 29 C6 16 15 5 32 5Z" fill="url(#tinfoil-H1-skin)" stroke="#1f5a33" stroke-width="1.8"/><path d="M11 28 C13 20 25 21 29 33 C27 38 14 38 11 28Z" fill="#101018"/><path d="M53 28 C51 20 39 21 35 33 C37 38 50 38 53 28Z" fill="#101018"/><ellipse cx="18" cy="27" rx="3.2" ry="2" fill="#ffffff" opacity="0.9" transform="rotate(20 18 27)"/><ellipse cx="46" cy="27" rx="3.2" ry="2" fill="#ffffff" opacity="0.9" transform="rotate(-20 46 27)"/><circle cx="23" cy="32" r="1" fill="#7dff8a"/><circle cx="41" cy="32" r="1" fill="#7dff8a"/><circle cx="30.5" cy="42" r="0.9" fill="#1f5a33"/><circle cx="33.5" cy="42" r="0.9" fill="#1f5a33"/><path d="M28 48 Q32 50.5 36 48" fill="none" stroke="#1f5a33" stroke-width="1.5" stroke-linecap="round"/><path d="M20 11 C25 8 31 8 35 9" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" opacity="0.75"/>'],
+        'H2' => ['name' => 'Bigfoot', 'svg' => '<defs><linearGradient id="tinfoil-H2-fur" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a86a3a"/><stop offset="1" stop-color="#5a3318"/></linearGradient></defs><circle cx="44" cy="16" r="10" fill="#ff9a3c" opacity="0.35"/><path d="M26 40 L17 54 L20 56 L31 44Z" fill="#5a3318" stroke="#2e1a0b" stroke-width="1.2"/><path d="M37 42 L45 55 L49 53 L42 39Z" fill="#6e4020" stroke="#2e1a0b" stroke-width="1.2"/><ellipse cx="16" cy="56" rx="6" ry="2.6" fill="#2e1a0b"/><ellipse cx="49" cy="55.5" rx="6" ry="2.6" fill="#2e1a0b"/><path d="M22 24 C14 30 12 38 13 44 L18 44 C18 38 21 33 26 29Z" fill="#6e4020" stroke="#2e1a0b" stroke-width="1.2"/><path d="M42 24 C50 26 54 32 55 38 L50 40 C49 34 46 31 40 30Z" fill="#6e4020" stroke="#2e1a0b" stroke-width="1.2"/><path d="M20 26 C20 18 26 17 32 17 C38 17 45 18 45 27 C46 37 42 45 32 46 C22 45 19 36 20 26Z" fill="url(#tinfoil-H2-fur)" stroke="#2e1a0b" stroke-width="1.4"/><path d="M22 20 L20 17 L25 18 M40 19 L44 16 L43 21" fill="none" stroke="#2e1a0b" stroke-width="1"/><circle cx="33" cy="13" r="9.5" fill="url(#tinfoil-H2-fur)" stroke="#2e1a0b" stroke-width="1.4"/><path d="M27 5 L29 8 L31 3.5 L33 7 L36 4 L37 8" fill="#8a5530" stroke="#2e1a0b" stroke-width="1" stroke-linejoin="round"/><ellipse cx="33" cy="15" rx="6.5" ry="5.8" fill="#e2b07a"/><circle cx="30.5" cy="13.5" r="1.3" fill="#1a0f06"/><circle cx="35.5" cy="13.5" r="1.3" fill="#1a0f06"/><circle cx="30.9" cy="13.1" r="0.45" fill="#ffffff"/><circle cx="35.9" cy="13.1" r="0.45" fill="#ffffff"/><path d="M30 17.3 Q33 20 36 17.3" fill="none" stroke="#5a3318" stroke-width="1.2" stroke-linecap="round"/><ellipse cx="28" cy="27" rx="4" ry="6" fill="#c08450" opacity="0.6"/>'],
+        'H3' => ['name' => 'Lizard Person', 'svg' => '<defs><linearGradient id="tinfoil-H3-skin" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b6f04a"/><stop offset="1" stop-color="#3f9a2a"/></linearGradient></defs><path d="M8 59 C8 45 17 38 32 38 C47 38 56 45 56 59Z" fill="#23294a" stroke="#0e1128" stroke-width="1.4"/><polygon points="25,38 39,38 32,52" fill="#f4f4f4"/><polygon points="30,40 34,40 35,43 32,54 29,43" fill="#e0263a" stroke="#7a0f1c" stroke-width="0.8"/><polygon points="25,38 22,44 29,49 32,52" fill="#343c68"/><polygon points="39,38 42,44 35,49 32,52" fill="#343c68"/><path d="M13 50 L20 50" stroke="#ffffff" stroke-width="1.2" opacity="0.5"/><path d="M26 32 L38 32 L37 40 L27 40Z" fill="#4faa2e"/><path d="M14 22 C14 11 22 6 32 6 C42 6 50 11 50 22 C50 30 44 35 32 35 C20 35 14 30 14 22Z" fill="url(#tinfoil-H3-skin)" stroke="#1e5a14" stroke-width="1.6"/><path d="M20 26 Q32 34 44 26" fill="none" stroke="#1e5a14" stroke-width="1.6" stroke-linecap="round"/><path d="M24 27.5 L25.5 29.5 L27 28.5 M37 28.5 L38.5 29.5 L40 27.5" fill="none" stroke="#ffffff" stroke-width="1"/><circle cx="22" cy="15" r="6" fill="#ffd23a" stroke="#1e5a14" stroke-width="1.4"/><circle cx="42" cy="15" r="6" fill="#ffd23a" stroke="#1e5a14" stroke-width="1.4"/><ellipse cx="22" cy="15" rx="1.3" ry="4" fill="#111111"/><ellipse cx="42" cy="15" rx="1.3" ry="4" fill="#111111"/><circle cx="29" cy="22" r="0.9" fill="#1e5a14"/><circle cx="35" cy="22" r="0.9" fill="#1e5a14"/><circle cx="28" cy="9" r="1.6" fill="#7fcc34"/><circle cx="36" cy="10" r="1.3" fill="#7fcc34"/><circle cx="32" cy="8" r="1" fill="#7fcc34"/><path d="M18 11 C20 8 23 7 26 7" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" opacity="0.7"/>'],
+        'H4' => ['name' => 'All-Seeing Eye', 'svg' => '<defs><linearGradient id="tinfoil-H4-pyr" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#d690ff"/><stop offset="1" stop-color="#6a1fb8"/></linearGradient><radialGradient id="tinfoil-H4-iris" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#ffe98a"/><stop offset="1" stop-color="#e09a18"/></radialGradient></defs><g stroke="#ffd35a" stroke-width="2" stroke-linecap="round" opacity="0.8"><line x1="32" y1="6" x2="32" y2="1.5"/><line x1="20" y1="12" x2="15" y2="6"/><line x1="44" y1="12" x2="49" y2="6"/><line x1="12" y1="25" x2="5" y2="21"/><line x1="52" y1="25" x2="59" y2="21"/><line x1="8" y1="40" x2="2" y2="40"/><line x1="56" y1="40" x2="62" y2="40"/></g><polygon points="32,8 58,55 6,55" fill="url(#tinfoil-H4-pyr)" stroke="#ffd35a" stroke-width="2.4" stroke-linejoin="round"/><g stroke="#4a1285" stroke-width="1" opacity="0.7"><line x1="14" y1="47" x2="50" y2="47"/><line x1="10" y1="51" x2="54" y2="51"/><line x1="26" y1="47" x2="24" y2="51"/><line x1="40" y1="47" x2="42" y2="51"/><line x1="32" y1="51" x2="32" y2="55"/></g><path d="M16 36 Q32 20 48 36 Q32 50 16 36Z" fill="#ffffff" stroke="#2a0a52" stroke-width="1.6"/><circle cx="32" cy="36" r="7" fill="url(#tinfoil-H4-iris)" stroke="#7a4a08" stroke-width="1"/><circle cx="32" cy="36" r="3" fill="#1a0a2e"/><circle cx="29.5" cy="33.5" r="1.6" fill="#ffffff"/><polygon points="32,12 35,18 29,18" fill="#ffffff" opacity="0.5"/>'],
+        'L1' => ['name' => 'Crop Circle', 'svg' => '<defs><linearGradient id="tinfoil-L1-field" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffe07a"/><stop offset="1" stop-color="#e0a02e"/></linearGradient></defs><rect x="7" y="7" width="50" height="50" rx="5" fill="url(#tinfoil-L1-field)" stroke="#7a4a10" stroke-width="1.6"/><g stroke="#b87a1e" stroke-width="1.1" opacity="0.75"><line x1="14" y1="9" x2="10" y2="55"/><line x1="19" y1="9" x2="15" y2="55"/><line x1="24" y1="9" x2="20" y2="55"/><line x1="29" y1="9" x2="25" y2="55"/><line x1="34" y1="9" x2="30" y2="55"/><line x1="39" y1="9" x2="35" y2="55"/><line x1="44" y1="9" x2="40" y2="55"/><line x1="49" y1="9" x2="45" y2="55"/><line x1="54" y1="9" x2="50" y2="55"/><line x1="59" y1="9" x2="55" y2="55"/></g><circle cx="32" cy="32" r="15" fill="none" stroke="#fff4c8" stroke-width="3.2"/><circle cx="32" cy="32" r="7" fill="#fff4c8"/><circle cx="32" cy="32" r="3" fill="#e0a02e"/><g fill="#fff4c8"><circle cx="32" cy="12.5" r="3.2"/><circle cx="32" cy="51.5" r="3.2"/><circle cx="12.5" cy="32" r="3.2"/><circle cx="51.5" cy="32" r="3.2"/></g><g stroke="#fff4c8" stroke-width="1.8"><line x1="32" y1="15" x2="32" y2="17"/><line x1="32" y1="47" x2="32" y2="49"/><line x1="15" y1="32" x2="17" y2="32"/><line x1="47" y1="32" x2="49" y2="32"/></g><g fill="#fff4c8"><circle cx="21" cy="21" r="1.8"/><circle cx="43" cy="21" r="1.8"/><circle cx="21" cy="43" r="1.8"/><circle cx="43" cy="43" r="1.8"/></g>'],
+        'L2' => ['name' => 'Black Helicopter', 'svg' => '<defs><linearGradient id="tinfoil-L2-beam" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff38a" stop-opacity="0.9"/><stop offset="1" stop-color="#fff38a" stop-opacity="0.05"/></linearGradient></defs><polygon points="24,36 30,38 22,60 6,60" fill="url(#tinfoil-L2-beam)"/><rect x="6" y="11" width="52" height="3" rx="1.5" fill="#8a93a8"/><rect x="30" y="13" width="4" height="6" fill="#3a3f4c"/><path d="M16 30 C16 22 22 18 32 18 C40 18 44 22 45 26 L58 25 L58 30 L44 33 C42 38 36 40 28 40 C21 40 16 36 16 30Z" fill="#1c1f27" stroke="#8a93a8" stroke-width="1.4" stroke-linejoin="round"/><rect x="55" y="20" width="3" height="10" rx="1" fill="#1c1f27" stroke="#8a93a8" stroke-width="1"/><path d="M19 29 C19 24 22 21 27 21 L28 30Z" fill="#4a6a8a" stroke="#8a93a8" stroke-width="0.8"/><path d="M21 25 L24 22" stroke="#cfe4ff" stroke-width="1.2" stroke-linecap="round"/><circle cx="25" cy="37" r="2.4" fill="#fff38a"/><g stroke="#8a93a8" stroke-width="1.6" stroke-linecap="round"><line x1="22" y1="40" x2="20" y2="46"/><line x1="36" y1="40" x2="38" y2="46"/><line x1="16" y1="46" x2="44" y2="46"/></g>'],
+        'L3' => ['name' => 'Moon Landing', 'svg' => '<defs><radialGradient id="tinfoil-L3-moon" cx="0.4" cy="0.35" r="0.7"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#a9b0c4"/></radialGradient></defs><circle cx="40" cy="24" r="18" fill="url(#tinfoil-L3-moon)" stroke="#5d647a" stroke-width="1.4"/><circle cx="34" cy="18" r="3" fill="#bcc2d3"/><circle cx="46" cy="30" r="4" fill="#bcc2d3"/><circle cx="47" cy="17" r="2" fill="#bcc2d3"/><line x1="44" y1="21" x2="44" y2="8" stroke="#5d647a" stroke-width="1.4"/><rect x="44" y="8" width="10" height="6.5" fill="#ffffff" stroke="#5d647a" stroke-width="0.8"/><rect x="44" y="8" width="4" height="3.2" fill="#3a5ad8"/><g stroke="#e0263a" stroke-width="0.9"><line x1="48" y1="9.5" x2="54" y2="9.5"/><line x1="44" y1="12" x2="54" y2="12"/><line x1="44" y1="14" x2="54" y2="14"/></g><g stroke="#2a2e3a" stroke-width="2" stroke-linecap="round"><line x1="20" y1="42" x2="12" y2="58"/><line x1="20" y1="42" x2="28" y2="58"/><line x1="20" y1="42" x2="20" y2="58"/></g><rect x="9" y="31" width="20" height="12" rx="2" fill="#2a2e3a" stroke="#0e1018" stroke-width="1"/><circle cx="13" cy="28" r="4" fill="#3c4150" stroke="#0e1018" stroke-width="1"/><circle cx="22" cy="28" r="4" fill="#3c4150" stroke="#0e1018" stroke-width="1"/><polygon points="29,34 36,31 36,43 29,40" fill="#3c4150" stroke="#0e1018" stroke-width="1"/><circle cx="14" cy="37" r="1.4" fill="#ff3a4a"/><rect x="18" y="35" width="8" height="2" fill="#6b7385"/>'],
+        'L4' => ['name' => 'Bermuda Triangle', 'svg' => '<defs><linearGradient id="tinfoil-L4-sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4cc8ff"/><stop offset="1" stop-color="#1640b0"/></linearGradient><clipPath id="tinfoil-L4-clip"><polygon points="32,7 58,54 6,54"/></clipPath></defs><polygon points="32,7 58,54 6,54" fill="url(#tinfoil-L4-sea)" stroke="#0a2466" stroke-width="2" stroke-linejoin="round"/><g clip-path="url(#tinfoil-L4-clip)" fill="none" stroke="#bff0ff" stroke-width="1.4" stroke-linecap="round" opacity="0.8"><path d="M4 26 Q10 23 16 26 T28 26 T40 26 T52 26 T64 26"/><path d="M4 49 Q10 46 16 49 T28 49 T40 49 T52 49 T64 49"/></g><path d="M32 42 a2 2 0 0 1 4 0 a4 4 0 0 1 -8 0 a6 6 0 0 1 12 0 a8 8 0 0 1 -16 0" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round"/><polygon points="41,30 49,30 47,33 43,33" fill="#6a3a1a"/><line x1="45" y1="30" x2="45" y2="23" stroke="#3a2010" stroke-width="1"/><polygon points="45,23 49,28 45,28" fill="#ffffff"/><path d="M28 14 L22 25" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/>'],
+        'L5' => ['name' => 'Blurry Evidence Photo', 'svg' => '<defs><linearGradient id="tinfoil-L5-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a2a78"/><stop offset="0.65" stop-color="#ff8a3a"/><stop offset="1" stop-color="#c85a1c"/></linearGradient></defs><g transform="rotate(-8 32 32)"><rect x="11" y="7" width="42" height="50" rx="2" fill="#f6f2e6" stroke="#8a8270" stroke-width="1.4"/><rect x="15" y="11" width="34" height="32" fill="url(#tinfoil-L5-sky)"/><ellipse cx="30" cy="30" rx="6" ry="9" fill="#4a2a1a" opacity="0.4"/><ellipse cx="31" cy="29" rx="4.5" ry="7.5" fill="#4a2a1a" opacity="0.5"/><circle cx="31" cy="21" r="3.5" fill="#4a2a1a" opacity="0.55"/><path d="M15 38 L22 34 L28 37 L36 33 L49 38 L49 43 L15 43Z" fill="#7a3a14"/><rect x="18" y="47" width="22" height="1.6" fill="#b8b09a"/></g><path d="M38 26 C38 19 50 19 50 26 C50 31 44 31 44 36 L44 38" fill="none" stroke="#7a0f1c" stroke-width="6" stroke-linecap="round"/><path d="M38 26 C38 19 50 19 50 26 C50 31 44 31 44 36 L44 38" fill="none" stroke="#ff2a3a" stroke-width="3.6" stroke-linecap="round"/><circle cx="44" cy="45" r="3" fill="#ff2a3a" stroke="#7a0f1c" stroke-width="1.2"/>'],
+    ],
+    'blacksite' => [
+        'W' => ['name' => 'Master Keycard', 'svg' => '<defs><linearGradient id="blacksite-W-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff0a8"/><stop offset=".45" stop-color="#e6b422"/><stop offset="1" stop-color="#8a5a06"/></linearGradient><linearGradient id="blacksite-W-c" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff6c8"/><stop offset="1" stop-color="#c8911a"/></linearGradient></defs><g transform="rotate(-8 32 28)"><rect x="6" y="7" width="52" height="36" rx="5" fill="#3a2605"/><rect x="7" y="6" width="50" height="34" rx="5" fill="url(#blacksite-W-g)" stroke="#1a1204" stroke-width="1.5"/><rect x="7" y="12" width="50" height="7" fill="#111318"/><rect x="7" y="14.5" width="50" height="2" fill="#7ff4ff"/><rect x="7" y="14" width="50" height="3" fill="#39e6ff" opacity=".35"/><rect x="12" y="23" width="13" height="11" rx="2" fill="url(#blacksite-W-c)" stroke="#5a3a04" stroke-width="1"/><path d="M12 28.5h13M18.5 23v11M15 23v5.5M22 28.5v5.5" stroke="#5a3a04" stroke-width=".9"/><rect x="30" y="24" width="22" height="3" rx="1" fill="#1a1204" opacity=".7"/><rect x="30" y="30" width="15" height="2.5" rx="1" fill="#1a1204" opacity=".5"/><circle cx="51" cy="33" r="3" fill="#ff2a2a" stroke="#1a1204"/><path d="M11 9h30" stroke="#fffbe0" stroke-width="1.5" stroke-linecap="round" opacity=".8"/></g><rect x="8" y="44" width="48" height="15" rx="3" fill="#0b0c10" stroke="#e6b422" stroke-width="2"/><rect x="10" y="46" width="44" height="1" fill="#ff3030"/><text x="32" y="56.5" text-anchor="middle" font-family="Limelight" font-size="12" fill="#ffd54a" letter-spacing="1">WILD</text>'],
+        'S' => ['name' => 'Classified Folder', 'svg' => '<defs><radialGradient id="blacksite-S-h"><stop offset=".55" stop-color="#ff3b30" stop-opacity="0"/><stop offset=".8" stop-color="#ff3b30" stop-opacity=".55"/><stop offset="1" stop-color="#ff3b30" stop-opacity="0"/></radialGradient><linearGradient id="blacksite-S-f" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3d58e"/><stop offset="1" stop-color="#c49a4a"/></linearGradient></defs><circle cx="32" cy="30" r="29" fill="url(#blacksite-S-h)"/><circle cx="32" cy="30" r="25" fill="none" stroke="#ffb020" stroke-width="1.5" stroke-dasharray="4 3"/><path d="M9 14h16l4 4h26v28H9z" fill="#8a6428"/><rect x="11" y="16" width="40" height="26" fill="#f5f2e8"/><path d="M8 21h48l-3 27H11z" fill="url(#blacksite-S-f)" stroke="#5c4012" stroke-width="1.5"/><path d="M11 24h42" stroke="#fff3cf" stroke-width="1.5" opacity=".8"/><g transform="rotate(-12 32 34)"><rect x="17" y="28" width="30" height="12" rx="1" fill="none" stroke="#d0141a" stroke-width="2.5"/><rect x="21" y="32" width="22" height="2" fill="#d0141a"/><rect x="24" y="35.5" width="16" height="1.8" fill="#d0141a"/></g><path d="M4 49h56l-4 5 4 5H4l4-5z" fill="#d0141a" stroke="#5a0508" stroke-width="1"/><text x="32" y="57.5" text-anchor="middle" font-family="Figtree" font-weight="900" font-size="8.5" fill="#fff" letter-spacing="1">BONUS</text>'],
+        'H1' => ['name' => 'Vault Door', 'svg' => '<defs><radialGradient id="blacksite-H1-g" cx=".35" cy=".3"><stop offset="0" stop-color="#e8edf2"/><stop offset=".6" stop-color="#8b95a1"/><stop offset="1" stop-color="#3b424b"/></radialGradient><linearGradient id="blacksite-H1-r" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5a636e"/><stop offset="1" stop-color="#1c2026"/></linearGradient></defs><circle cx="32" cy="33" r="27" fill="#0a0b0e"/><circle cx="32" cy="32" r="27" fill="url(#blacksite-H1-r)" stroke="#0a0b0e" stroke-width="1.5"/><g fill="#c9d1da" stroke="#2a2f36" stroke-width=".6"><circle cx="32" cy="8" r="2"/><circle cx="32" cy="56" r="2"/><circle cx="8" cy="32" r="2"/><circle cx="56" cy="32" r="2"/><circle cx="15" cy="15" r="2"/><circle cx="49" cy="15" r="2"/><circle cx="15" cy="49" r="2"/><circle cx="49" cy="49" r="2"/></g><circle cx="32" cy="32" r="20" fill="url(#blacksite-H1-g)" stroke="#2a2f36" stroke-width="1.5"/><circle cx="32" cy="32" r="15" fill="none" stroke="#5d6772" stroke-width="1.2"/><g stroke="#2a2f36" stroke-width="4.5" stroke-linecap="round"><path d="M32 16v32M18 24l28 16M18 40l28-16"/></g><g stroke="#ffc233" stroke-width="2.5" stroke-linecap="round"><path d="M32 16v32M18 24l28 16M18 40l28-16"/></g><circle cx="32" cy="32" r="6.5" fill="#1c2026" stroke="#ffc233" stroke-width="2"/><circle cx="32" cy="32" r="2.2" fill="#ff2a2a"/><path d="M17 22a18 18 0 0 1 12-9" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" opacity=".7"/>'],
+        'H2' => ['name' => 'Satellite', 'svg' => '<defs><linearGradient id="blacksite-H2-p" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2a6cff"/><stop offset="1" stop-color="#0a1e5c"/></linearGradient><linearGradient id="blacksite-H2-b" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffe07a"/><stop offset="1" stop-color="#b87a10"/></linearGradient></defs><g transform="rotate(-30 32 32)"><path d="M4 32h56" stroke="#9aa4b0" stroke-width="2"/><g stroke="#0a0f24" stroke-width="1.2"><rect x="3" y="23" width="19" height="18" fill="url(#blacksite-H2-p)"/><rect x="42" y="23" width="19" height="18" fill="url(#blacksite-H2-p)"/></g><path d="M9.3 23v18M15.6 23v18M3 32h19M48.3 23v18M54.6 23v18M42 32h19" stroke="#6fe8ff" stroke-width=".8" opacity=".8"/><rect x="24" y="22" width="16" height="20" rx="2" fill="url(#blacksite-H2-b)" stroke="#3a2605" stroke-width="1.2"/><path d="M26 25h12M26 29h12" stroke="#fff3b0" stroke-width="1" opacity=".8"/><rect x="29" y="42" width="6" height="4" fill="#5a636e"/></g><g><path d="M33 47l9 9" stroke="#c9d1da" stroke-width="2"/><ellipse cx="44" cy="53" rx="8" ry="4" transform="rotate(-45 44 53)" fill="#dfe5ea" stroke="#3b424b" stroke-width="1.2"/><circle cx="46" cy="55" r="1.8" fill="#ff2a2a"/></g>'],
+        'H3' => ['name' => 'Stealth Drone', 'svg' => '<defs><linearGradient id="blacksite-H3-b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5a616c"/><stop offset="1" stop-color="#15181d"/></linearGradient></defs><g stroke="#4a525c" stroke-width="4" stroke-linecap="round"><path d="M32 32L13 16M32 32L51 16M32 32L13 46M32 32L51 46"/></g><g fill="#8fe9ff" fill-opacity=".25" stroke="#b8c2cc" stroke-width="1.2"><ellipse cx="13" cy="16" rx="10" ry="3.5"/><ellipse cx="51" cy="16" rx="10" ry="3.5"/><ellipse cx="13" cy="46" rx="10" ry="3.5"/><ellipse cx="51" cy="46" rx="10" ry="3.5"/></g><g fill="#111"><circle cx="13" cy="16" r="2.3"/><circle cx="51" cy="16" r="2.3"/><circle cx="13" cy="46" r="2.3"/><circle cx="51" cy="46" r="2.3"/></g><path d="M32 14l18 16-7 16H21l-7-16z" fill="url(#blacksite-H3-b)" stroke="#ff3b30" stroke-width="1.5"/><path d="M32 14l-9 16h18z" fill="#3b424b"/><path d="M25 30h14l-3 7h-8z" fill="#0a0b0e"/><circle cx="32" cy="32.5" r="2.4" fill="#ff1f1f"/><circle cx="32" cy="32.5" r="4.5" fill="#ff1f1f" opacity=".3"/><circle cx="17" cy="30" r="1.8" fill="#ff3b30"/><circle cx="47" cy="30" r="1.8" fill="#ff3b30"/><path d="M27 21l5-4" stroke="#aeb7c2" stroke-width="1.2" stroke-linecap="round"/>'],
+        'H4' => ['name' => 'Retina Scanner', 'svg' => '<defs><radialGradient id="blacksite-H4-i"><stop offset="0" stop-color="#b8fbff"/><stop offset=".55" stop-color="#18c8e8"/><stop offset="1" stop-color="#05506a"/></radialGradient></defs><g stroke="#39e6ff" stroke-width="2" fill="none"><path d="M6 14V7h8M58 14V7h-8M6 50v7h8M58 50v7h-8"/></g><path d="M5 32Q32 5 59 32Q32 59 5 32z" fill="#0c1a22" stroke="#0a0b0e" stroke-width="3"/><path d="M7 32Q32 9 57 32Q32 55 7 32z" fill="#e9f4f7"/><circle cx="32" cy="32" r="13" fill="url(#blacksite-H4-i)" stroke="#063646" stroke-width="1.5"/><circle cx="32" cy="32" r="5.5" fill="#05080c"/><circle cx="28" cy="27.5" r="2.5" fill="#fff"/><g stroke="#7ff4ff" stroke-width="1" opacity=".9"><circle cx="32" cy="32" r="17" fill="none" stroke-dasharray="3 3"/><path d="M32 12v6M32 46v6M12 32h6M46 32h6"/></g><rect x="4" y="38" width="56" height="2.4" fill="#39e6ff" opacity=".9"/><rect x="4" y="35" width="56" height="8" fill="#39e6ff" opacity=".2"/>'],
+        'L1' => ['name' => 'Fingerprint', 'svg' => '<g fill="none" stroke="#ffb020" stroke-width="3" stroke-linecap="round"><path d="M17 20a19 19 0 0 1 30 0"/><path d="M13 32a19 19 0 0 1 38 0v4"/><path d="M19 48c-2-6-3-10-3-15a16 16 0 0 1 0 0a16 16 0 0 1 32 0"/><path d="M23 52c-1-6-2-12-1-17a10 10 0 0 1 20 0c0 5 0 9-1 13"/><path d="M29 55c-1-6-2-13-1-19a4 4 0 0 1 8 0c0 8-1 14-3 19"/><path d="M47 44c0 4-1 7-2 10"/></g><path d="M20 19a17 17 0 0 1 14-6" stroke="#fff1c2" stroke-width="1.5" fill="none" stroke-linecap="round"/>'],
+        'L2' => ['name' => 'Padlock', 'svg' => '<defs><linearGradient id="blacksite-L2-g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff5a4f"/><stop offset="1" stop-color="#a00c12"/></linearGradient></defs><path d="M20 30V20a12 12 0 0 1 24 0v10" fill="none" stroke="#8b95a1" stroke-width="6"/><path d="M20 30V20a12 12 0 0 1 24 0v10" fill="none" stroke="#c9d1da" stroke-width="2.5"/><rect x="12" y="28" width="40" height="30" rx="5" fill="url(#blacksite-L2-g)" stroke="#4a0508" stroke-width="2"/><circle cx="32" cy="40" r="4.5" fill="#2a0204"/><path d="M30 42h4l1 8h-6z" fill="#2a0204"/><path d="M16 32h26" stroke="#ffb0aa" stroke-width="2" stroke-linecap="round" opacity=".8"/>'],
+        'L3' => ['name' => 'USB Drive', 'svg' => '<defs><linearGradient id="blacksite-L3-g" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9ff8ff"/><stop offset=".5" stop-color="#18c8e8"/><stop offset="1" stop-color="#066a86"/></linearGradient></defs><g transform="rotate(35 32 32)"><rect x="24" y="4" width="16" height="15" fill="#c9d1da" stroke="#3b424b" stroke-width="1.5"/><rect x="27" y="8" width="3.5" height="3.5" fill="#3b424b"/><rect x="33.5" y="8" width="3.5" height="3.5" fill="#3b424b"/><rect x="18" y="19" width="28" height="4" fill="#2c3138"/><rect x="18" y="22" width="28" height="38" rx="5" fill="url(#blacksite-L3-g)" stroke="#043848" stroke-width="2"/><rect x="26" y="30" width="12" height="16" rx="2" fill="#043848" opacity=".45"/><circle cx="32" cy="53" r="2.5" fill="#fff"/><path d="M22 26v26" stroke="#e0feff" stroke-width="2" stroke-linecap="round" opacity=".8"/></g>'],
+        'L4' => ['name' => 'Circuit Chip', 'svg' => '<g stroke="#9aa4b0" stroke-width="2.5"><path d="M20 6v8M28 6v8M36 6v8M44 6v8M20 50v8M28 50v8M36 50v8M44 50v8M6 20h8M6 28h8M6 36h8M6 44h8M50 20h8M50 28h8M50 36h8M50 44h8"/></g><rect x="13" y="13" width="38" height="38" rx="4" fill="#1e8f3e" stroke="#0a3a18" stroke-width="2"/><g stroke="#9dffb0" stroke-width="1.4" fill="none"><path d="M17 20h8l4 4M47 44h-8l-4-4M20 47v-6l4-4M44 17v6l-4 4"/></g><rect x="23" y="23" width="18" height="18" rx="2" fill="#0d3a1a" stroke="#4cff7a" stroke-width="1.5"/><rect x="27" y="27" width="10" height="10" fill="#2ee86a"/><path d="M16 16h14" stroke="#c8ffd4" stroke-width="1.5" stroke-linecap="round" opacity=".7"/>'],
+        'L5' => ['name' => 'Laser Grid', 'svg' => '<rect x="7" y="7" width="50" height="50" rx="3" fill="#15181d" stroke="#6b7480" stroke-width="3"/><rect x="10" y="10" width="44" height="44" fill="#1f0a0c"/><g stroke="#ff2a2a" stroke-width="5" opacity=".35" stroke-linecap="round"><path d="M10 10l44 44M54 10L10 54M10 24l30 30M24 10l30 30M40 10l14 14"/></g><g stroke="#ff4a3d" stroke-width="2" stroke-linecap="round"><path d="M10 10l44 44M54 10L10 54M10 24l30 30M24 10l30 30"/></g><g stroke="#ffd0cc" stroke-width=".7"><path d="M10 10l44 44M54 10L10 54"/></g><g fill="#ff2a2a" stroke="#3a0406"><circle cx="10" cy="10" r="3"/><circle cx="54" cy="10" r="3"/><circle cx="10" cy="54" r="3"/><circle cx="54" cy="54" r="3"/></g>'],
+    ],
+    'coderain' => [
+        'W' => ['name' => 'Glitch Core', 'svg' => '<defs><radialGradient id="coderain-W-glow" cx="0.5" cy="0.45" r="0.5"><stop offset="0" stop-color="#00ff66" stop-opacity="0.55"/><stop offset="1" stop-color="#00ff66" stop-opacity="0"/></radialGradient><linearGradient id="coderain-W-top" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#d9ffe6"/><stop offset="1" stop-color="#3dff8a"/></linearGradient></defs><circle cx="32" cy="27" r="28" fill="url(#coderain-W-glow)"/><polygon points="32,4 53,15 32,26 11,15" fill="url(#coderain-W-top)" stroke="#001a0a" stroke-width="1.5"/><polygon points="11,15 32,26 32,48 11,37" fill="#00c24e" stroke="#001a0a" stroke-width="1.5"/><polygon points="53,15 32,26 32,48 53,37" fill="#006b2b" stroke="#001a0a" stroke-width="1.5"/><g fill="#001a0a" opacity="0.55"><rect x="11" y="22" width="21" height="1.6"/><rect x="11" y="29" width="21" height="1.6"/><rect x="32" y="24" width="21" height="1.6"/><rect x="32" y="32" width="21" height="1.6"/></g><rect x="6" y="25" width="12" height="4" fill="#00ff66"/><rect x="45" y="30" width="13" height="3.5" fill="#9dffc2"/><rect x="36" y="19" width="7" height="3" fill="#ffffff"/><rect x="18" y="33" width="5" height="5" fill="#b8ffd4"/><rect x="41" y="38" width="5" height="4" fill="#00ff66"/><polyline points="20,10 26,14 23,18" fill="none" stroke="#ffffff" stroke-width="1.6"/><rect x="8" y="46" width="48" height="13" rx="3" fill="#001a0a" stroke="#00ff66" stroke-width="2"/><text x="32" y="56.5" text-anchor="middle" font-family="Limelight" font-size="11" fill="#b8ffd4" letter-spacing="1">WILD</text>'],
+        'S' => ['name' => 'Twin Pills', 'svg' => '<defs><radialGradient id="coderain-S-halo" cx="0.5" cy="0.5" r="0.5"><stop offset="0.55" stop-color="#00ff66" stop-opacity="0"/><stop offset="0.8" stop-color="#00ff66" stop-opacity="0.45"/><stop offset="1" stop-color="#00ff66" stop-opacity="0"/></radialGradient><linearGradient id="coderain-S-r" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff7a7a"/><stop offset="1" stop-color="#c8101e"/></linearGradient><linearGradient id="coderain-S-b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7ab8ff"/><stop offset="1" stop-color="#1a4fd6"/></linearGradient></defs><circle cx="32" cy="28" r="27" fill="url(#coderain-S-halo)"/><circle cx="32" cy="28" r="21" fill="#020805" stroke="#00ff66" stroke-width="2.5"/><circle cx="32" cy="28" r="24.5" fill="none" stroke="#9dffc2" stroke-width="0.8" stroke-dasharray="3 2"/><g transform="rotate(-45 32 28)"><rect x="12" y="21" width="40" height="14" rx="7" fill="url(#coderain-S-r)" stroke="#4a0008" stroke-width="1.5"/><rect x="32" y="21" width="20" height="14" rx="7" fill="#ffffff" opacity="0.18"/><rect x="16" y="23.5" width="14" height="3" rx="1.5" fill="#ffffff" opacity="0.6"/></g><g transform="rotate(45 32 28)"><rect x="12" y="21" width="40" height="14" rx="7" fill="url(#coderain-S-b)" stroke="#06164a" stroke-width="1.5"/><rect x="32" y="21" width="20" height="14" rx="7" fill="#ffffff" opacity="0.18"/><rect x="16" y="23.5" width="14" height="3" rx="1.5" fill="#ffffff" opacity="0.6"/></g><polygon points="7,47 57,47 53,53 57,59 7,59 11,53" fill="#00c24e" stroke="#001a0a" stroke-width="1.5"/><text x="32" y="56.5" text-anchor="middle" font-family="Figtree, sans-serif" font-weight="900" font-size="9" fill="#001a0a" letter-spacing="1">BONUS</text>'],
+        'H1' => ['name' => 'Mirrorshades', 'svg' => '<circle cx="32" cy="34" r="26" fill="#00ff66" opacity="0.08"/><defs><linearGradient id="coderain-H1-l" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d3a1f"/><stop offset="1" stop-color="#000000"/></linearGradient><clipPath id="coderain-H1-c"><path d="M5,22 H29 L27,36 Q25,44 16,44 Q7,44 6,36 Z M35,22 H59 L58,36 Q57,44 48,44 Q39,44 37,36 Z"/></clipPath></defs><g transform="translate(0,-3) scale(1,1.2)"><path d="M2,20 H62 L61,25 H3 Z" fill="#1c2420" stroke="#00ff66" stroke-width="1"/><path d="M5,22 H29 L27,36 Q25,44 16,44 Q7,44 6,36 Z M35,22 H59 L58,36 Q57,44 48,44 Q39,44 37,36 Z" fill="url(#coderain-H1-l)" stroke="#00ff66" stroke-width="2"/><g clip-path="url(#coderain-H1-c)" fill="#00ff66"><rect x="9" y="22" width="2" height="12" opacity="0.9"/><rect x="14" y="26" width="2" height="16" opacity="0.5"/><rect x="19" y="22" width="2" height="8" opacity="0.8"/><rect x="24" y="28" width="2" height="12" opacity="0.4"/><rect x="40" y="24" width="2" height="14" opacity="0.8"/><rect x="45" y="22" width="2" height="9" opacity="0.5"/><rect x="50" y="27" width="2" height="15" opacity="0.9"/><rect x="55" y="22" width="2" height="10" opacity="0.5"/><polygon points="6,22 14,22 8,40 6,40" fill="#ffffff" opacity="0.25"/><polygon points="36,22 44,22 38,40 36,40" fill="#ffffff" opacity="0.25"/></g><path d="M29,25 Q32,22 35,25" fill="none" stroke="#1c2420" stroke-width="3"/><rect x="10" y="15" width="3" height="2" fill="#00ff66" opacity="0.6"/><rect x="50" y="12" width="3" height="2" fill="#00ff66" opacity="0.6"/><rect x="30" y="48" width="4" height="2" fill="#00ff66" opacity="0.5"/></g>'],
+        'H2' => ['name' => 'Bent Spoon', 'svg' => '<defs><linearGradient id="coderain-H2-m" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.5" stop-color="#b9c6c0"/><stop offset="1" stop-color="#5c6b64"/></linearGradient><radialGradient id="coderain-H2-g" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#00ff66" stop-opacity="0.7"/><stop offset="1" stop-color="#00ff66" stop-opacity="0"/></radialGradient></defs><circle cx="33" cy="35" r="17" fill="url(#coderain-H2-g)"/><ellipse cx="20" cy="17" rx="10" ry="13" transform="rotate(-35 20 17)" fill="url(#coderain-H2-m)" stroke="#1c2420" stroke-width="2"/><ellipse cx="18" cy="15" rx="4" ry="7" transform="rotate(-35 18 15)" fill="#ffffff" opacity="0.75"/><path d="M26,26 L34,36 Q37,40 42,38 L54,52 L50,56 L39,43 Q33,45 30,39 L22,29 Z" fill="url(#coderain-H2-m)" stroke="#1c2420" stroke-width="2" stroke-linejoin="round"/><path d="M28,29 L33,35" stroke="#ffffff" stroke-width="1.4" opacity="0.8"/><g stroke="#00ff66" stroke-width="1.8" stroke-linecap="round"><line x1="41" y1="30" x2="46" y2="26"/><line x1="44" y1="36" x2="50" y2="35"/><line x1="26" y1="42" x2="22" y2="47"/></g>'],
+        'H3' => ['name' => 'White Rabbit', 'svg' => '<defs><linearGradient id="coderain-H3-f" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#c9d9cf"/></linearGradient></defs><ellipse cx="32" cy="58" rx="20" ry="3" fill="#00ff66" opacity="0.3"/><path d="M22,26 Q16,6 20,3 Q26,4 28,24 Z" fill="url(#coderain-H3-f)" stroke="#6a8575" stroke-width="1.5"/><path d="M31,24 Q32,4 37,3 Q42,6 36,26 Z" fill="url(#coderain-H3-f)" stroke="#6a8575" stroke-width="1.5"/><path d="M21,23 Q18,11 21,7 Q24,10 25,22 Z" fill="#ffc7d6" opacity="0.7"/><ellipse cx="36" cy="46" rx="18" ry="12" fill="url(#coderain-H3-f)" stroke="#6a8575" stroke-width="1.5"/><circle cx="29" cy="31" r="10" fill="url(#coderain-H3-f)" stroke="#6a8575" stroke-width="1.5"/><circle cx="53" cy="44" r="4" fill="#ffffff" stroke="#6a8575" stroke-width="1.2"/><ellipse cx="24" cy="54" rx="6" ry="3" fill="#ffffff" stroke="#6a8575" stroke-width="1.2"/><circle cx="26" cy="29" r="3.5" fill="#001a0a" stroke="#00ff66" stroke-width="1.8"/><circle cx="25" cy="28" r="1" fill="#b8ffd4"/><circle cx="20" cy="34" r="1.3" fill="#ff8fa8"/><path d="M40,40 Q46,38 50,42" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.8"/>'],
+        'H4' => ['name' => 'Sentinel', 'svg' => '<defs><radialGradient id="coderain-H4-b" cx="0.4" cy="0.35" r="0.7"><stop offset="0" stop-color="#5c6f78"/><stop offset="1" stop-color="#141c20"/></radialGradient></defs><g fill="none" stroke="#56707a" stroke-width="3.8" stroke-linecap="round"><path d="M18,32 Q8,42 12,56"/><path d="M24,35 Q20,48 24,59"/><path d="M32,36 Q33,48 30,60"/><path d="M40,35 Q46,46 42,59"/><path d="M46,32 Q58,40 54,56"/></g><g fill="none" stroke="#00ff66" stroke-width="1.2" stroke-dasharray="2 3"><path d="M18,32 Q8,42 12,56"/><path d="M32,36 Q33,48 30,60"/><path d="M46,32 Q58,40 54,56"/></g><ellipse cx="32" cy="22" rx="19" ry="16" fill="url(#coderain-H4-b)" stroke="#000000" stroke-width="2"/><path d="M16,24 Q32,32 48,24 L47,30 Q32,38 17,30 Z" fill="#0b1114"/><g fill="#ff2a2a" stroke="#ff9a9a" stroke-width="0.6"><circle cx="21" cy="17" r="2.4"/><circle cx="27" cy="14" r="2.8"/><circle cx="34" cy="14" r="2.8"/><circle cx="41" cy="17" r="2.4"/><circle cx="31" cy="20" r="2"/><circle cx="44" cy="22" r="1.6"/><circle cx="18" cy="22" r="1.6"/></g><ellipse cx="25" cy="10" rx="6" ry="2.5" fill="#ffffff" opacity="0.25" transform="rotate(-20 25 10)"/>'],
+        'L1' => ['name' => 'Glyph 7', 'svg' => '<defs><linearGradient id="coderain-L1-r" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#00ff66" stop-opacity="0"/><stop offset="1" stop-color="#00ff66" stop-opacity="0.45"/></linearGradient></defs><rect x="7" y="7" width="50" height="50" rx="9" fill="#031a0c" stroke="#00ff66" stroke-width="2.5"/><rect x="25" y="10" width="14" height="30" rx="2" fill="url(#coderain-L1-r)"/><rect x="47" y="11" width="3" height="16" fill="url(#coderain-L1-r)"/><rect x="13" y="20" width="3" height="22" fill="url(#coderain-L1-r)"/><text x="32" y="48" text-anchor="middle" font-family="Chivo Mono, monospace" font-weight="700" font-size="42" fill="#3dff8a" stroke="#b8ffd4" stroke-width="0.8">7</text>'],
+        'L2' => ['name' => 'Glyph A', 'svg' => '<defs><linearGradient id="coderain-L2-r" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1fb857" stop-opacity="0"/><stop offset="1" stop-color="#1fb857" stop-opacity="0.45"/></linearGradient></defs><rect x="7" y="7" width="50" height="50" rx="9" fill="#061208" stroke="#1f9e4a" stroke-width="2.5"/><rect x="25" y="10" width="14" height="30" rx="2" fill="url(#coderain-L2-r)"/><rect x="47" y="11" width="3" height="16" fill="url(#coderain-L2-r)"/><rect x="13" y="20" width="3" height="22" fill="url(#coderain-L2-r)"/><text x="32" y="47" text-anchor="middle" font-family="Chivo Mono, monospace" font-weight="700" font-size="38" fill="#1fb857">ア</text>'],
+        'L3' => ['name' => 'Glyph Hash', 'svg' => '<defs><linearGradient id="coderain-L3-r" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2ef0c8" stop-opacity="0"/><stop offset="1" stop-color="#2ef0c8" stop-opacity="0.45"/></linearGradient></defs><rect x="7" y="7" width="50" height="50" rx="9" fill="#021514" stroke="#1fd6b0" stroke-width="2.5"/><rect x="25" y="10" width="14" height="30" rx="2" fill="url(#coderain-L3-r)"/><rect x="47" y="11" width="3" height="16" fill="url(#coderain-L3-r)"/><rect x="13" y="20" width="3" height="22" fill="url(#coderain-L3-r)"/><text x="32" y="47" text-anchor="middle" font-family="Chivo Mono, monospace" font-weight="700" font-size="40" fill="#2ef0c8">#</text>'],
+        'L4' => ['name' => 'Glyph 0', 'svg' => '<defs><linearGradient id="coderain-L4-r" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c8ff2e" stop-opacity="0"/><stop offset="1" stop-color="#c8ff2e" stop-opacity="0.45"/></linearGradient></defs><rect x="7" y="7" width="50" height="50" rx="9" fill="#101a02" stroke="#b6f000" stroke-width="2.5"/><rect x="25" y="10" width="14" height="30" rx="2" fill="url(#coderain-L4-r)"/><rect x="47" y="11" width="3" height="16" fill="url(#coderain-L4-r)"/><rect x="13" y="20" width="3" height="22" fill="url(#coderain-L4-r)"/><text x="32" y="48" text-anchor="middle" font-family="Chivo Mono, monospace" font-weight="700" font-size="42" fill="#c8ff2e">0</text>'],
+        'L5' => ['name' => 'Glyph Wo', 'svg' => '<defs><linearGradient id="coderain-L5-r" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8fd6a4" stop-opacity="0"/><stop offset="1" stop-color="#8fd6a4" stop-opacity="0.45"/></linearGradient></defs><rect x="7" y="7" width="50" height="50" rx="9" fill="#040a06" stroke="#4d7a5c" stroke-width="2.5"/><rect x="25" y="10" width="14" height="30" rx="2" fill="url(#coderain-L5-r)"/><rect x="47" y="11" width="3" height="16" fill="url(#coderain-L5-r)"/><rect x="13" y="20" width="3" height="22" fill="url(#coderain-L5-r)"/><text x="32" y="47" text-anchor="middle" font-family="Chivo Mono, monospace" font-weight="700" font-size="38" fill="#e9fff0" stroke="#3f8a55" stroke-width="2.2" paint-order="stroke">ヲ</text>'],
+    ],
+    'tiki' => [
+        'W' => ['name' => 'Tiki Idol', 'svg' => '<defs><linearGradient id="tiki-W-g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b8743a"/><stop offset="1" stop-color="#5e2f12"/></linearGradient><linearGradient id="tiki-W-g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe98a"/><stop offset="1" stop-color="#d98e14"/></linearGradient></defs><path d="M12 16 L16 2 L22 12 L27 1 L32 10 L37 1 L42 12 L48 2 L52 16Z" fill="#ff8a1e" stroke="#2a130a" stroke-width="1.5" stroke-linejoin="round"/><path d="M17 15 L22 6 L27 15Z M37 15 L42 6 L47 15Z" fill="#2fb59a"/><path d="M28 13 L32 5 L36 13Z" fill="#ffd34a"/><path d="M15 16 Q15 11 32 11 Q49 11 49 16 L49 45 Q49 52 32 52 Q15 52 15 45Z" fill="url(#tiki-W-g1)" stroke="#2a130a" stroke-width="2"/><rect x="15" y="15" width="34" height="4" fill="url(#tiki-W-g2)" stroke="#2a130a" stroke-width="1"/><circle cx="24" cy="27" r="6.5" fill="#fff4d6" stroke="#2a130a" stroke-width="2"/><circle cx="40" cy="27" r="6.5" fill="#fff4d6" stroke="#2a130a" stroke-width="2"/><circle cx="24" cy="27.5" r="3.2" fill="#2a130a"/><circle cx="40" cy="27.5" r="3.2" fill="#2a130a"/><circle cx="25.2" cy="26.2" r="1.1" fill="#fff"/><circle cx="41.2" cy="26.2" r="1.1" fill="#fff"/><path d="M29 30 L35 30 L38 37 L26 37Z" fill="#6b3414" stroke="#2a130a" stroke-width="1.2"/><rect x="19" y="38" width="26" height="9" rx="4" fill="#2a130a"/><path d="M21 40 H43 V45 H21Z" fill="#fff4d6"/><path d="M25 40 V45 M29 40 V45 M33 40 V45 M37 40 V45 M41 40 V45 M21 42.5 H43" stroke="#2a130a" stroke-width="1"/><circle cx="13" cy="32" r="3" fill="url(#tiki-W-g2)" stroke="#2a130a"/><circle cx="51" cy="32" r="3" fill="url(#tiki-W-g2)" stroke="#2a130a"/><path d="M18 20 Q17 30 19 38" stroke="#fff" stroke-width="2" stroke-opacity=".3" fill="none" stroke-linecap="round"/><rect x="9" y="49" width="46" height="13" rx="3" fill="url(#tiki-W-g2)" stroke="#6b2a0c" stroke-width="1.5"/><text x="32" y="59.5" text-anchor="middle" font-family="Limelight" font-size="11" fill="#5a1a06">WILD</text>'],
+        'S' => ['name' => 'Volcano', 'svg' => '<defs><radialGradient id="tiki-S-g1" cx=".5" cy=".45" r=".5"><stop offset="0" stop-color="#ffcf5a" stop-opacity=".9"/><stop offset=".6" stop-color="#ff7a1a" stop-opacity=".45"/><stop offset="1" stop-color="#ff5a1a" stop-opacity="0"/></radialGradient><linearGradient id="tiki-S-g2" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#5a3526"/><stop offset="1" stop-color="#2e1a12"/></linearGradient></defs><circle cx="32" cy="28" r="28" fill="url(#tiki-S-g1)"/><circle cx="32" cy="28" r="24" fill="none" stroke="#ffd966" stroke-width="2.5" stroke-dasharray="4 3"/><path d="M4 52 L24 22 Q32 19 40 22 L60 52Z" fill="url(#tiki-S-g2)" stroke="#1a0a05" stroke-width="2" stroke-linejoin="round"/><path d="M24 22 L14 38 L20 36 L12 50" stroke="#7a4a36" stroke-width="2" fill="none"/><ellipse cx="32" cy="22" rx="8" ry="2.5" fill="#ffb13b"/><path d="M27 22 Q29 30 24 36 Q21 40 23 46 Q27 40 30 34 Q32 28 32 22Z M34 22 Q35 30 40 34 Q44 38 44 44 Q48 38 44 31 Q40 26 38 22Z" fill="#ff6a1a" stroke="#ffcf5a" stroke-width="1" stroke-linejoin="round"/><circle cx="32" cy="12" r="6" fill="#ff6a1a"/><circle cx="25" cy="8" r="4" fill="#ff9a2a"/><circle cx="39" cy="7" r="4.5" fill="#ff9a2a"/><circle cx="32" cy="4" r="3" fill="#ffd34a"/><circle cx="31" cy="12" r="2.5" fill="#ffe98a"/><path d="M2 50 H62 L58 55.5 L62 61 H2 L6 55.5Z" fill="#e8336b" stroke="#7a0f2e" stroke-width="1.5" stroke-linejoin="round"/><text x="32" y="59.2" text-anchor="middle" font-family="Limelight" font-size="9" fill="#fff4d6" letter-spacing="1">BONUS</text>'],
+        'H1' => ['name' => 'Tiki Mug', 'svg' => '<defs><linearGradient id="tiki-H1-g1" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#3fd0bd"/><stop offset=".55" stop-color="#15907f"/><stop offset="1" stop-color="#0b5a52"/></linearGradient></defs><path d="M40 26 L50 4" stroke="#ffe066" stroke-width="3" stroke-linecap="round"/><path d="M40 26 L50 4" stroke="#e8336b" stroke-width="3" stroke-dasharray="3 3"/><path d="M30 24 L22 6" stroke="#8a5a2a" stroke-width="1.8" stroke-linecap="round"/><path d="M8 12 Q20 -2 36 8 Z" fill="#ff5a96" stroke="#7a0f2e" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 12 L17 5 L22 6 L28 4.5 L36 8" fill="none" stroke="#7a0f2e" stroke-width="1"/><path d="M16 22 L48 22 L45 58 Q32 62 19 58Z" fill="url(#tiki-H1-g1)" stroke="#06312c" stroke-width="2" stroke-linejoin="round"/><ellipse cx="32" cy="22" rx="16" ry="3.5" fill="#ffb13b" stroke="#06312c" stroke-width="1.5"/><path d="M19 30 H45" stroke="#06312c" stroke-width="2"/><path d="M21 38 Q25 33 29 38 M35 38 Q39 33 43 38" stroke="#06312c" stroke-width="2.4" fill="none" stroke-linecap="round"/><circle cx="25" cy="38.5" r="1.8" fill="#06312c"/><circle cx="39" cy="38.5" r="1.8" fill="#06312c"/><path d="M30 38 L34 38 L35 44 L29 44Z" fill="#0b5a52"/><rect x="23" y="46" width="18" height="6" rx="2.5" fill="#06312c"/><path d="M25 47.5 H39 V50.5 H25Z" fill="#dff7f0"/><path d="M28 47.5 V50.5 M32 47.5 V50.5 M36 47.5 V50.5" stroke="#06312c" stroke-width=".8"/><path d="M20 26 Q20 42 22 55" stroke="#fff" stroke-width="2.5" stroke-opacity=".35" fill="none" stroke-linecap="round"/><path d="M16 30 Q9 32 10 40 Q11 46 18 46" stroke="#0b5a52" stroke-width="3.5" fill="none"/>'],
+        'H2' => ['name' => 'Ukulele', 'svg' => '<defs><linearGradient id="tiki-H2-g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffb04a"/><stop offset="1" stop-color="#c2561a"/></linearGradient></defs><g transform="translate(32 32) scale(1.12) translate(-32 -32) rotate(35 32 32)"><rect x="29" y="3" width="6" height="30" fill="#4a2410" stroke="#1a0a05" stroke-width="1.2"/><path d="M27 2 H37 L36 10 H28Z" fill="#6b3414" stroke="#1a0a05" stroke-width="1.2"/><circle cx="26.5" cy="5" r="1.4" fill="#ffe066"/><circle cx="37.5" cy="5" r="1.4" fill="#ffe066"/><circle cx="26.5" cy="8" r="1.4" fill="#ffe066"/><circle cx="37.5" cy="8" r="1.4" fill="#ffe066"/><path d="M32 22 C21 22 20 30 23 35 C17 39 17 52 24 57 C28 60 36 60 40 57 C47 52 47 39 41 35 C44 30 43 22 32 22Z" fill="url(#tiki-H2-g1)" stroke="#5a2408" stroke-width="2"/><path d="M32 23.5 C23 24 22 30 25 35" stroke="#fff" stroke-width="2" stroke-opacity=".35" fill="none" stroke-linecap="round"/><circle cx="32" cy="38" r="5" fill="#2a130a" stroke="#7a3a10" stroke-width="1.5"/><circle cx="32" cy="38" r="7" fill="none" stroke="#2fb59a" stroke-width="1.2"/><rect x="26" y="50" width="12" height="3" rx="1" fill="#4a2410"/><path d="M30.5 6 V51 M31.5 6 V51 M32.5 6 V51 M33.5 6 V51" stroke="#fff4d6" stroke-width=".4"/></g><g transform="translate(14 48)"><circle r="5" fill="#ff4f8b"/><circle r="1.8" fill="#ffe066"/></g>'],
+        'H3' => ['name' => 'Surfboard', 'svg' => '<defs><linearGradient id="tiki-H3-g1" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff8e4"/><stop offset="1" stop-color="#e8cf9a"/></linearGradient></defs><g transform="rotate(-30 32 32)"><path d="M32 1 Q46 16 44 40 Q42 60 32 63 Q22 60 20 40 Q18 16 32 1Z" fill="url(#tiki-H3-g1)" stroke="#3a1a08" stroke-width="2"/><path d="M29 4 Q28 30 29 62 L35 62 Q36 30 35 4 Q32 1 29 4Z" fill="#e0342b"/><path d="M26 10 Q23 30 25 58 M38 10 Q41 30 39 58" stroke="#16a08c" stroke-width="2.2" fill="none"/><ellipse cx="32" cy="28" rx="6" ry="6" fill="#ffd34a" stroke="#3a1a08" stroke-width="1.2"/><path d="M32 23.5 L33.3 26.7 L36.6 27 L34 29.1 L34.8 32.4 L32 30.6 L29.2 32.4 L30 29.1 L27.4 27 L30.7 26.7Z" fill="#e0342b"/><path d="M24 16 Q22 30 23 44" stroke="#fff" stroke-width="2" stroke-opacity=".7" fill="none" stroke-linecap="round"/></g>'],
+        'H4' => ['name' => 'Tiki Torch', 'svg' => '<defs><linearGradient id="tiki-H4-g1" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ff4a12"/><stop offset=".55" stop-color="#ff9a1e"/><stop offset="1" stop-color="#ffe066"/></linearGradient><linearGradient id="tiki-H4-g2" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#f2d08a"/><stop offset="1" stop-color="#b98a3e"/></linearGradient></defs><path d="M32 2 Q44 12 42 22 Q46 16 44 10 Q52 20 46 30 H18 Q12 20 20 12 Q19 18 22 22 Q20 12 32 2Z" fill="url(#tiki-H4-g1)" stroke="#a82a0a" stroke-width="1.5" stroke-linejoin="round"/><path d="M32 12 Q38 20 36 28 H28 Q26 20 32 12Z" fill="#fff4b0"/><path d="M17 28 H47 L42 40 H22Z" fill="#9a5a24" stroke="#3a1a08" stroke-width="2" stroke-linejoin="round"/><path d="M20 31 L44 37 M44 31 L20 37 M19 34 H45" stroke="#e2b46a" stroke-width="1.5"/><rect x="28" y="40" width="8" height="23" fill="url(#tiki-H4-g2)" stroke="#3a1a08" stroke-width="1.8"/><path d="M27.5 47 H36.5 M27.5 55 H36.5" stroke="#3a1a08" stroke-width="2"/><path d="M30 42 V62" stroke="#fff" stroke-width="1.2" stroke-opacity=".5"/>'],
+        'L1' => ['name' => 'Hibiscus', 'svg' => '<g transform="translate(32 33)" stroke="#8a0f3a" stroke-width="1.5"><path d="M0 0 C-10 -8 -12 -24 0 -25 C12 -24 10 -8 0 0Z" fill="#ff4f8b"/><path d="M0 0 C-10 -8 -12 -24 0 -25 C12 -24 10 -8 0 0Z" fill="#ff4f8b" transform="rotate(72)"/><path d="M0 0 C-10 -8 -12 -24 0 -25 C12 -24 10 -8 0 0Z" fill="#ff4f8b" transform="rotate(144)"/><path d="M0 0 C-10 -8 -12 -24 0 -25 C12 -24 10 -8 0 0Z" fill="#ff4f8b" transform="rotate(216)"/><path d="M0 0 C-10 -8 -12 -24 0 -25 C12 -24 10 -8 0 0Z" fill="#ff4f8b" transform="rotate(288)"/><circle r="7" fill="#c21857" stroke="none"/><path d="M0 0 L9 -13" stroke="#ffe066" stroke-width="2"/><circle cx="9" cy="-13" r="2.2" fill="#ffd34a" stroke="#b36a00" stroke-width=".8"/><path d="M-4 -20 Q-6 -14 -3 -9" stroke="#fff" stroke-opacity=".6" stroke-width="2" fill="none" stroke-linecap="round"/></g>'],
+        'L2' => ['name' => 'Pineapple', 'svg' => '<defs><clipPath id="tiki-L2-c"><ellipse cx="32" cy="43" rx="15" ry="18"/></clipPath></defs><path d="M32 30 L14 12 L26 20 L22 4 L30 16 L32 1 L34 16 L42 4 L38 20 L50 12Z" fill="#3cb04a" stroke="#14521e" stroke-width="1.5" stroke-linejoin="round"/><ellipse cx="32" cy="43" rx="15" ry="18" fill="#ffc92a" stroke="#8a5200" stroke-width="2"/><g clip-path="url(#tiki-L2-c)" stroke="#c77a00" stroke-width="1.6"><path d="M8 30 L40 62 M8 38 L32 62 M8 22 L48 62 M14 20 L52 58 M22 20 L56 54 M56 30 L24 62 M56 38 L32 62 M56 22 L16 62 M50 20 L12 58 M42 20 L8 54"/></g><path d="M22 36 Q20 44 23 52" stroke="#fff" stroke-width="2.5" stroke-opacity=".55" fill="none" stroke-linecap="round"/>'],
+        'L3' => ['name' => 'Coconut', 'svg' => '<defs><radialGradient id="tiki-L3-g1" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#9a5e30"/><stop offset="1" stop-color="#4a2410"/></radialGradient></defs><path d="M8 30 Q8 58 32 58 Q56 58 56 30Z" fill="url(#tiki-L3-g1)" stroke="#1f0d05" stroke-width="2"/><path d="M14 38 L18 42 M22 46 L25 50 M36 48 L40 45 M46 40 L50 36 M30 52 L33 55" stroke="#2a130a" stroke-width="1.5" stroke-linecap="round"/><ellipse cx="32" cy="30" rx="24" ry="10" fill="#fffaf0" stroke="#1f0d05" stroke-width="2"/><ellipse cx="32" cy="30.5" rx="18" ry="6.5" fill="#e9f3f0"/><ellipse cx="32" cy="31" rx="15" ry="4.8" fill="#cfe6e4"/><path d="M20 28 Q26 26 30 27" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M14 44 Q14 50 20 53" stroke="#fff" stroke-width="2" stroke-opacity=".3" fill="none" stroke-linecap="round"/>'],
+        'L4' => ['name' => 'Seashell', 'svg' => '<defs><linearGradient id="tiki-L4-g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a8f4ee"/><stop offset="1" stop-color="#2aa9b8"/></linearGradient></defs><path d="M50 12 L58 4 L55 16 Q59 30 47 44 Q34 58 16 57 Q7 55 7 46 Q8 32 20 22 L24 14 L28 20 L33 11 L37 17 L43 9 L45 15Z" fill="url(#tiki-L4-g1)" stroke="#0c4a55" stroke-width="2" stroke-linejoin="round"/><path d="M50 12 Q46 18 49 24 M55 16 Q50 20 52 28 M45 15 Q40 24 44 32" stroke="#0c6a75" stroke-width="1.5" fill="none"/><path d="M11 49 Q12 32 28 27 Q40 24 45 33 Q38 50 21 55 Q13 56 11 49Z" fill="#ffb3c6" stroke="#0c4a55" stroke-width="1.5"/><path d="M18 46 Q22 36 32 33 Q38 32 40 35" stroke="#e8668a" stroke-width="2.2" fill="none" stroke-linecap="round"/><path d="M24 20 Q34 16 40 20" stroke="#fff" stroke-width="2" stroke-opacity=".7" fill="none" stroke-linecap="round"/>'],
+        'L5' => ['name' => 'Palm Leaf', 'svg' => '<defs><linearGradient id="tiki-L5-g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6ee06a"/><stop offset="1" stop-color="#1f8a3a"/></linearGradient></defs><path d="M32 63 V52" stroke="#1f6a2a" stroke-width="3" stroke-linecap="round"/><path d="M32 56 C14 50 5 36 7 22 C9 10 22 5 32 13 C42 5 55 10 57 22 C59 36 50 50 32 56Z" fill="url(#tiki-L5-g1)" stroke="#0e4a1e" stroke-width="2" stroke-linejoin="round"/><path d="M4 21 L22 26 L5 30Z M5 35 L23 36 L9 44Z M13 47 L26 42 L20 54Z M60 21 L42 26 L59 30Z M59 35 L41 36 L55 44Z M51 47 L38 42 L44 54Z" fill="#2a130a"/><ellipse cx="25" cy="32" rx="2.2" ry="3" fill="#2a130a"/><ellipse cx="39" cy="32" rx="2.2" ry="3" fill="#2a130a"/><path d="M32 13 V56 M32 24 L15 18 M32 32 L14 32 M32 40 L20 46 M32 24 L49 18 M32 32 L50 32 M32 40 L44 46" stroke="#0e4a1e" stroke-width="1.8" fill="none" stroke-linecap="round"/><path d="M14 12 Q10 16 9 22" stroke="#fff" stroke-width="2" stroke-opacity=".5" fill="none" stroke-linecap="round"/>'],
+    ],
+    'calavera' => [
+        'W' => ['name' => 'Sugar Skull', 'svg' => '<defs><linearGradient id="calavera-W-plate" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe680"/><stop offset="1" stop-color="#e0a100"/></linearGradient></defs><circle cx="32" cy="27" r="27" fill="#ff9f1c" opacity="0.22"/><circle cx="32" cy="27" r="28" fill="none" stroke="#ffd23f" stroke-width="2" stroke-dasharray="0.1 3.4" stroke-linecap="round"/><path d="M32 4C47 4 55 14 55 25C55 32 52 36 49 38L48 44C48 47 45 49 42 49H22C19 49 16 47 16 44L15 38C12 36 9 32 9 25C9 14 17 4 32 4Z" fill="#fff8ec" stroke="#2a0f3d" stroke-width="2.2"/><path d="M13 22C14 12 22 7 30 6C22 9 16 14 15 24Z" fill="#fff"/><circle cx="32" cy="14" r="3.5" fill="none" stroke="#ff9f1c" stroke-width="4" stroke-dasharray="0.1 2.6" stroke-linecap="round"/><circle cx="32" cy="14" r="2" fill="#ffd23f"/><circle cx="23" cy="10.5" r="1.2" fill="#1fd1c1"/><circle cx="41" cy="10.5" r="1.2" fill="#1fd1c1"/><circle cx="26" cy="8" r="1" fill="#a6e22e"/><circle cx="38" cy="8" r="1" fill="#a6e22e"/><circle cx="22" cy="26" r="6.5" fill="none" stroke="#ff2e88" stroke-width="4.5" stroke-dasharray="0.1 3.4" stroke-linecap="round"/><circle cx="42" cy="26" r="6.5" fill="none" stroke="#ff2e88" stroke-width="4.5" stroke-dasharray="0.1 3.4" stroke-linecap="round"/><circle cx="22" cy="26" r="5" fill="#1fd1c1"/><circle cx="42" cy="26" r="5" fill="#1fd1c1"/><circle cx="22" cy="26" r="2.6" fill="#2a0f3d"/><circle cx="42" cy="26" r="2.6" fill="#2a0f3d"/><path d="M32 38L28.5 33.5C28 31.5 30.5 31 32 32.5C33.5 31 36 31.5 35.5 33.5Z" fill="#2a0f3d"/><path d="M13 33Q15 36 13 38M51 33Q49 36 51 38" fill="none" stroke="#a6e22e" stroke-width="1.6" stroke-linecap="round"/><path d="M21 41H43M24 39V43M28 39V43M32 39V43M36 39V43M40 39V43" stroke="#2a0f3d" stroke-width="1.4"/><rect x="7" y="47" width="50" height="13" rx="3.5" fill="url(#calavera-W-plate)" stroke="#2a0f3d" stroke-width="1.8"/><text x="32" y="57.6" font-family="Limelight" font-size="11" fill="#3a1457" text-anchor="middle" letter-spacing="1.5">WILD</text>'],
+        'S' => ['name' => 'Marigold', 'svg' => '<defs><radialGradient id="calavera-S-glow" cx="50%" cy="50%" r="50%"><stop offset="55%" stop-color="#ffb627" stop-opacity="0.7"/><stop offset="100%" stop-color="#ffb627" stop-opacity="0"/></radialGradient></defs><circle cx="32" cy="27" r="29" fill="url(#calavera-S-glow)"/><circle cx="32" cy="27" r="24" fill="none" stroke="#ffd23f" stroke-width="1.8" stroke-dasharray="1 2.4" stroke-linecap="round"/><circle cx="32" cy="27" r="18" fill="#c2410c"/><circle cx="32" cy="27" r="17" fill="none" stroke="#e8590c" stroke-width="8" stroke-dasharray="0.1 5" stroke-linecap="round"/><circle cx="32" cy="27" r="12.5" fill="none" stroke="#ff8c1a" stroke-width="7" stroke-dasharray="0.1 4.4" stroke-linecap="round"/><circle cx="32" cy="27" r="8" fill="none" stroke="#ffb627" stroke-width="6" stroke-dasharray="0.1 3.6" stroke-linecap="round"/><circle cx="32" cy="27" r="4.5" fill="#ffe066"/><circle cx="32" cy="27" r="2" fill="#c2410c"/><circle cx="26" cy="20" r="2" fill="#fff4c2" opacity="0.8"/><path d="M8 47L14 45V58L8 56L11 51.5Z" fill="#b3125e"/><path d="M56 47L50 45V58L56 56L53 51.5Z" fill="#b3125e"/><rect x="13" y="45" width="38" height="12" rx="2" fill="#ff2e88" stroke="#6b0f3a" stroke-width="1.2"/><text x="32" y="54.4" font-family="Figtree, sans-serif" font-weight="900" font-size="8.5" fill="#fff" text-anchor="middle" letter-spacing="1">BONUS</text>'],
+        'H1' => ['name' => 'Catrina Hat', 'svg' => '<path d="M40 30C42 20 46 12 54 5C52 14 48 22 44 31Z" fill="#1fd1c1" stroke="#0b6e66" stroke-width="1"/><path d="M36 28C35 18 38 10 44 3C45 12 42 21 40 30Z" fill="#a6e22e" stroke="#4d7a0c" stroke-width="1"/><path d="M44 31C48 24 54 19 60 17C57 23 52 28 46 33Z" fill="#ff2e88" stroke="#8a1049" stroke-width="1"/><ellipse cx="32" cy="42" rx="28" ry="9" fill="#1a0829"/><ellipse cx="32" cy="41" rx="27" ry="8" fill="#5b1f7a" stroke="#2a0f3d" stroke-width="1.5"/><ellipse cx="32" cy="41" rx="24" ry="6" fill="none" stroke="#ffd23f" stroke-width="1.4" stroke-dasharray="0.1 2.6" stroke-linecap="round"/><path d="M17 40C17 25 22 17 32 17C42 17 47 25 47 40C42 43 22 43 17 40Z" fill="#3a1457" stroke="#1a0829" stroke-width="1.6"/><path d="M22 36C21 27 24 21 29 19C25 23 24 29 25 37Z" fill="#7a3aa0"/><path d="M17.5 32C22 35 42 35 46.5 32L47 38C42 41 22 41 17 38Z" fill="#ff2e88"/><circle cx="23" cy="34" r="5" fill="#e8590c"/><circle cx="23" cy="34" r="4" fill="none" stroke="#ffb627" stroke-width="3" stroke-dasharray="0.1 2.2" stroke-linecap="round"/><circle cx="23" cy="34" r="1.6" fill="#ffe066"/><circle cx="31.5" cy="35.5" r="4" fill="#1fd1c1" stroke="#0b6e66" stroke-width="1"/><circle cx="31.5" cy="35.5" r="1.5" fill="#fff8ec"/><circle cx="39" cy="34.5" r="4.4" fill="#d6006a"/><path d="M37 34.5a2 2 0 1 1 2 2M39 32.8a1.6 1.6 0 1 0 1.5 1.8" fill="none" stroke="#ff8ac0" stroke-width="1"/><path d="M28 39.5l-2 3.5 4-1zM35 39.5l2 3.5-4-1z" fill="#a6e22e"/><path d="M7 45Q10 49 13 47Q16 51 19 48Q22 52 26 49Q29 52 32 49Q35 52 38 49Q42 52 45 48Q48 51 51 47Q54 49 57 45" fill="none" stroke="#fff8ec" stroke-width="1.4" stroke-linecap="round"/>'],
+        'H2' => ['name' => 'Guitar', 'svg' => '<g transform="translate(29 32) rotate(-38) scale(0.95) translate(-32 -32)"><rect x="29" y="-2" width="6" height="30" rx="1" fill="#4a2410" stroke="#1a0829" stroke-width="1.2"/><path d="M27 -6H37L36 3H28Z" fill="#6b3215" stroke="#1a0829" stroke-width="1.2"/><circle cx="26.5" cy="-3.5" r="1.3" fill="#ffd23f"/><circle cx="26.8" cy="0.5" r="1.3" fill="#ffd23f"/><circle cx="37.5" cy="-3.5" r="1.3" fill="#ffd23f"/><circle cx="37.2" cy="0.5" r="1.3" fill="#ffd23f"/><circle cx="32" cy="31" r="11.5" fill="#1a0829"/><circle cx="32" cy="48" r="15" fill="#1a0829"/><circle cx="32" cy="31" r="10" fill="#e0822a"/><circle cx="32" cy="48" r="13.5" fill="#e0822a"/><circle cx="32" cy="48" r="11" fill="#f2a041"/><path d="M24 28A10 10 0 0 1 32 22" fill="none" stroke="#ffd9a0" stroke-width="2" stroke-linecap="round"/><circle cx="32" cy="38" r="6.5" fill="none" stroke="#1fd1c1" stroke-width="3" stroke-dasharray="0.1 2.4" stroke-linecap="round"/><circle cx="32" cy="38" r="4.2" fill="#2a0f3d"/><circle cx="24" cy="51" r="3" fill="#ff2e88"/><circle cx="24" cy="51" r="1.2" fill="#ffe066"/><circle cx="40" cy="51" r="3" fill="#ff2e88"/><circle cx="40" cy="51" r="1.2" fill="#ffe066"/><circle cx="21" cy="45.5" r="1.3" fill="#a6e22e"/><circle cx="43" cy="45.5" r="1.3" fill="#a6e22e"/><circle cx="27" cy="57" r="1.3" fill="#1fd1c1"/><circle cx="37" cy="57" r="1.3" fill="#1fd1c1"/><rect x="26" y="50" width="12" height="3" rx="1" fill="#4a2410"/><path d="M30.5 1V51M32 1V51M33.5 1V51" stroke="#fff8ec" stroke-width="0.5"/></g>'],
+        'H3' => ['name' => 'Papel Picado', 'svg' => '<path d="M3 9Q32 17 61 9" fill="none" stroke="#fff8ec" stroke-width="1.6"/><g transform="rotate(5 13 11)"><path d="M5 11H21V46Q18.3 51 15.7 46Q13 51 10.3 46Q7.7 51 5 46Z" fill="#ff2e88" stroke="#8a1049" stroke-width="1"/><circle cx="13" cy="25" r="4.5" fill="none" stroke="#1d0b2e" stroke-width="3" stroke-dasharray="0.1 2.8" stroke-linecap="round"/><circle cx="13" cy="25" r="1.8" fill="#1d0b2e"/><path d="M13 33L16 37L13 41L10 37Z" fill="#1d0b2e"/><path d="M8 15H18" stroke="#1d0b2e" stroke-width="1.4" stroke-dasharray="1.4 1.6"/></g><g><path d="M24 14H40V50Q37.3 55 34.7 50Q32 55 29.3 50Q26.7 55 24 50Z" fill="#ff9f1c" stroke="#a34a00" stroke-width="1"/><path d="M32 22C35 22 37 25 37 28C37 32 35 34 32 36C29 34 27 32 27 28C27 25 29 22 32 22Z" fill="#1d0b2e"/><circle cx="30" cy="27" r="1.4" fill="#ff9f1c"/><circle cx="34" cy="27" r="1.4" fill="#ff9f1c"/><path d="M32 29.5L31 31H33Z" fill="#ff9f1c"/><circle cx="28" cy="42" r="1.4" fill="#1d0b2e"/><circle cx="32" cy="43" r="1.4" fill="#1d0b2e"/><circle cx="36" cy="42" r="1.4" fill="#1d0b2e"/><path d="M27 18H37" stroke="#1d0b2e" stroke-width="1.4" stroke-dasharray="1.4 1.6"/></g><g transform="rotate(-5 51 11)"><path d="M43 11H59V46Q56.3 51 53.7 46Q51 51 48.3 46Q45.7 51 43 46Z" fill="#1fd1c1" stroke="#0b6e66" stroke-width="1"/><path d="M51 20L53 25L58 25L54 28L55.5 33L51 30L46.5 33L48 28L44 25L49 25Z" fill="#1d0b2e"/><path d="M48 37L51 41L54 37L51 41.5ZM47 40Q51 44 55 40" fill="none" stroke="#1d0b2e" stroke-width="1.6"/><path d="M46 15H56" stroke="#1d0b2e" stroke-width="1.4" stroke-dasharray="1.4 1.6"/></g><circle cx="22.5" cy="12" r="1.6" fill="#a6e22e"/><circle cx="41.5" cy="12" r="1.6" fill="#a6e22e"/>'],
+        'H4' => ['name' => 'Ofrenda Candle', 'svg' => '<defs><radialGradient id="calavera-H4-glow" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#ffd23f" stop-opacity="0.8"/><stop offset="1" stop-color="#ffd23f" stop-opacity="0"/></radialGradient><linearGradient id="calavera-H4-wax" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#e8d3a8"/><stop offset="0.4" stop-color="#fff6de"/><stop offset="1" stop-color="#d9bd86"/></linearGradient></defs><circle cx="32" cy="12" r="12" fill="url(#calavera-H4-glow)"/><path d="M32 3C36 8 37 12 35 16C34 18 30 18 29 16C27 12 29 8 32 3Z" fill="#ff8c1a"/><path d="M32 8C34 11 34 14 33 15.5C32 16.3 31 16 30.7 15C30.3 13 31 11 32 8Z" fill="#ffe066"/><path d="M32 16V20" stroke="#2a0f3d" stroke-width="1.2"/><rect x="21" y="19" width="22" height="34" rx="2" fill="url(#calavera-H4-wax)" stroke="#6b4a1a" stroke-width="1.4"/><path d="M21 21C23 24 25 20 27 23C29 26 31 21 33 24C36 27 38 21 43 22V20H21Z" fill="#fffaf0"/><circle cx="32" cy="34" r="6.2" fill="none" stroke="#ff2e88" stroke-width="4.2" stroke-dasharray="0.1 3.2" stroke-linecap="round"/><circle cx="32" cy="34" r="3.6" fill="#ff9f1c"/><circle cx="32" cy="34" r="1.6" fill="#ffd23f"/><path d="M26 42Q29 46 32 43Q35 46 38 42" fill="none" stroke="#1fd1c1" stroke-width="1.6" stroke-linecap="round"/><path d="M25 46L29 44L28 48ZM39 46L35 44L36 48Z" fill="#a6e22e"/><rect x="24" y="23" width="3" height="27" rx="1.5" fill="#fff" opacity="0.7"/><path d="M15 53H49L46 59H18Z" fill="#ffd23f" stroke="#8a6200" stroke-width="1.4"/><path d="M19 56H45" stroke="#8a6200" stroke-width="1" stroke-dasharray="1 2"/>'],
+        'L1' => ['name' => 'Monarch Butterfly', 'svg' => '<path d="M31 30C26 16 16 8 8 10C3 12 5 22 10 27C15 31 24 32 31 31Z" fill="#ff7b00" stroke="#1a0a0a" stroke-width="2.5"/><path d="M33 30C38 16 48 8 56 10C61 12 59 22 54 27C49 31 40 32 33 31Z" fill="#ff7b00" stroke="#1a0a0a" stroke-width="2.5"/><path d="M31 33C24 33 15 36 13 44C12 50 19 53 24 49C28 46 30 40 31 34Z" fill="#ff9a1f" stroke="#1a0a0a" stroke-width="2.5"/><path d="M33 33C40 33 49 36 51 44C52 50 45 53 40 49C36 46 34 40 33 34Z" fill="#ff9a1f" stroke="#1a0a0a" stroke-width="2.5"/><path d="M30 30L12 16M30 30L10 24M30 30L20 12M31 35L17 45M31 35L23 49M34 30L52 16M34 30L54 24M34 30L44 12M33 35L47 45M33 35L41 49" stroke="#1a0a0a" stroke-width="1.3"/><circle cx="9" cy="15" r="1.1" fill="#fff"/><circle cx="7.5" cy="19" r="1.1" fill="#fff"/><circle cx="55" cy="15" r="1.1" fill="#fff"/><circle cx="56.5" cy="19" r="1.1" fill="#fff"/><circle cx="15" cy="48" r="1" fill="#fff"/><circle cx="49" cy="48" r="1" fill="#fff"/><ellipse cx="32" cy="33" rx="2.4" ry="11" fill="#1a0a0a"/><path d="M31 23Q28 16 25 14M33 23Q36 16 39 14" fill="none" stroke="#1a0a0a" stroke-width="1.3" stroke-linecap="round"/><path d="M14 14Q18 13 22 17" stroke="#ffd28a" stroke-width="1.6" fill="none" stroke-linecap="round"/>'],
+        'L2' => ['name' => 'Maracas', 'svg' => '<g transform="translate(-5 1)"><path d="M26 34L13 57" stroke="#1a0829" stroke-width="6" stroke-linecap="round"/><path d="M26 34L13 57" stroke="#c98a3c" stroke-width="3.6" stroke-linecap="round"/><ellipse cx="30" cy="22" rx="11" ry="14" transform="rotate(28 30 22)" fill="#1fd1c1" stroke="#0b4f4a" stroke-width="1.8"/><path d="M20 23Q30 29 38 17" fill="none" stroke="#ffd23f" stroke-width="2.4"/><path d="M22 28Q31 33 37 24" fill="none" stroke="#ff2e88" stroke-width="1.8" stroke-dasharray="0.1 3" stroke-linecap="round"/><ellipse cx="27" cy="14" rx="3" ry="4.5" transform="rotate(28 27 14)" fill="#b8fff7"/></g><g transform="translate(5 1)"><path d="M38 34L51 57" stroke="#1a0829" stroke-width="6" stroke-linecap="round"/><path d="M38 34L51 57" stroke="#c98a3c" stroke-width="3.6" stroke-linecap="round"/><ellipse cx="36" cy="24" rx="11" ry="14" transform="rotate(-28 36 24)" fill="#ff2e88" stroke="#6b0f3a" stroke-width="1.8"/><path d="M28 21Q35 31 45 25" fill="none" stroke="#ffd23f" stroke-width="2.4"/><path d="M27 27Q34 35 43 30" fill="none" stroke="#1fd1c1" stroke-width="1.8" stroke-dasharray="0.1 3" stroke-linecap="round"/><ellipse cx="33" cy="15" rx="3" ry="4.5" transform="rotate(-28 33 15)" fill="#ffc2dd"/></g>'],
+        'L3' => ['name' => 'Pan Dulce', 'svg' => '<defs><clipPath id="calavera-L3-top"><path d="M9 38C9 22 20 13 32 13C44 13 55 22 55 38Z"/></clipPath></defs><path d="M6 40C6 36 9 34 12 34H52C55 34 58 36 58 40C58 47 52 51 44 51H20C12 51 6 47 6 40Z" fill="#d9913a" stroke="#6b3a10" stroke-width="1.8"/><path d="M10 44C14 48 50 48 54 44" fill="none" stroke="#b36d20" stroke-width="1.4"/><path d="M9 38C9 22 20 13 32 13C44 13 55 22 55 38C48 41 16 41 9 38Z" fill="#ff8fc4" stroke="#a3265f" stroke-width="1.8"/><g clip-path="url(#calavera-L3-top)" fill="none" stroke="#d6508f" stroke-width="1.5"><path d="M32 38V13M32 38L20 15M32 38L44 15M32 38L11 24M32 38L53 24"/><path d="M14 36Q32 24 50 36M18 29Q32 18 46 29M24 21Q32 15 40 21"/></g><path d="M16 26Q20 18 28 16" fill="none" stroke="#ffd6ea" stroke-width="2.4" stroke-linecap="round"/>'],
+        'L4' => ['name' => 'Chili Pepper', 'svg' => '<path d="M40 14C49 14 54 20 52 29C49 42 34 54 14 57C10 57.5 9 55 12 53C26 46 34 36 34 24C34 18 36 14 40 14Z" fill="#e3121b" stroke="#6b0508" stroke-width="2"/><path d="M40 19C44 19 47 22 46 27C44 35 36 44 26 49C33 42 38 33 38 25C38 22 38.5 20 40 19Z" fill="#ff5a4f"/><path d="M41 21Q44 22 44 26" stroke="#ffd0c8" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M34 15C37 11 43 10 47 13C45 16 39 17 34 15Z" fill="#6cc417" stroke="#2f5e08" stroke-width="1.4"/><path d="M40 12C40 8 42 5 46 4" fill="none" stroke="#2f5e08" stroke-width="3" stroke-linecap="round"/><path d="M40 12C40 8 42 5 46 4" fill="none" stroke="#6cc417" stroke-width="1.6" stroke-linecap="round"/>'],
+        'L5' => ['name' => 'Rose', 'svg' => '<path d="M32 36Q31 48 34 60" fill="none" stroke="#2f7a0c" stroke-width="3" stroke-linecap="round"/><path d="M33 47C26 42 18 44 14 50C21 53 28 52 33 47Z" fill="#8bd61f" stroke="#2f5e08" stroke-width="1.3"/><path d="M33 51C39 46 47 47 51 52C45 56 38 55 33 51Z" fill="#8bd61f" stroke="#2f5e08" stroke-width="1.3"/><path d="M14 23C13 13 22 6 32 6C42 6 51 13 50 23C49 33 41 39 32 39C23 39 15 33 14 23Z" fill="#c2005b" stroke="#5c0029" stroke-width="1.8"/><path d="M19 22C19 14 25 10 32 10C39 10 45 14 45 22C45 30 39 34 32 34C25 34 19 30 19 22Z" fill="#ff2e88"/><path d="M24 21C24 16 28 13 32 13C37 13 40 16 40 21C40 27 36 30 32 30C28 30 24 26 24 21Z" fill="#e0006e"/><path d="M27 21C27 18 30 16 33 16.5C36 17 37 20 36 22.5C35 25 31 26 29 24C27.5 22.5 28.5 20 31 20C32.5 20 33 21.5 32 22.5" fill="none" stroke="#5c0029" stroke-width="1.4" stroke-linecap="round"/><path d="M14 23C18 32 26 36 32 36C38 36 46 32 50 23" fill="none" stroke="#8a003f" stroke-width="1.4"/><path d="M20 15Q24 10 29 9" fill="none" stroke="#ffc2dd" stroke-width="2" stroke-linecap="round"/>'],
+    ],
+];
 
 /* ═════════════════════════ FREE COINS ═════════════════════════ */
 
@@ -2144,7 +2361,7 @@ function layout(string $title, string $body, string $mode = 'public'): void {
   <?php if ($mode === 'public'): ?>
   <nav class="nav" aria-label="Main">
     <?= $nav('', 'Lobby') ?>
-    <?php foreach (GAME_CATEGORIES as $ck => [$cl]): $inCat = isset(GAME_REGISTRY[$act]) && GAME_REGISTRY[$act][1] === $ck; ?><a href="<?= h(url()) ?>#cat-<?= h($ck) ?>"<?= $inCat ? ' aria-current="page"' : '' ?>><?= h(['reels' => 'Reels', 'tables' => 'Tables', 'cards' => 'Cards', 'arcade' => 'Arcade'][$ck]) ?></a><?php endforeach; ?>
+    <?php foreach (GAME_CATEGORIES as $ck => [$cl]): $inCat = isset(GAME_REGISTRY[$act]) && GAME_REGISTRY[$act][1] === $ck; ?><a href="<?= h(url()) ?>#cat-<?= h($ck) ?>"<?= $inCat ? ' aria-current="page"' : '' ?>><?= h(['slots' => 'Slots', 'reels' => 'Keno', 'tables' => 'Tables', 'cards' => 'Cards', 'arcade' => 'Arcade', 'worlds' => '3D'][$ck] ?? $ck) ?></a><?php endforeach; ?>
     <?= $nav('leaderboard', 'Leaders') ?>
   </nav>
   <div class="me">
@@ -2223,6 +2440,9 @@ function page_lobby(): void {
         'crabs' => crab_svg('#ff6f59') . crab_svg('#2bb3a3'), 'videopoker' => card_html('AH') . card_html('KH') . card_html('QH'),
         'threecard' => card_html('7C') . card_html('8C') . card_html('9C'), 'hilo' => card_html('JD') . '<span class="art-arrows">▲<br>▼</span>',
         'crash' => '<svg viewBox="0 0 120 80" class="art-wide"><path d="M4 76C40 74 80 56 112 8" stroke="#2bb3a3" stroke-width="5" fill="none" stroke-linecap="round"/><circle cx="112" cy="8" r="6" fill="#ff6f59"/><text x="8" y="30" font-family="Limelight,serif" font-size="22" fill="#ffd98a">4.20×</text></svg>',
+        'abyss' => vs_sym('abyss', 'H1') . vs_sym('abyss', 'W') . vs_sym('abyss', 'S'), 'tinfoil' => vs_sym('tinfoil', 'H1') . vs_sym('tinfoil', 'W') . vs_sym('tinfoil', 'S'),
+        'blacksite' => vs_sym('blacksite', 'H1') . vs_sym('blacksite', 'W') . vs_sym('blacksite', 'S'), 'coderain' => vs_sym('coderain', 'H1') . vs_sym('coderain', 'W') . vs_sym('coderain', 'S'),
+        'tiki' => vs_sym('tiki', 'H1') . vs_sym('tiki', 'W') . vs_sym('tiki', 'S'), 'calavera' => vs_sym('calavera', 'H1') . vs_sym('calavera', 'W') . vs_sym('calavera', 'S'),
         'plinko' => game_icon('plinko'), 'mines' => game_icon('mines') . game_icon('mines'), 'dice' => die_svg(6) . die_svg(1)];
     ob_start(); ?>
 <section class="hero">
@@ -2743,6 +2963,7 @@ function game_panel(string $slug): string {
     $g = row('SELECT * FROM games WHERE slug = ?', [$slug]);
     if (!$p || !$g) { return ''; }
     $fresh = row('SELECT * FROM players WHERE id = ?', [$p['id']]);
+    if (isset(VSLOTS[$slug])) { return panel_videoslot($slug, $fresh, $g); }
     try { return ('panel_' . $slug)($fresh, $g); }
     catch (Throwable $e) {
         // a hand-edited or legacy round shouldn't take the whole table down: log it, render a fresh table
@@ -3269,6 +3490,76 @@ function panel_crash(array $p, array $g): string {
 <?php return ob_get_clean();
 }
 
+/* ── Slot Hall panel ── */
+function vs_sym(string $slug, string $s): string {
+    return '<svg viewBox="0 0 64 64" role="img" aria-label="' . h(VS_ART[$slug][$s]['name'] ?? $s) . '">' . (VS_ART[$slug][$s]['svg'] ?? '') . '</svg>';
+}
+function panel_videoslot(string $slug, array $p, array $g): string {
+    $t = VSLOTS[$slug];
+    $last = round_last((int)$p['id'], $slug); $s = st($last);
+    $grid = $s['grid'] ?? null;
+    if (!$grid) { $grid = [['H1', 'L1', 'L3'], ['L2', 'W', 'H2'], ['H3', 'S', 'L4'], ['L5', 'H1', 'L1'], ['H4', 'L2', 'S']]; }
+    $art = [];
+    foreach (VS_ART[$slug] as $k => $a) { $art[$k] = $a['svg']; }
+    $names = array_map(fn($a) => $a['name'], VS_ART[$slug]);
+    $cfg = ['slug' => $slug, 'art' => $art, 'names' => $names, 'pays' => $t['pays'], 'fs' => $t['fs'], 'mult' => $t['mult'], 'scat' => VS_SCATTER_PAY];
+    $bet = (int)($last['bet'] ?? max((int)$g['min_bet'], 50));
+    ob_start(); ?>
+<div class="vs vs-<?= h($slug) ?>" data-vslot="<?= h($slug) ?>" data-cfg="<?= h(json_encode($cfg, JSON_UNESCAPED_UNICODE)) ?>">
+  <canvas class="vs-fx" data-vs-fx aria-hidden="true"></canvas>
+  <div class="vs-deco" aria-hidden="true"></div>
+  <div class="vs-machine">
+    <div class="vs-marquee">
+      <span class="vs-title"><?= h($g['name']) ?></span>
+      <span class="vs-badges"><b>243 WAYS</b><b><?= $t['fs'][3] ?>+ FREE SPINS ×<?= (int)$t['mult'] ?></b></span>
+      <button type="button" class="icon-btn vs-snd" data-vs-sound aria-pressed="true" aria-label="Sound on"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" data-waves/></svg></button>
+    </div>
+    <div class="vs-fsbar" data-vs-fsbar hidden><span>FREE SPINS</span><b data-fs-left>0</b><span>left · ×<?= (int)$t['mult'] ?> · won</span><b data-fs-won>0</b></div>
+    <div class="vs-window">
+      <div class="vs-reels" data-vs-reels role="img" aria-label="Slot reels">
+        <?php for ($r = 0; $r < 5; $r++): ?>
+        <div class="vs-reel" data-reel="<?= $r ?>"><div class="vs-strip">
+          <?php foreach ($grid[$r] as $sy): ?><div class="vs-cell" data-s="<?= h($sy) ?>"><?= vs_sym($slug, $sy) ?></div><?php endforeach; ?>
+        </div></div>
+        <?php endfor; ?>
+      </div>
+      <div class="vs-banner" data-vs-banner aria-hidden="true"></div>
+    </div>
+    <div class="vs-winbar">
+      <span class="vs-winlabel">WIN</span><b class="vs-winamt" data-vs-win><?= $last ? coins((int)$last['payout']) : 0 ?></b>
+      <span class="vs-msg" data-vs-msg aria-live="polite"><?= $last ? h(($s['fs'] ?? null) ? 'Free spins paid ' . coins((int)$s['fs']['win']) . ' GC' : ((int)$last['payout'] ? 'Last spin won ' . coins((int)$last['payout']) . ' GC' : 'Good luck!')) : 'Match 3+ symbols on adjacent reels from the left.' ?></span>
+    </div>
+  </div>
+  <form class="vs-controls" method="post" action="<?= h(play_url($slug)) ?>" data-vs-form>
+    <?= csrf_field() ?>
+    <?= bet_box($g, $bet, 'bet', 'Total bet') ?>
+    <button class="btn gold xl vs-spin" data-vs-spin>Spin</button>
+    <div class="vs-auto">
+      <label>Autospin <select data-vs-auto-n><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select></label>
+      <label class="check"><input type="checkbox" data-vs-stopfs checked> Stop on free spins</label>
+      <label class="check"><input type="checkbox" data-vs-turbo> Turbo</label>
+      <button type="button" class="btn ghost" data-vs-auto>Start</button>
+      <button type="button" class="btn ghost" data-vs-3d hidden>3D cabinet</button>
+    </div>
+  </form>
+  <details class="vs-pay">
+    <summary>Paytable &amp; rules</summary>
+    <div class="vs-paygrid" data-vs-paygrid>
+      <?php foreach (['W', 'S', ...VS_SYMS] as $sy): ?>
+        <div class="vs-payrow" data-sym="<?= h($sy) ?>"><div class="vs-payicon"><?= vs_sym($slug, $sy) ?></div><div>
+          <b><?= h($names[$sy]) ?></b>
+          <?php if ($sy === 'W'): ?><small>Wild on reels 2–4. Stands in for everything except the bonus.</small>
+          <?php elseif ($sy === 'S'): ?><small>3 / 4 / 5 anywhere: <?= VS_SCATTER_PAY[3] ?>× / <?= VS_SCATTER_PAY[4] ?>× / <?= VS_SCATTER_PAY[5] ?>× bet and <?= $t['fs'][3] ?> / <?= $t['fs'][4] ?> / <?= $t['fs'][5] ?> free spins at ×<?= (int)$t['mult'] ?></small>
+          <?php else: ?><small class="mono">5× <span data-pay="2"><?= $t['pays'][$sy][2] ?></span> · 4× <span data-pay="1"><?= $t['pays'][$sy][1] ?></span> · 3× <span data-pay="0"><?= $t['pays'][$sy][0] ?></span></small><?php endif; ?>
+        </div></div>
+      <?php endforeach; ?>
+    </div>
+    <p class="fine">Pays shown are × your total bet, per way. 243 ways: a symbol pays when it lands anywhere on reels 1, 2, 3 (and 4, 5) in a row, and the win multiplies by how many times it shows on each reel. Free spins play automatically, can't retrigger, and every free-spin win is multiplied. Wins cap at <?= coins(VS_MAX_WIN) ?>× bet per spin. Return to player ≈ 95%.</p>
+  </details>
+</div>
+<?php return ob_get_clean();
+}
+
 /* ═════════════════════════ GAME PAGES ═════════════════════════ */
 
 function games_rail(string $current): string {
@@ -3289,7 +3580,8 @@ function game_icon(string $slug): string {
         'hilo' => '<span class="ico-card">▲▼</span>', 'crash' => '<svg viewBox="0 0 40 40"><path d="M3 34C14 33 24 26 36 6" stroke="#2bb3a3" stroke-width="4" fill="none" stroke-linecap="round"/><circle cx="36" cy="6" r="4" fill="#ff6f59"/></svg>',
         'plinko' => '<svg viewBox="0 0 40 40"><g fill="#e8b64c"><circle cx="20" cy="8" r="2.5"/><circle cx="14" cy="16" r="2.5"/><circle cx="26" cy="16" r="2.5"/><circle cx="8" cy="24" r="2.5"/><circle cx="20" cy="24" r="2.5"/><circle cx="32" cy="24" r="2.5"/></g><circle cx="17" cy="33" r="4.5" fill="#fff"/></svg>',
         'mines' => '<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="11" fill="#f3e9ff" stroke="#c9b8e8" stroke-width="2"/><circle cx="16" cy="16" r="3" fill="#fff"/></svg>',
-        'dice' => die_svg(6), default => '',
+        'dice' => die_svg(6),
+        default => isset(VS_ART[$slug]) ? '<svg viewBox="0 0 64 64">' . VS_ART[$slug]['W']['svg'] . '</svg>' : '',
     };
 }
 
@@ -3298,7 +3590,7 @@ function page_game(string $slug): void {
     $p = current_player();
     [$name, $cat, $blurb] = GAME_REGISTRY[$slug];
     ob_start(); ?>
-<section class="table-wrap g-page g-<?= h($slug) ?>">
+<section class="table-wrap g-page g-<?= h($slug) ?><?= isset(VSLOTS[$slug]) ? ' g-vslot' : '' ?>">
   <header class="table-head reveal d1">
     <p class="eyebrow"><a href="<?= h(url()) ?>#cat-<?= h($cat) ?>"><?= h(GAME_CATEGORIES[$cat][0]) ?></a></p>
     <h1 class="display lg"><?= h($g['name']) ?></h1>
@@ -3310,7 +3602,13 @@ function page_game(string $slug): void {
   </div>
   <aside class="panel reveal d3 house-rules">
     <h2 class="display md">How to play</h2>
-    <ul class="ticks"><?php foreach (GAME_RULES[$slug] ?? [] as $line): ?><li><?= h($line) ?></li><?php endforeach; ?></ul>
+    <ul class="ticks"><?php foreach (GAME_RULES[$slug] ?? (isset(VSLOTS[$slug]) ? [
+        '5 reels, 3 rows, 243 ways: symbols pay left to right on adjacent reels, anywhere in each column. More copies on a reel = more ways.',
+        'The wild shows up on reels 2, 3 and 4 and stands in for every symbol except the bonus.',
+        '3, 4 or 5 bonus symbols anywhere pay ' . VS_SCATTER_PAY[3] . '×, ' . VS_SCATTER_PAY[4] . '× or ' . VS_SCATTER_PAY[5] . '× your bet and award ' . implode(' / ', VSLOTS[$slug]['fs']) . ' free spins where every win is ×' . VSLOTS[$slug]['mult'] . '.',
+        'Watch for the slow-down: once two bonus symbols land, the remaining reels tease.',
+        'Return to player ≈ 95%, checked with exact math and a million-plus simulated spins.',
+    ] : []) as $line): ?><li><?= h($line) ?></li><?php endforeach; ?></ul>
   </aside>
 </section>
 <?= games_rail($slug) ?>
@@ -4401,6 +4699,101 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
   .pd-drop{width:100%}
 }
 
+/* ═════ Slot Hall ═════ */
+.g-vslot{grid-template-columns:minmax(0,1fr)}
+.g-vslot .game-stage{padding:0;background:none;border:0;box-shadow:none}
+.vs{--vs-bg1:#0b1020;--vs-bg2:#111a33;--vs-frame:#e8b64c;--vs-frame2:#8a5a00;--vs-tile:#101a33;--vs-tile2:#0b1224;--vs-accent:#ffd98a;--vs-glow:rgba(232,182,76,.55);--vs-text:#f5ecd7;--vs-font:var(--f-display);
+  position:relative;display:grid;gap:14px;padding:clamp(14px,2.4vw,26px);border-radius:28px;overflow:hidden;isolation:isolate;color:var(--vs-text);
+  background:radial-gradient(120% 80% at 50% 0%,var(--vs-bg2),var(--vs-bg1));box-shadow:var(--shadow),inset 0 0 0 1px rgba(255,255,255,.06)}
+.vs-fx{position:absolute;inset:0;width:100%;height:100%;z-index:-1;pointer-events:none}
+.vs-deco{position:absolute;inset:0;z-index:-1;pointer-events:none}
+.vs-machine{position:relative;max-width:900px;width:100%;margin:0 auto;padding:14px 14px 12px;border-radius:26px;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--vs-frame) 40%,#000) 0%,color-mix(in srgb,var(--vs-frame2) 60%,#000) 100%);
+  box-shadow:0 0 0 3px var(--vs-frame),0 0 50px -8px var(--vs-glow),0 30px 60px -20px rgba(0,0,0,.8),inset 0 2px 0 rgba(255,255,255,.25)}
+.vs-marquee{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:4px 8px 10px;flex-wrap:wrap}
+.vs-title{font:400 clamp(1.4rem,3.6vw,2.2rem)/1 var(--vs-font);color:var(--vs-accent);text-shadow:0 0 18px var(--vs-glow),0 2px 0 rgba(0,0,0,.5);letter-spacing:.02em}
+.vs-badges{display:flex;gap:6px;flex-wrap:wrap}
+.vs-badges b{font:700 .66rem var(--f-body);letter-spacing:.14em;padding:4px 9px;border-radius:999px;background:rgba(0,0,0,.35);border:1px solid color-mix(in srgb,var(--vs-accent) 50%,transparent);color:var(--vs-accent)}
+.vs-snd{background:rgba(0,0,0,.3);color:var(--vs-accent);border-color:color-mix(in srgb,var(--vs-accent) 40%,transparent)}
+.vs-fsbar{display:flex;justify-content:center;align-items:baseline;gap:8px;margin:-2px 0 8px;padding:6px 12px;border-radius:12px;background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--vs-accent) 30%,transparent),transparent);font:700 .8rem var(--f-body);letter-spacing:.12em;animation:fspulse 1.2s ease-in-out infinite alternate}
+.vs-fsbar b{font:500 1.2rem var(--f-mono);color:var(--vs-accent)}
+@keyframes fspulse{to{filter:brightness(1.35)}}
+.vs-window{position:relative;border-radius:18px;padding:8px;background:rgba(0,0,0,.55);box-shadow:inset 0 6px 24px rgba(0,0,0,.8)}
+.vs-reels{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+.vs-reel{--cell:clamp(58px,14.5vw,150px);height:calc(var(--cell)*3);overflow:hidden;border-radius:12px;position:relative;
+  background:linear-gradient(180deg,var(--vs-tile2),var(--vs-tile) 25%,var(--vs-tile) 75%,var(--vs-tile2))}
+.vs-reel::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(0,0,0,.45),transparent 18%,transparent 82%,rgba(0,0,0,.45))}
+.vs-reel.spinning .vs-strip{filter:blur(1.2px) saturate(1.2)}
+.vs-reel.tease{box-shadow:0 0 0 3px var(--vs-accent),0 0 30px var(--vs-glow);animation:tease .35s ease-in-out infinite alternate}
+@keyframes tease{to{box-shadow:0 0 0 3px #fff,0 0 44px var(--vs-glow)}}
+.vs-strip{will-change:transform}
+.vs-cell{height:var(--cell);display:grid;place-items:center;padding:9%;transition:opacity .25s,filter .25s,transform .25s}
+.vs-cell svg{width:100%;height:100%;filter:drop-shadow(0 4px 6px rgba(0,0,0,.45))}
+.vs-cell.dim{opacity:.28;filter:grayscale(.6)}
+.vs-cell.hit{animation:vshit .55s ease-in-out infinite alternate;position:relative;z-index:1}
+.vs-cell.hit svg{filter:drop-shadow(0 0 12px var(--vs-accent)) drop-shadow(0 4px 6px rgba(0,0,0,.45))}
+.vs-cell.scat{animation:vsscat .45s ease-in-out infinite alternate}
+@keyframes vshit{to{transform:scale(1.1)}}
+@keyframes vsscat{to{transform:scale(1.16) rotate(4deg);filter:brightness(1.4)}}
+.vs-banner{position:absolute;inset:0;display:grid;place-content:center;text-align:center;pointer-events:none;opacity:0;z-index:5;border-radius:18px}
+.vs-banner b{font:400 clamp(2rem,7vw,4.4rem)/1 var(--vs-font);color:var(--vs-accent);text-shadow:0 0 30px var(--vs-glow),0 4px 0 rgba(0,0,0,.6);letter-spacing:.04em}
+.vs-banner span{font:600 clamp(1rem,2.6vw,1.5rem) var(--f-mono);color:#fff;margin-top:8px}
+.vs-banner.show{animation:vsbanner var(--dur,2.4s) cubic-bezier(.2,.9,.3,1.2) forwards;background:radial-gradient(circle,rgba(0,0,0,.72),rgba(0,0,0,.35) 70%)}
+.vs-banner.tier.epic b{font-size:clamp(2.6rem,9vw,5.6rem);background:linear-gradient(180deg,#fff,var(--vs-accent),#ff6f59);-webkit-background-clip:text;background-clip:text;color:transparent}
+@keyframes vsbanner{0%{opacity:0;transform:scale(.5)}12%{opacity:1;transform:scale(1.08)}20%{transform:scale(1)}85%{opacity:1}100%{opacity:0}}
+.vs-winbar{display:flex;align-items:center;gap:12px;padding:10px 8px 2px;flex-wrap:wrap}
+.vs-winlabel{font:700 .7rem var(--f-body);letter-spacing:.2em;color:color-mix(in srgb,var(--vs-text) 60%,transparent)}
+.vs-winamt{font:500 clamp(1.3rem,3vw,1.8rem) var(--f-mono);color:var(--vs-accent);min-width:5ch;text-shadow:0 0 14px var(--vs-glow)}
+.vs-msg{flex:1;text-align:right;font-size:.88rem;color:color-mix(in srgb,var(--vs-text) 80%,transparent);min-width:180px}
+.vs-controls{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;justify-content:center;max-width:900px;margin:0 auto;width:100%}
+.vs-controls .betbox label{color:color-mix(in srgb,var(--vs-text) 70%,transparent)}
+.vs-controls .betbox input{background:rgba(0,0,0,.35);color:#fff;border-color:color-mix(in srgb,var(--vs-accent) 40%,transparent)}
+.vs-controls .bet-quick button{background:rgba(0,0,0,.35);color:var(--vs-text);border-color:rgba(255,255,255,.1)}
+.vs-spin{min-width:190px;border-radius:999px!important;background:linear-gradient(180deg,#fff,var(--vs-accent) 40%,color-mix(in srgb,var(--vs-accent) 60%,#000))!important;color:#140d02!important;box-shadow:0 0 30px -4px var(--vs-glow),inset 0 1px 0 #fff!important}
+.vs.spinning .vs-spin{filter:saturate(.6) brightness(.8)}
+.vs-auto{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.vs-auto label{display:flex;gap:6px;align-items:center;font-size:.85rem;font-weight:600;color:color-mix(in srgb,var(--vs-text) 80%,transparent)}
+.vs-auto select{width:auto;padding:6px 8px;background:rgba(0,0,0,.35);color:#fff}
+.vs .btn.ghost{color:var(--vs-text)!important;border-color:color-mix(in srgb,var(--vs-accent) 35%,transparent)}
+.vs-pay{max-width:900px;width:100%;margin:0 auto;padding:10px 14px;border-radius:16px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08)}
+.vs-pay summary{cursor:pointer;font:400 1.05rem var(--vs-font);color:var(--vs-accent)}
+.vs-paygrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;margin:12px 0}
+.vs-payrow{display:flex;gap:10px;align-items:center;padding:6px;border-radius:12px;background:rgba(255,255,255,.04)}
+.vs-payicon{width:54px;height:54px;flex-shrink:0;border-radius:10px;background:var(--vs-tile);padding:3px}
+.vs-payicon svg{width:100%;height:100%}
+.vs-payrow b{display:block;font-size:.9rem}.vs-payrow small{font-size:.76rem;color:color-mix(in srgb,var(--vs-text) 75%,transparent)}
+.vs-payrow small.mono{font-family:var(--f-mono)}
+.vs .fine{color:color-mix(in srgb,var(--vs-text) 65%,transparent)}
+.vs.freespins .vs-machine{box-shadow:0 0 0 3px var(--vs-accent),0 0 80px 0 var(--vs-glow),0 30px 60px -20px rgba(0,0,0,.8)}
+
+/* per-theme looks */
+.vs-abyss{--vs-bg1:#020b1a;--vs-bg2:#0a3a5c;--vs-frame:#3fe0d0;--vs-frame2:#0b4d6b;--vs-tile:#06213a;--vs-tile2:#031426;--vs-accent:#7ff9e6;--vs-glow:rgba(63,224,208,.55);--vs-text:#e2fbff}
+.vs-abyss .vs-deco{background:radial-gradient(60% 40% at 50% 115%,rgba(255,111,160,.18),transparent),linear-gradient(0deg,rgba(0,0,0,.4),transparent 30%)}
+.vs-tinfoil{--vs-bg1:#07061a;--vs-bg2:#241a4d;--vs-frame:#c7cde0;--vs-frame2:#4b4f66;--vs-tile:#171336;--vs-tile2:#0c0a22;--vs-accent:#9dff9a;--vs-glow:rgba(120,255,140,.45);--vs-text:#eef0ff}
+.vs-tinfoil .vs-deco{background:linear-gradient(0deg,#2b1406 0%,#6b3310 8%,transparent 22%)}
+.vs-tinfoil .vs-machine{background:repeating-linear-gradient(115deg,#8d94aa 0 6px,#d8dcec 6px 9px,#6d738a 9px 16px)}
+.vs-blacksite{--vs-bg1:#050608;--vs-bg2:#141a22;--vs-frame:#ff2d44;--vs-frame2:#2a2f38;--vs-tile:#0f1319;--vs-tile2:#07090c;--vs-accent:#5fe6ff;--vs-glow:rgba(255,45,68,.45);--vs-text:#dfe9f2;--vs-font:var(--f-mono)}
+.vs-blacksite .vs-machine{background:repeating-linear-gradient(135deg,#1a1f27 0 14px,#232a34 14px 28px);box-shadow:0 0 0 2px #ff2d44,0 0 0 6px #111,0 0 0 8px #ffb000,0 0 50px -8px var(--vs-glow),0 30px 60px -20px rgba(0,0,0,.8)}
+.vs-blacksite .vs-title{text-transform:uppercase;letter-spacing:.12em;font-weight:500}
+.vs-coderain{--vs-bg1:#000;--vs-bg2:#021a0c;--vs-frame:#00ff66;--vs-frame2:#003318;--vs-tile:#010c05;--vs-tile2:#000;--vs-accent:#39ff88;--vs-glow:rgba(0,255,102,.5);--vs-text:#c8ffd9;--vs-font:var(--f-mono)}
+.vs-coderain .vs-machine{background:#010904;box-shadow:0 0 0 2px #00ff66,0 0 40px -6px var(--vs-glow),inset 0 0 40px rgba(0,255,102,.12)}
+.vs-coderain .vs-title{letter-spacing:.2em;text-transform:uppercase}
+.vs-tiki{--vs-bg1:#1a0903;--vs-bg2:#6b2a0c;--vs-frame:#e7a24a;--vs-frame2:#5a2c10;--vs-tile:#3a1a0c;--vs-tile2:#220e05;--vs-accent:#ffcf5c;--vs-glow:rgba(255,140,40,.55);--vs-text:#fff1dc}
+.vs-tiki .vs-machine{background:repeating-linear-gradient(90deg,#6a3b16 0 22px,#7c4a1d 22px 26px,#5a3010 26px 48px);box-shadow:0 0 0 4px #c8893f,0 0 0 7px #3a1a0a,0 0 50px -8px var(--vs-glow),0 30px 60px -20px rgba(0,0,0,.8)}
+.vs-tiki .vs-deco{background:radial-gradient(80% 50% at 50% 120%,rgba(255,110,40,.35),transparent),radial-gradient(40% 25% at 50% -5%,rgba(255,200,120,.25),transparent)}
+.vs-calavera{--vs-bg1:#12051f;--vs-bg2:#3a0e52;--vs-frame:#ff9f1c;--vs-frame2:#7a1f6b;--vs-tile:#260b3a;--vs-tile2:#170626;--vs-accent:#ffc93c;--vs-glow:rgba(255,79,163,.5);--vs-text:#fff0fa}
+.vs-calavera .vs-deco{background:
+  linear-gradient(90deg,#ff4fa3 0 16.6%,#ff9f1c 16.6% 33.3%,#3fe0d0 33.3% 50%,#e8ff5a 50% 66.6%,#b04bff 66.6% 83.3%,#ff4fa3 83.3%) top/100% 22px no-repeat}
+.vs-calavera .vs-deco::after{content:"";position:absolute;left:0;right:0;top:22px;height:14px;background:radial-gradient(circle at 8px 0,transparent 7px,var(--vs-bg2) 8px) 0 0/16px 14px repeat-x}
+.vs-calavera .vs-machine{margin-top:18px}
+.vs-tinfoil .vs-marquee,.vs-tinfoil .vs-winbar,.vs-tiki .vs-marquee,.vs-tiki .vs-winbar{background:rgba(8,6,20,.72);border-radius:14px;padding:8px 12px;margin-bottom:8px}
+.vs-tinfoil .vs-winbar,.vs-tiki .vs-winbar{margin:8px 0 0}
+@media (max-width:720px){
+  .vs-msg{text-align:left}
+  .vs-spin{width:100%}
+  .vs-reels{gap:3px}.vs-window{padding:4px}
+}
+
 /* responsive */
 @media (max-width:980px){
   .table-wrap,.acct-grid,.rl-top{grid-template-columns:1fr}
@@ -4798,7 +5191,7 @@ if (rl) {
 const hooks = {};
 const playUrl = slug => '?action=play&g=' + encodeURIComponent(slug);
 function enhance(root) {
-  initChipboards(root); initDice(root); initPearlDrop(root); initKeno(root); initBigWheel(root); initCrash(root);
+  initChipboards(root); initDice(root); initPearlDrop(root); initVideoSlot(root); initKeno(root); initBigWheel(root); initCrash(root);
 }
 async function runPlay(panel, url, fd) {
   if (panel.dataset.busy) return null;
@@ -5496,6 +5889,248 @@ function initPearlDrop(root) {
 
   if ('ResizeObserver' in window) new ResizeObserver(() => { if (Math.abs((cv.clientWidth || 0) - G.w) > 1) layout(); }).observe(cv);
   layout(); updCost();
+}
+
+/* ═════ SLOT HALL (themed video slots) ═════
+ * The server returns the whole outcome (base grid + every free spin). This plays it
+ * back: reel spin with scatter anticipation, win highlights, free-spin mode, tier banners.
+ */
+const sfx = (() => {
+  let ac = null, on = true;
+  try { on = localStorage.getItem('gt_sound') !== 'off'; } catch (e) {}
+  const unlock = () => { if (!on) return; if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; } } if (ac.state === 'suspended') ac.resume(); };
+  const tone = (f, dur, o = {}) => {
+    if (!on || !ac) return;
+    const t = ac.currentTime + (o.when || 0), osc = ac.createOscillator(), g = ac.createGain();
+    osc.type = o.type || 'sine'; osc.frequency.setValueAtTime(f, t);
+    if (o.glide) osc.frequency.exponentialRampToValueAtTime(o.glide, t + dur);
+    if (o.vib) { const l = ac.createOscillator(), lg = ac.createGain(); l.frequency.value = o.vib; lg.gain.value = f * .03; l.connect(lg).connect(osc.frequency); l.start(t); l.stop(t + dur + .05); }
+    g.gain.setValueAtTime(o.vol || .05, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g).connect(ac.destination); osc.start(t); osc.stop(t + dur + .05);
+  };
+  // each theme gets its own instrument + scale for stops and win jingles
+  const T = {
+    abyss:    { type: 'sine', scale: [262, 311, 392, 466, 523, 622], glide: 1.5 },
+    tinfoil:  { type: 'sine', scale: [330, 415, 494, 622, 740, 988], vib: 6 },
+    blacksite:{ type: 'square', scale: [220, 262, 330, 392, 440, 523], vol: .025 },
+    coderain: { type: 'square', scale: [392, 494, 587, 740, 880, 1175], vol: .02 },
+    tiki:     { type: 'triangle', scale: [392, 440, 494, 587, 659, 784] },
+    calavera: { type: 'sawtooth', scale: [349, 440, 523, 587, 698, 880], vol: .025 },
+    classic:  { type: 'triangle', scale: [523, 587, 659, 784, 880, 1047] },
+  };
+  const th = k => T[k] || T.classic;
+  return {
+    unlock, get on() { return on; },
+    set(v) { on = v; try { localStorage.setItem('gt_sound', v ? 'on' : 'off'); } catch (e) {} if (v) unlock(); },
+    stop(k, i) { const t = th(k); tone(t.scale[i % t.scale.length] / 2, .12, { type: t.type, vol: (t.vol || .05) * 1.2 }); },
+    tick(k) { const t = th(k); tone(t.scale[0] * 2, .03, { type: 'square', vol: .008 }); },
+    tease(k) { const t = th(k); tone(t.scale[2], .5, { type: t.type, vol: t.vol || .04, glide: t.scale[5] }); },
+    win(k, size) { const t = th(k), n = Math.min(6, 2 + size); for (let i = 0; i < n; i++) tone(t.scale[i], .22, { type: t.type, vol: t.vol || .05, when: i * .08, vib: t.vib }); },
+    scatter(k) { const t = th(k); [0, 2, 4, 5, 4, 5].forEach((s, i) => tone(t.scale[s] * 2, .3, { type: t.type, vol: t.vol || .05, when: i * .1, vib: t.vib })); },
+    big(k) { const t = th(k); [0, 1, 2, 3, 4, 5, 5].forEach((s, i) => tone(t.scale[s] * (i > 5 ? 2 : 1), .45, { type: t.type, vol: (t.vol || .05) * 1.3, when: i * .11, vib: t.vib })); },
+  };
+})();
+
+/* theme backdrops: one small particle system per slot, drawn behind the machine */
+function vsFX(canvas, theme) {
+  const ctx = canvas.getContext('2d');
+  let w = 0, h = 0, parts = [], t0 = performance.now(), raf = 0;
+  const R = (a, b) => a + Math.random() * (b - a);
+  const GLY = '01アイウエオカキクケコサシスセソタチツテト7#$%ヲン';
+  function size() {
+    const r = canvas.getBoundingClientRect(), dpr = Math.min(2, devicePixelRatio || 1);
+    w = r.width; h = r.height; canvas.width = w * dpr; canvas.height = h * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const n = { abyss: 60, tinfoil: 110, blacksite: 7, coderain: Math.floor(w / 16), tiki: 55, calavera: 45 }[theme] || 30;
+    parts = Array.from({ length: n }, (_, i) => spawn(i, true));
+  }
+  function spawn(i, init) {
+    switch (theme) {
+      case 'abyss': return { x: R(0, w), y: init ? R(0, h) : h + 10, r: R(1.5, 6), v: R(.2, .9), wob: R(0, 6), glow: Math.random() < .3 };
+      case 'tinfoil': return { x: R(0, w), y: R(0, h * .75), r: R(.5, 1.8), tw: R(0, 6) };
+      case 'blacksite': return { a: R(0, Math.PI), v: R(-.004, .004) || .002, y: R(.1, .9), s: R(0, 1) };
+      case 'coderain': return { x: i * 16 + 4, y: init ? R(-h, h) : R(-200, 0), v: R(2, 6), len: Math.floor(R(8, 24)) };
+      case 'tiki': return { x: R(0, w), y: init ? R(0, h) : h + 5, v: R(.4, 1.4), r: R(1, 2.6), life: R(.4, 1) };
+      case 'calavera': return { x: R(0, w), y: init ? R(0, h) : -10, v: R(.4, 1.2), rot: R(0, 6), vr: R(-.03, .03), r: R(4, 9), c: ['#ff9f1c', '#ffbf00', '#ff4fa3', '#e8ff5a'][i % 4] };
+      default: return {};
+    }
+  }
+  function frame(now) {
+    const t = (now - t0) / 1000;
+    ctx.clearRect(0, 0, w, h);
+    if (theme === 'abyss') {
+      for (let k = 0; k < 4; k++) { const x = w * (.15 + k * .25) + Math.sin(t * .3 + k) * 40; const g = ctx.createLinearGradient(x, 0, x + 60, h); g.addColorStop(0, 'rgba(120,220,255,.08)'); g.addColorStop(1, 'rgba(120,220,255,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(x - 30, 0); ctx.lineTo(x + 30, 0); ctx.lineTo(x + 160, h); ctx.lineTo(x + 40, h); ctx.fill(); }
+      parts.forEach((p, i) => { p.y -= p.v; p.x += Math.sin(t * 1.5 + p.wob) * .3; if (p.y < -10) parts[i] = spawn(i);
+        ctx.strokeStyle = p.glow ? 'rgba(95,255,220,.7)' : 'rgba(200,240,255,.35)'; ctx.fillStyle = p.glow ? 'rgba(95,255,220,.25)' : 'rgba(200,240,255,.06)';
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); ctx.stroke(); });
+    } else if (theme === 'tinfoil') {
+      parts.forEach(p => { ctx.fillStyle = `rgba(255,255,240,${.4 + .6 * Math.abs(Math.sin(t * 1.3 + p.tw))})`; ctx.fillRect(p.x, p.y, p.r, p.r); });
+      const ux = ((t * 60) % (w + 300)) - 150, uy = h * .18 + Math.sin(t * 2) * 12;
+      ctx.fillStyle = 'rgba(150,255,170,.12)'; ctx.beginPath(); ctx.moveTo(ux - 8, uy + 6); ctx.lineTo(ux + 8, uy + 6); ctx.lineTo(ux + 50, h); ctx.lineTo(ux - 50, h); ctx.fill();
+      ctx.fillStyle = '#b8c0d8'; ctx.beginPath(); ctx.ellipse(ux, uy, 26, 7, 0, 0, 7); ctx.fill(); ctx.fillStyle = '#8fffa8'; ctx.beginPath(); ctx.ellipse(ux, uy - 5, 10, 7, 0, Math.PI, 0); ctx.fill();
+      for (let k = 0; k < 2; k++) { const a = Math.sin(t * .6 + k * 2) * .6 - Math.PI / 2; const x0 = k ? w * .9 : w * .1; const g = ctx.createRadialGradient(x0, h, 0, x0, h, h * 1.2); g.addColorStop(0, 'rgba(255,255,200,.10)'); g.addColorStop(1, 'rgba(255,255,200,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(x0, h); ctx.arc(x0, h, h * 1.2, a - .12, a + .12); ctx.fill(); }
+    } else if (theme === 'blacksite') {
+      ctx.strokeStyle = 'rgba(95,230,255,.06)'; ctx.lineWidth = 1;
+      for (let x = 0; x < w; x += 28) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+      for (let y = 0; y < h; y += 28) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+      parts.forEach(p => { p.a += p.v; const cy = h * p.y, dx = Math.cos(p.a) * w, dy = Math.sin(p.a) * w * .3;
+        ctx.strokeStyle = 'rgba(255,40,60,.55)'; ctx.lineWidth = 1.5; ctx.shadowColor = '#ff2840'; ctx.shadowBlur = 8;
+        ctx.beginPath(); ctx.moveTo(w / 2 - dx, cy - dy); ctx.lineTo(w / 2 + dx, cy + dy); ctx.stroke(); ctx.shadowBlur = 0; });
+      const sy = (t * 90) % h; const g = ctx.createLinearGradient(0, sy - 30, 0, sy); g.addColorStop(0, 'rgba(95,230,255,0)'); g.addColorStop(1, 'rgba(95,230,255,.12)'); ctx.fillStyle = g; ctx.fillRect(0, sy - 30, w, 30);
+    } else if (theme === 'coderain') {
+      ctx.font = '14px "Chivo Mono", monospace';
+      parts.forEach((p, i) => { p.y += p.v; if (p.y - p.len * 16 > h) parts[i] = spawn(i);
+        for (let j = 0; j < p.len; j++) { const y = p.y - j * 16; if (y < -16 || y > h + 16) continue;
+          ctx.fillStyle = j === 0 ? 'rgba(220,255,230,.95)' : `rgba(0,255,102,${.55 * (1 - j / p.len)})`;
+          ctx.fillText(GLY[(Math.floor(t * 8) + i * 7 + j * 3) % GLY.length], p.x, y); } });
+    } else if (theme === 'tiki') {
+      const g = ctx.createLinearGradient(0, h, 0, h * .4); g.addColorStop(0, 'rgba(255,120,30,.22)'); g.addColorStop(1, 'rgba(255,120,30,0)'); ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+      parts.forEach((p, i) => { p.y -= p.v; p.x += Math.sin(t * 2 + i) * .5; p.life -= .004; if (p.y < 0 || p.life <= 0) parts[i] = spawn(i);
+        ctx.fillStyle = `rgba(255,${150 + Math.floor(p.life * 90)},60,${p.life})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); });
+    } else if (theme === 'calavera') {
+      parts.forEach((p, i) => { p.y += p.v; p.x += Math.sin(t + i) * .4; p.rot += p.vr; if (p.y > h + 10) parts[i] = spawn(i);
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillStyle = p.c; ctx.beginPath(); ctx.ellipse(0, 0, p.r, p.r * .55, 0, 0, 7); ctx.fill(); ctx.restore(); });
+    }
+    raf = canvas.isConnected && !reduce ? requestAnimationFrame(frame) : 0;
+  }
+  size();
+  if ('ResizeObserver' in window) new ResizeObserver(size).observe(canvas);
+  if (reduce) frame(performance.now()); else raf = requestAnimationFrame(frame);
+}
+
+function initVideoSlot(root) {
+  const el = $('[data-vslot]', root);
+  if (!el || el.dataset.ready) return;
+  el.dataset.ready = '1';
+  const cfg = JSON.parse(el.dataset.cfg), K = cfg.slug;
+  vsFX($('[data-vs-fx]', el), K);
+  const reels = $$('.vs-reel', el), form = $('[data-vs-form]', el), spinBtn = $('[data-vs-spin]', el);
+  const winEl = $('[data-vs-win]', el), msgEl = $('[data-vs-msg]', el), banner = $('[data-vs-banner]', el);
+  const fsbar = $('[data-vs-fsbar]', el), autoBtn = $('[data-vs-auto]', el);
+  const turbo = () => $('[data-vs-turbo]', el).checked;
+  const syms = Object.keys(cfg.art).filter(s => s !== 'S' && s !== 'W');
+  const cellHtml = s => `<div class="vs-cell" data-s="${s}"><svg viewBox="0 0 64 64" role="img" aria-label="${esc(cfg.names[s] || s)}">${cfg.art[s]}</svg></div>`;
+  let busy = false, auto = false;
+
+  const paytable = () => { const b = +form.bet.value || 0; $$('[data-vs-paygrid] [data-pay]', el).forEach(x => { const s = x.closest('[data-sym]').dataset.sym; x.textContent = fmt(Math.floor(cfg.pays[s][+x.dataset.pay] * b)); }); };
+  form.addEventListener('input', paytable); paytable();
+
+  function spinReel(reel, final, i, teaseMs) {
+    const strip = $('.vs-strip', reel), cell = reel.clientHeight / 3;
+    const current = $$('.vs-cell', strip).map(c => c.dataset.s);
+    const base = turbo() ? 380 : 700, n = 14 + i * 4 + Math.round(teaseMs / 60);
+    const filler = Array.from({ length: n - 3 }, () => Math.random() < .06 ? (Math.random() < .5 ? 'W' : 'S') : syms[Math.floor(Math.random() * syms.length)]);
+    strip.innerHTML = [...final, ...filler, ...current].map(cellHtml).join('');
+    reel.classList.add('spinning');
+    if (teaseMs) reel.classList.add('tease');
+    const dur = base + i * (turbo() ? 110 : 190) + teaseMs;
+    const a = strip.animate([{ transform: `translateY(${-n * cell}px)` }, { transform: 'translateY(8px)', offset: .92 }, { transform: 'translateY(0)' }],
+      { duration: reduce ? 1 : dur, easing: 'cubic-bezier(.25,.65,.3,1)', fill: 'forwards' });
+    let ticks = setInterval(() => sfx.tick(K), 90);
+    return a.finished.then(() => { clearInterval(ticks); strip.innerHTML = final.map(cellHtml).join(''); a.cancel(); reel.classList.remove('spinning', 'tease'); sfx.stop(K, i); });
+  }
+  async function showGrid(grid) {
+    // anticipation: once 2 scatters are showing, the remaining reels slow down and glow
+    let seen = 0;
+    const jobs = [];
+    for (let r = 0; r < 5; r++) {
+      const tease = seen >= 2 && !reduce ? (turbo() ? 500 : 1100) * (r - 1) / 3 : 0;
+      if (tease) sfx.tease(K);
+      jobs.push(spinReel(reels[r], grid[r], r, tease));
+      seen += grid[r].filter(s => s === 'S').length;
+    }
+    await Promise.all(jobs);
+  }
+  const cellAt = (r, y) => $$('.vs-cell', reels[r])[y];
+  function clearHi() { $$('.vs-cell', el).forEach(c => c.classList.remove('hit', 'dim', 'scat')); }
+  async function presentWins(wins, scatters, win, label) {
+    clearHi();
+    if (scatters.length >= 3) { scatters.forEach(([r, y]) => cellAt(r, y).classList.add('scat')); }
+    if (!wins.length) { if (win) countTo(win); return; }
+    $$('.vs-cell', el).forEach(c => c.classList.add('dim'));
+    wins.forEach(w => w.cells.forEach(([r, y]) => { const c = cellAt(r, y); c.classList.remove('dim'); c.classList.add('hit'); }));
+    sfx.win(K, Math.min(4, wins.length));
+    countTo(win);
+    msgEl.textContent = (label ? label + ' · ' : '') + wins.slice(0, 3).map(w => `${w.k}× ${cfg.names[w.sym]}${w.ways > 1 ? ' · ' + w.ways + ' ways' : ''}`).join('  |  ');
+    await sleep(turbo() ? 450 : 1000);
+  }
+  let shown = 0;
+  function countTo(v) {
+    const from = shown; shown = v;
+    if (reduce || v === from) { winEl.textContent = fmt(v); return; }
+    const t0 = performance.now(), d = Math.min(1600, 400 + (v - from) / 4);
+    const step = t => { const k = Math.min(1, (t - t0) / d); winEl.textContent = fmt(Math.round(from + (v - from) * k)); if (k < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  }
+  function showBanner(html, cls, ms) {
+    banner.className = 'vs-banner ' + cls; banner.style.setProperty('--dur', ms + 'ms'); banner.innerHTML = html; void banner.offsetWidth; banner.classList.add('show');
+    return sleep(ms);
+  }
+
+  async function spin() {
+    if (busy) return null;
+    sfx.unlock();
+    const bet = +form.bet.value || 0;
+    const balEl = document.querySelector('[data-balance]');
+    const before = balEl ? +balEl.dataset.balance : null;
+    if (before !== null && bet > before) { toast('Not enough Gold Coins for that bet.', 'err'); return null; }
+    busy = true; spinBtn.disabled = true; el.classList.add('spinning');
+    clearHi(); shown = 0; winEl.textContent = '0'; msgEl.textContent = 'Good luck…';
+    if (before !== null) setBalance(before - bet);
+    let d;
+    try { d = await post(form.action, new FormData(form)); }
+    catch (err) { toast(err.message, 'err'); if (before !== null) setBalance(before); busy = false; spinBtn.disabled = false; el.classList.remove('spinning'); return null; }
+    await showGrid(d.grid);
+    await presentWins(d.wins, d.scatters, d.base_win);
+    if (d.fs) {
+      sfx.scatter(K);
+      el.classList.add('freespins');
+      await showBanner(`<b>FREE SPINS</b><span>${d.fs.count} spins · every win ×${d.fs.mult}</span>`, 'fs', turbo() ? 1400 : 2600);
+      fsbar.hidden = false;
+      let won = d.base_win;
+      for (let i = 0; i < d.fs.spins.length; i++) {
+        const s = d.fs.spins[i];
+        $('[data-fs-left]', el).textContent = d.fs.spins.length - i - 1;
+        clearHi();
+        await showGrid(s.grid);
+        won += s.win;
+        if (s.win) await presentWins(s.wins, s.scatters, won, `free spin ${i + 1}: +${fmt(s.win)}`);
+        else await sleep(turbo() ? 120 : 300);
+        $('[data-fs-won]', el).textContent = fmt(won - d.base_win);
+      }
+      countTo(d.payout);
+      await showBanner(`<b>FREE SPINS WON</b><span>${fmt(d.fs.win)} GC</span>`, 'fs', turbo() ? 1200 : 2200);
+      fsbar.hidden = true; el.classList.remove('freespins');
+    }
+    if (d.tier) {
+      const name = { big: 'BIG WIN', mega: 'MEGA WIN', epic: 'EPIC WIN' }[d.tier];
+      sfx.big(K); burst(banner, d.tier === 'epic' ? 34 : 22);
+      await showBanner(`<b>${name}</b><span>${fmt(d.payout)} GC · ${d.x}×</span>`, 'tier ' + d.tier, turbo() ? 1400 : 2600);
+    } else if (d.payout > bet) burst(winEl, 10);
+    countTo(d.payout);
+    msgEl.textContent = d.message;
+    setBalance(d.balance);
+    busy = false; spinBtn.disabled = false; el.classList.remove('spinning');
+    return d;
+  }
+  form.addEventListener('submit', e => { e.preventDefault(); spin(); });
+  document.addEventListener('keydown', e => { if (e.code === 'Space' && e.target === document.body && el.isConnected) { e.preventDefault(); spin(); } });
+  autoBtn.addEventListener('click', async () => {
+    if (auto) { auto = false; return; }
+    auto = true; autoBtn.classList.add('coral');
+    const n = +$('[data-vs-auto-n]', el).value, stopFs = $('[data-vs-stopfs]', el).checked;
+    for (let i = 0; i < n && auto; i++) {
+      autoBtn.textContent = `Stop (${n - i})`;
+      const d = await spin();
+      if (!d) break;
+      if (stopFs && d.fs) { toast('Autospin stopped: free spins!', 'ok'); break; }
+      await sleep(turbo() ? 80 : 350);
+    }
+    auto = false; autoBtn.classList.remove('coral'); autoBtn.textContent = 'Start';
+  });
+  const snd = $('[data-vs-sound]', el);
+  const paintSnd = () => { snd.setAttribute('aria-pressed', sfx.on ? 'true' : 'false'); snd.setAttribute('aria-label', sfx.on ? 'Sound on' : 'Sound off'); snd.classList.toggle('muted', !sfx.on); };
+  snd.addEventListener('click', () => { sfx.set(!sfx.on); paintSnd(); }); paintSnd();
+  el._vs = { spin, cfg };
 }
 
 enhance(document);
