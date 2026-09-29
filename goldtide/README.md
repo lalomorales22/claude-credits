@@ -30,9 +30,19 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | | **Coastline 3-Card** | ante/play vs dealer + Pair Plus | ~97% |
 | | **Tide Hi-Lo** | higher or lower, multiplier builds, cash out anytime | 99% |
 | Boardwalk Arcade | **Tide Crash** | live multiplier curve, cash out before it breaks, auto cash-out | 99% |
-| | **Pier Plinko** | 12 rows, low/med/high risk, up to 170× | ~99% |
+| | **Pearl Drop** ★ | the flagship plinko (see below) | 98.5–99% |
 | | **Reef Mines** | 5×5 grid, pick 1–24 urchins, find pearls | 99% |
 | | **Lighthouse Dice** | slide your own odds, roll over/under | 99% |
+
+### ★ Pearl Drop, the flagship
+
+The house favorite, and it's featured at the top of the lobby.
+
+- **Golden pegs.** Every drop, 3 pegs light up gold. Each one a pearl touches doubles that pearl's multiplier, and they stack (×2, ×4, ×8). The math stays exact because every path touches exactly one peg per row, so the bonus factor is the same for every path. Each paytable is scaled so the total with golden pegs lands at 98.5–99% for all 15 rows/risk combos.
+- **8, 10, 12, 14 or 16 rows**, **low / medium / high risk**, and **1, 3, 5, 10 or 20 pearls per drop**, all falling at once.
+- **Provably fair.** Outcomes are HMAC-SHA256(server seed, `client:nonce:ball:N`). Players see the seed's SHA-256 fingerprint before they play, set their own client seed, and can rotate to reveal the seed and recompute any drop with the checker built into the page.
+- **Autoplay** with stop-on-big-hit, a profit target and a loss limit, plus **turbo** and the space bar.
+- Synthesized sound (peg tinks, gold chimes, bucket thuds) with a mute toggle, a live bucket heatmap, session stats, a multiplier history strip, and BIG / MEGA / LEGENDARY win banners.
 
 Every paytable was checked with exact math or a 200k-hand simulation. The formulas are in comments next to each engine.
 

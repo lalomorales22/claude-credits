@@ -13,7 +13,7 @@
 declare(strict_types=1);
 
 const APP_VERSION    = '1.0.0';
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 define('DATA_DIR', __DIR__ . '/data');
 define('DB_FILE',  DATA_DIR . '/app.sqlite');
 define('PW_FILE',  __DIR__ . '/admin_password.txt');
@@ -229,6 +229,15 @@ function install(PDO $pdo, bool $fresh): void {
         outcome TEXT, payout INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT '{}', $ts);
     CREATE UNIQUE INDEX IF NOT EXISTS ux_rounds_one_active ON rounds(player_id, game) WHERE status = 'active';
     CREATE INDEX IF NOT EXISTS ix_rounds_player_game ON rounds(player_id, game, id DESC);
+    CREATE TABLE IF NOT EXISTS fair_seeds (
+        id INTEGER PRIMARY KEY,
+        player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+        game TEXT NOT NULL,
+        server_seed TEXT NOT NULL, server_hash TEXT NOT NULL, client_seed TEXT NOT NULL,
+        nonce INTEGER NOT NULL DEFAULT 0 CHECK (nonce >= 0),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revealed')),
+        revealed_at TEXT, $ts);
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_fair_one_active ON fair_seeds(player_id, game) WHERE status = 'active';
     CREATE TABLE IF NOT EXISTS promo_codes (
         id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK (length(code) BETWEEN 3 AND 32),
         coins INTEGER NOT NULL CHECK (coins > 0), max_uses INTEGER NOT NULL DEFAULT 0 CHECK (max_uses >= 0),
@@ -271,6 +280,9 @@ function install(PDO $pdo, bool $fresh): void {
 
     $g = $pdo->prepare('INSERT OR IGNORE INTO games (slug, name, blurb, min_bet, max_bet, sort_order) VALUES (?,?,?,?,?,?)');
     foreach (GAME_REGISTRY as $slug => [$name, , $blurb, $sort]) { $g->execute([$slug, $name, $blurb, 10, 5000, $sort]); }
+    // v3: plinko became Pearl Drop. Only rename if staff never customized it.
+    $pdn = GAME_REGISTRY['plinko'];
+    $pdo->prepare("UPDATE games SET name = ?, blurb = ?, sort_order = ?, updated_at = datetime('now') WHERE slug = 'plinko' AND name = 'Pier Plinko'")->execute([$pdn[0], $pdn[2], $pdn[3]]);
 
     if (!(int)$pdo->query('SELECT COUNT(*) FROM admins')->fetchColumn()) {
         $pw = substr(strtr(base64_encode(random_bytes(24)), '+/=', 'xyz'), 0, 24);
@@ -677,7 +689,7 @@ const GAME_REGISTRY = [
     'threecard'  => ['Coastline 3-Card', 'cards', 'Three-card poker against the dealer, with a Pair Plus side bet.', 22],
     'hilo'       => ['Tide Hi-Lo', 'cards', 'Higher or lower? Every right call grows the multiplier.', 23],
     'crash'      => ['Tide Crash', 'arcade', 'The wave keeps rising until it breaks. Cash out before it does.', 30],
-    'plinko'     => ['Pier Plinko', 'arcade', 'Drop a pearl through twelve rows of pegs. Up to 170×.', 31],
+    'plinko'     => ['Pearl Drop', 'arcade', 'Deluxe plinko: golden pegs double your pearl, up to 20 pearls a drop, 8–16 rows.', 29],
     'mines'      => ['Reef Mines', 'arcade', 'Twenty-five tiles, hidden urchins. Find pearls, cash out.', 32],
     'dice'       => ['Lighthouse Dice', 'arcade', 'Set your odds, roll over or under. You pick the risk.', 33],
 ];
@@ -786,25 +798,145 @@ function dice_play(): array {
         'message' => sprintf('Rolled %.2f · ', $roll) . ($win ? 'win +' . coins($payout) . ' GC' : 'miss')];
 }
 
-/* ── Pier Plinko: 12 rows, 13 buckets. RTP ≈ 99% on every risk level. ── */
-const PLINKO = [
-    'low'  => [10, 3, 1.6, 1.4, 1.1, 1, 0.5, 1, 1.1, 1.4, 1.6, 3, 10],
-    'med'  => [33, 11, 4, 2, 1.1, 0.6, 0.3, 0.6, 1.1, 2, 4, 11, 33],
-    'high' => [170, 24, 8.1, 2, 0.7, 0.2, 0.2, 0.2, 0.7, 2, 8.1, 24, 170],
+/* ── Pearl Drop: the flagship plinko ──
+ * Rows 8–16, three risk levels, up to 20 pearls per drop, and 3 golden pegs per drop.
+ * Every pearl touches exactly one hittable peg per row, so for ANY path the number of
+ * golden pegs hit is hypergeometric(N = rows(rows+1)/2, K = rows, draws = 3). That makes
+ * the bonus factor F = E[2^hits] the same for every path, and each table below is scaled
+ * so base RTP × F lands at 98.5–99.0%. (F: 8 rows 1.81, 10 1.64, 12 1.53, 14 1.45, 16 1.39)
+ *
+ * Provably fair: outcomes come from HMAC-SHA256(server_seed, "client:nonce:ball:N") and
+ * "client:nonce:gold". Players see sha256(server_seed) up front and get the seed on rotate.
+ */
+const PD_TABLES = [
+    8 => [
+        'low' => [5.6, 1.5, 0.6, 0.4, 0.37, 0.4, 0.6, 1.5, 5.6],
+        'med' => [13, 2.4, 0.6, 0.23, 0.23, 0.23, 0.6, 2.4, 13],
+        'high' => [29, 2.8, 0.34, 0.1, 0.1, 0.1, 0.34, 2.8, 29],
+    ],
+    10 => [
+        'low' => [8.9, 2.7, 1.1, 0.6, 0.45, 0.44, 0.45, 0.6, 1.1, 2.7, 8.9],
+        'med' => [22, 5.4, 1.6, 0.6, 0.3, 0.2, 0.3, 0.6, 1.6, 5.4, 22],
+        'high' => [76, 9.6, 1.5, 0.29, 0.1, 0.1, 0.1, 0.29, 1.5, 9.6, 76],
+    ],
+    12 => [
+        'low' => [10, 3.7, 1.7, 1, 0.6, 0.51, 0.5, 0.51, 0.6, 1, 1.7, 3.7, 10],
+        'med' => [33, 9.2, 3.1, 1.2, 0.6, 0.33, 0.32, 0.33, 0.6, 1.2, 3.1, 9.2, 33],
+        'high' => [170, 27, 5, 1, 0.3, 0.1, 0.1, 0.1, 0.3, 1, 5, 27, 170],
+    ],
+    14 => [
+        'low' => [7.1, 3.4, 1.9, 1.2, 0.8, 0.61, 0.61, 0.61, 0.61, 0.61, 0.8, 1.2, 1.9, 3.4, 7.1],
+        'med' => [58, 17, 5.8, 2.3, 1, 0.6, 0.4, 0.3, 0.4, 0.6, 1, 2.3, 5.8, 17, 58],
+        'high' => [420, 74, 15, 3.2, 0.8, 0.16, 0.1, 0.1, 0.1, 0.16, 0.8, 3.2, 15, 74, 420],
+    ],
+    16 => [
+        'low' => [16, 6.8, 3.3, 1.8, 1.2, 0.8, 0.7, 0.6, 0.55, 0.6, 0.7, 0.8, 1.2, 1.8, 3.3, 6.8, 16],
+        'med' => [110, 34, 11, 4.4, 1.9, 1, 0.5, 0.4, 0.37, 0.4, 0.5, 1, 1.9, 4.4, 11, 34, 110],
+        'high' => [1000, 190, 39, 8.6, 2.1, 0.6, 0.18, 0.1, 0.1, 0.1, 0.18, 0.6, 2.1, 8.6, 39, 190, 1000],
+    ],
 ];
+const PD_ROWS = [8, 10, 12, 14, 16];
+const PD_BALLS = [1, 3, 5, 10, 20];
+const PD_GOLD = 3;
+
+function fair_active(int $pid, string $game): array {
+    $s = row("SELECT * FROM fair_seeds WHERE player_id = ? AND game = ? AND status = 'active'", [$pid, $game]);
+    if ($s) { return $s; }
+    $seed = bin2hex(random_bytes(32));
+    q('INSERT INTO fair_seeds (player_id, game, server_seed, server_hash, client_seed) VALUES (?,?,?,?,?)',
+        [$pid, $game, $seed, hash('sha256', $seed), bin2hex(random_bytes(8))]);
+    return row('SELECT * FROM fair_seeds WHERE id = ?', [(int)db()->lastInsertId()]);
+}
+function fair_bytes(string $seed, string $msg): array { return array_values(unpack('C*', hash_hmac('sha256', $msg, $seed, true))); }
+
+/** The pearl's path: one bit per row, right when the byte is ≥ 128. */
+function pd_path(string $seed, string $client, int $nonce, int $ball, int $rows): string {
+    $b = fair_bytes($seed, "$client:$nonce:ball:$ball");
+    $p = '';
+    for ($r = 0; $r < $rows; $r++) { $p .= $b[$r] >= 128 ? '1' : '0'; }
+    return $p;
+}
+/** Golden pegs: partial Fisher–Yates over every hittable peg [row, index]. */
+function pd_gold(string $seed, string $client, int $nonce, int $rows): array {
+    $pegs = [];
+    for ($r = 0; $r < $rows; $r++) { for ($i = 1; $i <= $r + 1; $i++) { $pegs[] = [$r, $i]; } }
+    $b = fair_bytes($seed, "$client:$nonce:gold");
+    $n = count($pegs); $out = [];
+    for ($j = 0; $j < PD_GOLD; $j++) {
+        $u = ($b[$j * 4] << 24 | $b[$j * 4 + 1] << 16 | $b[$j * 4 + 2] << 8 | $b[$j * 4 + 3]) % ($n - $j);
+        [$pegs[$j], $pegs[$j + $u]] = [$pegs[$j + $u], $pegs[$j]];
+        $out[] = $pegs[$j];
+    }
+    return $out;
+}
+/** Which golden pegs this path touches (row r hits peg index 1 + rights-so-far). */
+function pd_hits(string $path, array $gold): array {
+    $hits = []; $k = 0;
+    $set = []; foreach ($gold as [$r, $i]) { $set["$r:$i"] = true; }
+    for ($r = 0; $r < strlen($path); $r++) {
+        if (isset($set[$r . ':' . (1 + $k)])) { $hits[] = $r; }
+        $k += (int)$path[$r];
+    }
+    return $hits;
+}
+
 function plinko_play(): array {
     $p = require_playable(); $g = game_cfg('plinko');
     $bet = clamp_bet($_POST['bet'] ?? '', $g);
-    $risk = (string)($_POST['risk'] ?? 'med');
-    if (!isset(PLINKO[$risk])) { $risk = 'med'; }
-    $path = []; for ($i = 0; $i < 12; $i++) { $path[] = random_int(0, 1); }
-    $slot = array_sum($path);
-    $mult = PLINKO[$risk][$slot];
-    $payout = (int)floor($bet * $mult);
+    $rows = (int)($_POST['rows'] ?? 12); if (!in_array($rows, PD_ROWS, true)) { $rows = 12; }
+    $risk = (string)($_POST['risk'] ?? 'med'); if (!isset(PD_TABLES[$rows][$risk])) { $risk = 'med'; }
+    $n = (int)($_POST['balls'] ?? 1); if (!in_array($n, PD_BALLS, true)) { $n = 1; }
     $pid = (int)$p['id'];
-    tx(fn() => round_oneshot($pid, 'plinko', $bet, $payout, $mult . 'x', ['path' => $path, 'slot' => $slot, 'risk' => $risk, 'mult' => $mult]));
-    return ['path' => $path, 'slot' => $slot, 'mult' => $mult, 'payout' => $payout, 'win' => $payout > $bet,
-        'balance' => bal($pid), 'message' => $mult . '× · ' . ($payout ? '+' . coins($payout) . ' GC' : 'nothing back')];
+
+    $out = tx(function () use ($pid, $bet, $rows, $risk, $n) {
+        $seed = fair_active($pid, 'plinko');
+        $nonce = (int)$seed['nonce'];
+        q("UPDATE fair_seeds SET nonce = nonce + 1, updated_at = datetime('now') WHERE id = ?", [$seed['id']]);
+        $gold = pd_gold($seed['server_seed'], $seed['client_seed'], $nonce, $rows);
+        $balls = []; $payout = 0; $best = 0;
+        for ($b = 0; $b < $n; $b++) {
+            $path = pd_path($seed['server_seed'], $seed['client_seed'], $nonce, $b, $rows);
+            $slot = substr_count($path, '1');
+            $hits = pd_hits($path, $gold);
+            $mult = round(PD_TABLES[$rows][$risk][$slot] * (2 ** count($hits)), 2);
+            $win = (int)floor($bet * $mult);
+            $payout += $win; $best = max($best, $mult);
+            $balls[] = ['path' => $path, 'slot' => $slot, 'hits' => $hits, 'mult' => $mult, 'win' => $win];
+        }
+        $state = ['rows' => $rows, 'risk' => $risk, 'per' => $bet, 'balls' => $balls, 'gold' => $gold,
+            'nonce' => $nonce, 'hash' => $seed['server_hash'], 'client' => $seed['client_seed']];
+        round_oneshot($pid, 'plinko', $bet * $n, $payout, $best . 'x', $state);
+        return $state + ['payout' => $payout, 'best' => $best];
+    });
+    $total = $bet * $n;
+    return ['balls' => $out['balls'], 'gold' => $out['gold'], 'rows' => $rows, 'risk' => $risk, 'nonce' => $out['nonce'],
+        'next_nonce' => $out['nonce'] + 1, 'hash' => $out['hash'], 'payout' => $out['payout'], 'bet' => $total,
+        'win' => $out['payout'] > $total, 'balance' => bal($pid),
+        'message' => ($n > 1 ? "$n pearls · best {$out['best']}× · " : $out['best'] . '× · ') . ($out['payout'] ? coins($out['payout']) . ' GC back' : 'nothing back')];
+}
+
+/** Rotate seeds: reveal the old server seed, start a fresh one (optionally with a new client seed). */
+function fair_rotate(): never {
+    csrf_check();
+    $p = require_player();
+    $game = 'plinko';
+    $client = trim((string)($_POST['client_seed'] ?? ''));
+    if ($client !== '' && !preg_match('/^[A-Za-z0-9_-]{1,64}$/', $client)) { fail('Client seed: 1–64 letters, numbers, _ or -.'); }
+    $pid = (int)$p['id'];
+    $res = tx(function () use ($pid, $game, $client) {
+        $old = fair_active($pid, $game);
+        q("UPDATE fair_seeds SET status = 'revealed', revealed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", [$old['id']]);
+        $seed = bin2hex(random_bytes(32));
+        $cs = $client !== '' ? $client : bin2hex(random_bytes(8));
+        q('INSERT INTO fair_seeds (player_id, game, server_seed, server_hash, client_seed) VALUES (?,?,?,?,?)',
+            [$pid, $game, $seed, hash('sha256', $seed), $cs]);
+        return ['revealed' => ['server_seed' => $old['server_seed'], 'server_hash' => $old['server_hash'],
+            'client_seed' => $old['client_seed'], 'nonces' => (int)$old['nonce']],
+            'active' => ['server_hash' => hash('sha256', $seed), 'client_seed' => $cs, 'nonce' => 0]];
+    });
+    if (wants_json()) { ok($res + ['message' => 'Seed revealed. New seed pair is live.']); }
+    flash('ok', 'Seed revealed: ' . $res['revealed']['server_seed']);
+    redirect(url('plinko'));
 }
 
 /* ── Kelp Keno: 40 balls, 10 drawn. Every pick count returns ~94–96%. ── */
@@ -1610,6 +1742,16 @@ function entities(): array {
                 'state' => ['type' => 'json', 'default' => '{}'],
             ],
         ],
+        'fair_seeds' => [
+            'label' => 'Fairness seeds', 'ops' => 'rd', 'hint' => 'Active server seeds are hidden everywhere until the player rotates them. Deleting an active seed just issues a new one.',
+            'list' => ['id', 'player_id', 'game', 'server_hash', 'client_seed', 'nonce', 'status', 'revealed_at'],
+            'search' => ['server_hash', 'client_seed'], 'filters' => ['status'],
+            'fields' => [
+                'player_id' => ['type' => 'fk', 'ref' => 'players', 'label_col' => 'username'],
+                'game' => ['type' => 'text'], 'server_hash' => ['type' => 'text'], 'client_seed' => ['type' => 'text'],
+                'nonce' => ['type' => 'int'], 'status' => ['type' => 'enum', 'options' => ['active', 'revealed']],
+            ],
+        ],
         'settings' => [
             'label' => 'Site settings', 'ops' => 'crud', 'title' => 'key', 'sort' => 'key', 'dir' => 'asc',
             'list' => ['id', 'key', 'value', 'note', 'updated_at'],
@@ -1920,6 +2062,7 @@ function do_admin_export(array $admin): never {
     $first = true;
     while ($r = $st->fetch()) {
         unset($r['pass_hash']);
+        if (($r['status'] ?? '') === 'active' && isset($r['server_seed'])) { $r['server_seed'] = '(hidden)'; }
         if ($first) { fputcsv($out, array_keys($r), ',', '"', '\\'); $first = false; }
         // stop spreadsheet apps from treating cells as formulas
         $r = array_map(fn($v) => is_string($v) && $v !== '' && !is_numeric($v) && str_contains('=+-@', $v[0]) ? "'" . $v : $v, $r);
@@ -2100,6 +2243,18 @@ function page_lobby(): void {
 
 <?php if ($p): echo bonus_strip($p); endif; ?>
 
+<?php $pdGame = array_values(array_filter($games, fn($x) => $x['slug'] === 'plinko'))[0] ?? null; if ($pdGame): ?>
+<a class="featured reveal d4" href="<?= h(url('plinko')) ?>">
+  <div>
+    <p class="eyebrow">Featured · the house favorite</p>
+    <h2><?= h($pdGame['name']) ?></h2>
+    <p><?= h($pdGame['blurb']) ?></p>
+    <ul><li>✦ Golden pegs ×2, stacking</li><li>Up to 20 pearls a drop</li><li>8–16 rows · 3 risk levels</li><li>Provably fair</li><li>Up to 1,000× base</li></ul>
+    <span class="btn gold lg">Drop a pearl</span>
+  </div>
+  <div class="featured-art" aria-hidden="true"><?= pd_art() ?></div>
+</a>
+<?php endif; ?>
 <?php $byCat = []; foreach ($games as $g) { $c = GAME_REGISTRY[$g['slug']][1] ?? 'arcade'; $byCat[$c][] = $g; } ?>
 <?php foreach (GAME_CATEGORIES as $ck => [$cl, $cd]): if (empty($byCat[$ck])) { continue; } ?>
 <section class="cat reveal d4" id="cat-<?= h($ck) ?>" aria-labelledby="cat-h-<?= h($ck) ?>">
@@ -2130,6 +2285,20 @@ function page_lobby(): void {
   <a class="more" href="<?= h(url('leaderboard')) ?>">Full leaderboard &rarr;</a>
 </section>
 <?php layout('Lobby', ob_get_clean());
+}
+
+function pd_art(): string {
+    $o = '<svg viewBox="0 0 320 240">';
+    $gold = ['2:1' => 1, '4:3' => 1, '6:2' => 1];
+    for ($r = 0; $r < 8; $r++) {
+        for ($i = 0; $i < $r + 3; $i++) {
+            $x = 160 + ($i - ($r + 2) / 2) * 30; $y = 20 + $r * 24;
+            $o .= '<circle cx="' . $x . '" cy="' . $y . '" r="' . (isset($gold["$r:$i"]) ? 6 : 3.5) . '" class="' . (isset($gold["$r:$i"]) ? 'gpeg' : 'fpeg') . '"/>';
+        }
+    }
+    $cols = ['#d6283f', '#ff6f59', '#ffb627', '#ffd23f', '#2bb3a3', '#ffd23f', '#ffb627', '#ff6f59', '#d6283f'];
+    foreach ($cols as $k => $c) { $o .= '<rect x="' . (160 + ($k - 4) * 30 - 13) . '" y="212" width="26" height="18" rx="4" fill="' . $c . '"/>'; }
+    return $o . '<circle class="fpearl" cx="160" cy="4" r="7" fill="#fff"/></svg>';
 }
 
 function bonus_strip(array $p): string {
@@ -2560,7 +2729,11 @@ const GAME_RULES = [
     'threecard' => ['Place an Ante (and an optional Pair Plus), get three cards.', 'Play (matching your Ante) or fold. Dealer needs Queen-high to qualify.', 'Ante bonus pays on a straight or better no matter what the dealer has.', 'Pair Plus pays on your hand alone: pair 1:1 up to straight flush 40:1.'],
     'hilo' => ['Call whether the next card is higher or lower.', 'Ties count as a win either way. Aces are low.', 'Every right call multiplies your run. Cash out any time after your first call.', 'Up to five skips per run if you don\'t like a card.'],
     'crash' => ['Launch your wave. The multiplier climbs from 1.00×.', 'Cash out any time before the wave breaks to lock in that multiplier.', 'Set an auto cash-out so the server grabs it for you, even if your connection hiccups.', 'Any cash-out target returns 99% over time.'],
-    'plinko' => ['Drop a pearl. It bounces left or right off twelve rows of pegs.', 'Where it lands is your multiplier.', 'Higher risk means bigger edges and smaller middles. All three return about 99%.'],
+    'plinko' => ['Pick 8–16 rows, a risk level, and how many pearls to drop at once (1–20). Your bet is per pearl.',
+        'Every drop, 3 golden pegs light up. Each golden peg a pearl touches doubles that pearl\'s multiplier, and they stack: ×2, ×4, ×8.',
+        'Every row count and risk level returns 98.5–99% over time, with the golden peg bonus included.',
+        'Provably fair: your drops come from a server seed that\'s locked in (and fingerprinted) before you play. Rotate it any time to reveal it and verify every drop right on this page.',
+        'Autoplay can stop itself on a big hit, a profit target, or a loss limit. Space bar drops too.'],
     'mines' => ['Choose how many urchins hide in the reef (1–24).', 'Flip tiles. Every pearl raises the multiplier, an urchin ends the round.', 'Cash out whenever you want. More urchins, faster growth.'],
     'dice' => ['Slide to set your target, pick roll over or under.', 'The roll is 0.00–99.99. Lower chance, higher payout.', 'Multiplier = 99 ÷ win chance, so every setting has the same 1% edge.'],
 ];
@@ -2658,30 +2831,117 @@ function panel_dice(array $p, array $g): string {
 <?php return ob_get_clean();
 }
 
-/* ── plinko ── */
+/* ── Pearl Drop panel ── */
 function panel_plinko(array $p, array $g): string {
-    $last = round_last((int)$p['id'], 'plinko'); $s = st($last);
-    $risk = $s['risk'] ?? 'med';
-    $svg = '<svg class="plinko-board" viewBox="0 0 600 540" data-plinko-board>';
-    for ($r = 0; $r < 12; $r++) {
-        for ($i = 0; $i < $r + 3; $i++) { $svg .= '<circle cx="' . (300 + ($i - ($r + 2) / 2) * 44) . '" cy="' . (40 + $r * 38) . '" r="4.5" class="peg"/>'; }
-    }
-    $svg .= '<circle class="ball" r="9" cx="300" cy="8" data-ball/></svg>';
+    $pid = (int)$p['id'];
+    $last = round_last($pid, 'plinko'); $s = st($last);
+    if (!isset($s['balls'])) { $s = []; } // rounds from the old 12-row version don't carry per-ball data
+    $rows = (int)($s['rows'] ?? 12); $risk = (string)($s['risk'] ?? 'med');
+    $balls = count($s['balls'] ?? [1]); $per = (int)($s['per'] ?? max((int)$g['min_bet'], 100));
+    $seed = tx(fn() => fair_active($pid, 'plinko'));
+    $revealed = q("SELECT server_seed, server_hash, client_seed, nonce, revealed_at FROM fair_seeds WHERE player_id = ? AND game = 'plinko' AND status = 'revealed' ORDER BY id DESC LIMIT 5", [$pid])->fetchAll();
+    $recent = q("SELECT state, bet, payout FROM rounds WHERE player_id = ? AND game = 'plinko' AND status = 'done' ORDER BY id DESC LIMIT 8", [$pid])->fetchAll();
+    $cfg = ['tables' => PD_TABLES, 'gold' => PD_GOLD, 'min' => (int)$g['min_bet'], 'max' => (int)$g['max_bet']];
+    $seg = function (string $name, array $opts, $cur) {
+        $o = '<div class="seg" role="radiogroup" aria-label="' . h(ucfirst($name)) . '">';
+        foreach ($opts as $v => $l) { $o .= '<label><input type="radio" name="' . h($name) . '" value="' . h($v) . '"' . ((string)$v === (string)$cur ? ' checked' : '') . '> ' . h($l) . '</label>'; }
+        return $o . '</div>';
+    };
     ob_start(); ?>
-<div class="plinko-wrap" data-risks="<?= h(json_encode(PLINKO)) ?>" <?= $last ? 'data-path="' . h(json_encode($s['path'])) . '"' : '' ?>>
-  <?= $svg ?>
-  <div class="buckets" data-buckets>
-    <?php foreach (PLINKO[$risk] as $k => $m): ?><span class="bucket b<?= abs($k - 6) ?><?= $last && $s['slot'] === $k ? ' hit after' : '' ?>"><?= $m ?>×</span><?php endforeach; ?>
+<div class="pd" data-pearldrop data-cfg="<?= h(json_encode($cfg)) ?>">
+  <div class="pd-top">
+    <ol class="pd-hist" data-pd-hist aria-label="Recent pearls"></ol>
+    <div class="pd-tools">
+      <button type="button" class="icon-btn" data-pd-sound aria-pressed="true" aria-label="Sound on" title="Sound"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" data-waves/></svg></button>
+      <a class="fair-badge" href="#pd-fair" data-pd-fair-open><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z" fill="currentColor"/><path d="m8.5 12 2.5 2.5 4.5-5" stroke="#0b1a33" stroke-width="2.2" fill="none" stroke-linecap="round"/></svg> Provably fair</a>
+    </div>
   </div>
-  <?= $last ? result_line($s['mult'] . '× · ' . ($last['payout'] ? coins((int)$last['payout']) . ' GC back' : 'nothing back'), $last['payout'] > $last['bet']) : '<p class="result">Pick your risk and drop.</p>' ?>
+  <div class="pd-board" data-pd-board>
+    <canvas data-pd-canvas aria-label="Pearl Drop board" role="img"></canvas>
+    <div class="pd-banner" data-pd-banner aria-hidden="true"></div>
+  </div>
+  <p class="result pd-result" data-pd-result aria-live="polite"><?php
+    if ($s) { echo h(count($s['balls']) . ' pearl' . (count($s['balls']) > 1 ? 's' : '') . ' · ' . ((int)$last['payout'] ? coins((int)$last['payout']) . ' GC back' : 'nothing back')); }
+    else { echo '3 golden pegs light up every drop. Each one a pearl touches doubles it.'; } ?></p>
+  <?php if ($s): ?><noscript><p class="muted center">Last drop: <?= h(implode(' · ', array_map(fn($b) => $b['mult'] . '×' . ($b['hits'] ? ' (' . count($b['hits']) . ' gold)' : ''), $s['balls']))) ?></p></noscript><?php endif; ?>
+
+  <form class="pd-controls" method="post" action="<?= h(play_url('plinko')) ?>" data-pd-form>
+    <?= csrf_field() ?>
+    <div class="pd-row">
+      <div class="pd-field"><span>Rows</span><?= $seg('rows', array_combine(PD_ROWS, PD_ROWS), $rows) ?></div>
+      <div class="pd-field"><span>Risk</span><?= $seg('risk', ['low' => 'Low', 'med' => 'Medium', 'high' => 'High'], $risk) ?></div>
+      <div class="pd-field"><span>Pearls per drop</span><?= $seg('balls', array_combine(PD_BALLS, PD_BALLS), $balls) ?></div>
+    </div>
+    <div class="pd-row main">
+      <?= bet_box($g, $per, 'bet', 'Bet per pearl') ?>
+      <p class="pd-total">Drop costs <b data-pd-cost><?= coins($per * $balls) ?></b> GC</p>
+      <button class="btn gold xl pd-drop" data-pd-drop>Drop</button>
+    </div>
+    <details class="pd-auto">
+      <summary>Autoplay &amp; turbo</summary>
+      <div class="pd-row">
+        <label>Drops <select data-pd-auto-n><option>10</option><option selected>25</option><option>50</option><option>100</option><option value="0">Until I stop</option></select></label>
+        <label>Stop on a pearl ≥ <input type="number" min="0" step="1" placeholder="off" data-pd-stop-mult inputmode="numeric"> ×</label>
+        <label>Stop at profit <input type="number" min="0" step="1" placeholder="off" data-pd-stop-win inputmode="numeric"></label>
+        <label>Stop at loss <input type="number" min="0" step="1" placeholder="off" data-pd-stop-loss inputmode="numeric"></label>
+        <label class="check"><input type="checkbox" data-pd-turbo> Turbo</label>
+        <button type="button" class="btn ghost" data-pd-auto>Start autoplay</button>
+      </div>
+    </details>
+  </form>
+
+  <div class="pd-stats" data-pd-stats>
+    <div><span>Drops</span><b data-st="drops">0</b></div><div><span>Pearls</span><b data-st="balls">0</b></div>
+    <div><span>Wagered</span><b data-st="wagered">0</b></div><div><span>Won</span><b data-st="won">0</b></div>
+    <div><span>Net</span><b data-st="net">0</b></div><div><span>Best</span><b data-st="best">–</b></div>
+    <button type="button" class="btn ghost sm" data-pd-reset>Reset session</button>
+  </div>
+
+  <details class="pd-fair" id="pd-fair">
+    <summary>Provably fair: check any drop yourself</summary>
+    <div class="fair-grid">
+      <section>
+        <h3>Your live seed pair</h3>
+        <dl class="fair-dl">
+          <dt>Server seed hash</dt><dd><code data-fair-hash><?= h($seed['server_hash']) ?></code></dd>
+          <dt>Client seed</dt><dd><code data-fair-client><?= h($seed['client_seed']) ?></code></dd>
+          <dt>Next nonce</dt><dd><code data-fair-nonce><?= (int)$seed['nonce'] ?></code></dd>
+        </dl>
+        <p class="hint">We lock in the server seed before you play and show you its SHA-256 fingerprint. Every drop is HMAC-SHA256(server seed, "client:nonce:ball:N"). Rotate to reveal the seed and check every drop you made with it.</p>
+        <form method="post" action="<?= h(url('fair', ['g' => 'plinko'])) ?>" class="form" data-fair-rotate>
+          <?= csrf_field() ?>
+          <label>New client seed <small>(optional)</small> <input name="client_seed" maxlength="64" pattern="[A-Za-z0-9_\-]{1,64}" placeholder="anything you like"></label>
+          <button class="btn ghost">Reveal &amp; rotate seed</button>
+        </form>
+      </section>
+      <section>
+        <h3>Revealed seeds</h3>
+        <ul class="fair-list" data-fair-revealed>
+          <?php foreach ($revealed as $r): ?>
+            <li><button type="button" class="linkish" data-fair-use="<?= h(json_encode(['seed' => $r['server_seed'], 'client' => $r['client_seed'], 'n' => (int)$r['nonce']])) ?>"><code><?= h(substr($r['server_seed'], 0, 16)) ?>…</code> · <?= (int)$r['nonce'] ?> drops</button></li>
+          <?php endforeach; ?>
+          <?php if (!$revealed): ?><li class="muted">Rotate your seed to reveal one.</li><?php endif; ?>
+        </ul>
+        <h3>Recent drops</h3>
+        <ul class="fair-list">
+          <?php foreach ($recent as $rr): $x = json_decode($rr['state'], true); if (!isset($x['balls'])) { continue; } ?>
+            <li>nonce <b><?= (int)$x['nonce'] ?></b> · <?= (int)$x['rows'] ?> rows · <?= count($x['balls']) ?>× · <?= coins((int)$rr['payout']) ?> GC <small class="muted"><?= h(substr($x['hash'], 0, 8)) ?></small></li>
+          <?php endforeach; ?>
+        </ul>
+      </section>
+      <section>
+        <h3>Verify a drop</h3>
+        <div class="form" data-fair-verify>
+          <label>Server seed <input data-v="seed" spellcheck="false" autocomplete="off"></label>
+          <label>Client seed <input data-v="client" spellcheck="false" autocomplete="off"></label>
+          <div class="inline"><label>Nonce <input type="number" min="0" value="0" data-v="nonce"></label><label>Rows <select data-v="rows"><?php foreach (PD_ROWS as $r): ?><option<?= $r === 12 ? ' selected' : '' ?>><?= $r ?></option><?php endforeach; ?></select></label><label>Pearl # <input type="number" min="1" max="20" value="1" data-v="ball"></label></div>
+          <button type="button" class="btn gold" data-fair-check>Recompute</button>
+          <pre class="fair-out" data-fair-out aria-live="polite">Paste a revealed seed and press recompute.</pre>
+        </div>
+      </section>
+    </div>
+  </details>
 </div>
-<?= play_form_open('plinko', 'controls') ?>
-  <div class="seg" role="radiogroup" aria-label="Risk">
-    <?php foreach (['low' => 'Low', 'med' => 'Medium', 'high' => 'High'] as $k => $l): ?><label><input type="radio" name="risk" value="<?= $k ?>" <?= $risk === $k ? 'checked' : '' ?> data-risk> <?= $l ?></label><?php endforeach; ?>
-  </div>
-  <?= bet_box($g, (int)($last['bet'] ?? 100)) ?>
-  <button class="btn gold xl">Drop</button>
-</form>
 <?php return ob_get_clean();
 }
 
@@ -3272,6 +3532,7 @@ function page_admin_view(array $admin): void {
     $r = row("SELECT * FROM $t WHERE id = ?", [$id]);
     if (!$r) { error_page(404, 'Not found', "There's no $t #$id."); }
     unset($r['pass_hash']);
+    if ($t === 'fair_seeds' && $r['status'] === 'active') { $r['server_seed'] = '(hidden until the player rotates)'; }
     ob_start(); ?>
 <header class="table-head row reveal d1">
   <div>
@@ -3409,6 +3670,7 @@ function route(): void {
         'play_blackjack' => fn() => play('blackjack_act', 'blackjack'),
         'play_roulette' => fn() => play('roulette_spin', 'roulette'),
         'play' => fn() => play_game(),
+        'fair' => fn() => fair_rotate(),
         'claim_daily' => fn() => play('claim_daily', ''),
         'claim_refill' => fn() => play('claim_refill', ''),
         'redeem' => fn() => play('redeem_promo', ''),
@@ -3902,16 +4164,6 @@ dl.detail pre{margin:0;font:.8rem/1.5 var(--f-mono);white-space:pre-wrap;max-hei
 .slider{display:grid;gap:6px;font-weight:700}
 input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:transparent;border:0}
 
-/* ═════ plinko ═════ */
-.plinko-wrap{max-width:620px;margin:0 auto}
-.plinko-board{width:100%;display:block}
-.plinko-board .peg{fill:var(--gold);filter:drop-shadow(0 0 3px rgba(232,182,76,.6))}
-.plinko-board .ball{fill:#fff;filter:drop-shadow(0 0 8px #ffd98a);transform:translate(300px,8px)}
-.buckets{display:grid;grid-template-columns:repeat(13,1fr);gap:3px;margin:-14px 2.3% 12px}
-.bucket{display:grid;place-items:center;height:34px;border-radius:6px;font:600 clamp(.5rem,1.3vw,.72rem) var(--f-mono);color:#1a1204;transition:transform .2s}
-.bucket.b6{background:#ff4d4d;color:#fff}.bucket.b5{background:#ff6f59}.bucket.b4{background:#ff9146}.bucket.b3{background:#ffb627}.bucket.b2{background:#ffd23f}.bucket.b1{background:#e9e36b}.bucket.b0{background:#c6e38f}
-.bucket.hit{outline:3px solid #fff;transform:translateY(4px) scale(1.06);box-shadow:0 0 18px #ffd98a}
-
 /* ═════ keno ═════ */
 .keno-form{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(220px,1fr);gap:var(--gap);align-items:start}
 .keno-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px}
@@ -4069,6 +4321,84 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
   .bac-hands{grid-template-columns:1fr}
   .vp-card .card{--w:clamp(52px,16vw,80px)}
   .bet-quick button{padding:10px 8px}
+}
+
+/* ═════ Pearl Drop ═════ */
+.g-plinko{grid-template-columns:minmax(0,1fr)}
+.g-plinko .house-rules{max-width:none}
+.pd{display:grid;gap:14px}
+.pd-top{display:flex;align-items:center;gap:12px;justify-content:space-between}
+.pd-hist{list-style:none;display:flex;gap:5px;margin:0;padding:0;overflow:hidden;flex:1;min-height:26px;mask-image:linear-gradient(90deg,#000 80%,transparent);-webkit-mask-image:linear-gradient(90deg,#000 80%,transparent)}
+.pd-hist li{flex-shrink:0;font:600 .72rem var(--f-mono);padding:4px 8px;border-radius:999px;animation:pop .3s}
+.pd-hist .lo{background:#12686e;color:#e8fff9}.pd-hist .mid{background:#ffd23f;color:#1a1204}
+.pd-hist .hi{background:#ff9146;color:#1a1204}.pd-hist .top{background:linear-gradient(90deg,#ff5a45,#d6283f);color:#fff;box-shadow:0 0 12px rgba(255,90,69,.6)}
+.pd-tools{display:flex;gap:8px;align-items:center}
+.icon-btn.muted{opacity:.5}.icon-btn.muted [data-waves]{display:none}
+.fair-badge{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;background:rgba(95,224,207,.12);border:1px solid rgba(95,224,207,.4);color:#5fe0cf!important;font:700 .75rem var(--f-body);letter-spacing:.06em;text-decoration:none;text-transform:uppercase}
+:root[data-theme="light"] .fair-badge{color:#0d6b60!important}
+.pd-board{position:relative;border-radius:24px;padding:14px 10px 6px;overflow:hidden;
+  background:radial-gradient(120% 70% at 50% 0%,#1c5d7d 0%,#0e2f4f 45%,#0a1a33 100%);
+  box-shadow:inset 0 0 0 2px rgba(232,182,76,.35),inset 0 -30px 60px rgba(0,0,0,.35),var(--shadow)}
+.pd-board::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.35;mix-blend-mode:screen;
+  background:repeating-radial-gradient(circle at 30% -20%,transparent 0 28px,rgba(120,220,255,.07) 30px 32px),repeating-radial-gradient(circle at 80% -10%,transparent 0 40px,rgba(120,220,255,.05) 42px 44px);
+  animation:caustic 14s linear infinite alternate}
+@keyframes caustic{to{background-position:40px 30px,-30px 20px}}
+.pd-board canvas{display:block;width:100%;max-width:min(760px,100%,calc((100vh - 170px) * 1.05));margin:0 auto;position:relative}
+.pd-banner{position:absolute;left:50%;top:38%;transform:translate(-50%,-50%) scale(.6);opacity:0;pointer-events:none;text-align:center;display:grid;gap:2px}
+.pd-banner b{font:400 clamp(1.8rem,6vw,3.4rem) var(--f-display);color:#ffd98a;text-shadow:0 0 30px rgba(255,182,39,.8),0 4px 0 #8a5a00;letter-spacing:.04em}
+.pd-banner span{font:500 clamp(1.2rem,4vw,2rem) var(--f-mono);color:#fff}
+.pd-banner.show{animation:banner 2.2s cubic-bezier(.2,.9,.3,1.3) forwards}
+@keyframes banner{0%{opacity:0;transform:translate(-50%,-50%) scale(.4) rotate(-6deg)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.08) rotate(2deg)}25%{transform:translate(-50%,-50%) scale(1) rotate(0)}80%{opacity:1}100%{opacity:0;transform:translate(-50%,-60%) scale(1)}}
+.pd-result{margin:0}
+.center{text-align:center}
+.pd-controls{display:grid;gap:14px;padding:16px;border-radius:20px;background:var(--bg2);border:1px solid var(--line)}
+.pd-row{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;justify-content:center}
+.pd-row.main{gap:18px}
+.pd-field{display:grid;gap:6px;justify-items:center}
+.pd-field>span{font:700 .72rem var(--f-body);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.pd-field .seg label{padding:7px 12px}
+.seg input:disabled+*,.seg label:has(input:disabled){opacity:.5;cursor:not-allowed}
+.pd-total{margin:0;color:var(--muted);font-size:.9rem;align-self:center}.pd-total b{font-family:var(--f-mono);color:var(--ink)}
+.pd-drop{min-width:200px}
+.pd-auto summary{cursor:pointer;font-weight:700;color:var(--gold-text);text-align:center;list-style:none}
+.pd-auto summary::-webkit-details-marker{display:none}
+.pd-auto summary::after{content:" ▾"}.pd-auto[open] summary::after{content:" ▴"}
+.pd-auto .pd-row{margin-top:12px}
+.pd-auto label{display:grid;gap:4px;font-weight:700;font-size:.78rem;color:var(--muted)}
+.pd-auto label.check{display:flex;align-items:center;gap:8px;font-size:.9rem;color:var(--ink)}
+.pd-auto input[type=number]{width:110px;padding:8px 10px;font-family:var(--f-mono)}
+.pd-auto select{padding:8px 10px}
+.pd-stats{display:grid;grid-template-columns:repeat(6,1fr) auto;gap:8px;align-items:center}
+.pd-stats div{display:grid;gap:2px;padding:8px 10px;border-radius:12px;background:var(--bg2);border:1px solid var(--line)}
+.pd-stats span{font:700 .64rem var(--f-body);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.pd-stats b{font:500 .95rem var(--f-mono)}
+.pd-fair{border:1px solid rgba(95,224,207,.35);border-radius:18px;padding:12px 16px;background:linear-gradient(180deg,rgba(95,224,207,.06),transparent)}
+.pd-fair>summary{cursor:pointer;font:400 1.1rem var(--f-display);color:var(--gold-text)}
+.fair-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-top:12px}
+.fair-grid h3{margin:.2em 0 .5em;font:700 .78rem var(--f-body);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.fair-dl{margin:0;display:grid;gap:4px}.fair-dl dt{font-size:.78rem;color:var(--muted)}.fair-dl dd{margin:0 0 6px}
+.fair-dl code,.fair-list code{word-break:break-all;font-size:.78rem}
+.fair-list{list-style:none;padding:0;margin:0 0 14px;display:grid;gap:4px;font-size:.85rem}
+.linkish{background:none;border:0;padding:0;color:var(--link);cursor:pointer;font:inherit;text-align:left;text-decoration:underline}
+.fair-out{margin:0;white-space:pre-wrap;font:.78rem/1.55 var(--f-mono);background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:10px;min-height:120px}
+[data-fair-verify] .inline{gap:8px}[data-fair-verify] .inline label{flex:1;min-width:0}
+.featured{position:relative;display:grid;grid-template-columns:1.2fr 1fr;gap:var(--gap);align-items:center;margin-bottom:calc(var(--gap)*1.6);padding:clamp(18px,3vw,32px);border-radius:28px;text-decoration:none;color:#f5ecd7!important;overflow:hidden;
+  background:radial-gradient(120% 90% at 80% 0%,#1c5d7d,#0e2f4f 50%,#0a1a33);box-shadow:inset 0 0 0 2px rgba(232,182,76,.4),var(--shadow);transition:transform .35s cubic-bezier(.2,.8,.2,1)}
+.featured:hover{transform:translateY(-4px)}
+.featured .eyebrow{color:#ffd98a}
+.featured h2{font:400 clamp(2.2rem,6vw,3.8rem)/1 var(--f-display);margin:.1em 0 .2em;background:linear-gradient(180deg,#fff3cf,#e8b64c);-webkit-background-clip:text;background-clip:text;color:transparent}
+.featured ul{list-style:none;padding:0;margin:10px 0 16px;display:flex;flex-wrap:wrap;gap:8px}
+.featured li{font:700 .78rem var(--f-body);padding:5px 11px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,217,138,.3)}
+.featured-art svg{width:100%;height:auto;max-height:260px}
+.featured-art .fpeg{fill:#f5ecd7;opacity:.75}.featured-art .gpeg{fill:#ffd98a;filter:drop-shadow(0 0 6px #ffb627)}
+.featured-art .fpearl{animation:fall 2.6s cubic-bezier(.5,0,.7,1) infinite}
+@keyframes fall{0%{transform:translate(0,-10px)}20%{transform:translate(-12px,40px)}40%{transform:translate(0,80px)}60%{transform:translate(12px,120px)}80%{transform:translate(24px,160px)}100%{transform:translate(12px,190px);opacity:0}}
+@media (max-width:720px){
+  .pd-stats{grid-template-columns:repeat(3,1fr)}
+  .pd-field .seg label{padding:6px 9px;font-size:.8rem}
+  .featured{grid-template-columns:1fr}
+  .featured-art{display:none}
+  .pd-drop{width:100%}
 }
 
 /* responsive */
@@ -4468,7 +4798,7 @@ if (rl) {
 const hooks = {};
 const playUrl = slug => '?action=play&g=' + encodeURIComponent(slug);
 function enhance(root) {
-  initChipboards(root); initDice(root); initPlinko(root); initKeno(root); initBigWheel(root); initCrash(root);
+  initChipboards(root); initDice(root); initPearlDrop(root); initKeno(root); initBigWheel(root); initCrash(root);
 }
 async function runPlay(panel, url, fd) {
   if (panel.dataset.busy) return null;
@@ -4632,37 +4962,6 @@ hooks.dice = {
   },
 };
 
-/* ── plinko ── */
-function initPlinko(root) {
-  const wrap = $('[data-risks]', root);
-  if (!wrap || wrap.dataset.ready) return;
-  wrap.dataset.ready = '1';
-  const risks = JSON.parse(wrap.dataset.risks);
-  const form = root.querySelector('form[data-play]');
-  form && form.addEventListener('change', e => {
-    if (!e.target.matches('[data-risk]')) return;
-    $$('.bucket', wrap).forEach((b, i) => { b.textContent = risks[e.target.value][i] + '×'; b.classList.remove('hit'); });
-  });
-}
-hooks.plinko = {
-  after: async (d, panel) => {
-    const ball = $('[data-ball]', panel);
-    ball.setAttribute('cx', 0); ball.setAttribute('cy', 0);
-    const pts = [[300, 8]]; let acc = 0;
-    d.path.forEach((dir, r) => {
-      const y = 40 + r * 38;
-      pts.push([300 + acc * 22, y - 13]);
-      acc += dir ? 1 : -1;
-      pts.push([300 + acc * 22, y + 12]);
-    });
-    pts.push([300 + acc * 22, 530]);
-    const kf = pts.map(([x, y]) => ({ transform: `translate(${x}px,${y}px)` }));
-    await ball.animate(kf, { duration: 1700, easing: 'linear', fill: 'forwards' }).finished;
-    const b = $$('.bucket', panel)[d.slot];
-    if (b) b.animate([{ transform: 'translateY(0)' }, { transform: 'translateY(8px)' }, { transform: 'translateY(0)' }], { duration: 300 });
-  },
-};
-
 /* ── keno ── */
 function initKeno(root) {
   const grid = $('[data-keno]', root);
@@ -4810,6 +5109,393 @@ function initCrash(root) {
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
+}
+
+/* ═════ PEARL DROP (flagship plinko) ═════
+ * Canvas board, concurrent pearls, golden pegs, synth audio, autoplay, session stats,
+ * and an in-browser provably-fair verifier. The server has already decided every path;
+ * this only animates it and never changes an outcome.
+ */
+const pdAudio = (() => {
+  let ac = null, lastTink = 0;
+  let on = true;
+  try { on = localStorage.getItem('gt_sound') !== 'off'; } catch (e) {}
+  const unlock = () => {
+    if (!on) return;
+    if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; } }
+    if (ac.state === 'suspended') ac.resume();
+  };
+  const tone = (f, dur, type = 'sine', vol = .05, when = 0) => {
+    if (!on || !ac) return;
+    const t = ac.currentTime + when, o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(ac.destination); o.start(t); o.stop(t + dur + .02);
+  };
+  return {
+    unlock, get on() { return on; },
+    set(v) { on = v; try { localStorage.setItem('gt_sound', v ? 'on' : 'off'); } catch (e) {} if (v) unlock(); },
+    tink(r) { const n = performance.now(); if (n - lastTink < 22) return; lastTink = n; tone(1250 - r * 28 + Math.random() * 80, .05, 'triangle', .022); },
+    gold() { tone(1319, .22, 'sine', .06); tone(1760, .32, 'sine', .05, .07); tone(2637, .4, 'sine', .025, .14); },
+    land(m) { const f = m >= 10 ? 880 : m >= 1 ? 523 : 247; tone(f, .16, 'sine', .055); if (m >= 10) { tone(f * 1.26, .2, 'sine', .045, .09); tone(f * 1.5, .3, 'sine', .045, .18); } },
+    big() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, .35, 'triangle', .06, i * .08)); },
+  };
+})();
+
+function initPearlDrop(root) {
+  const el = $('[data-pearldrop]', root);
+  if (!el || el.dataset.ready) return;
+  el.dataset.ready = '1';
+  const cfg = JSON.parse(el.dataset.cfg);
+  const cv = $('[data-pd-canvas]', el), ctx = cv.getContext('2d');
+  const form = $('[data-pd-form]', el), dropBtn = $('[data-pd-drop]', el);
+  const resEl = $('[data-pd-result]', el), banner = $('[data-pd-banner]', el), hist = $('[data-pd-hist]', el);
+  const autoBtn = $('[data-pd-auto]', el), costEl = $('[data-pd-cost]', el);
+  const pick = n => (form.querySelector(`input[name="${n}"]:checked`) || {}).value;
+  const turbo = () => $('[data-pd-turbo]', el).checked;
+  let rows = +pick('rows'), risk = pick('risk');
+  let G = {};
+  const balls = [], sparks = [], floats = [], drops = [], flashes = new Map(), pulses = new Map();
+  let heat = [], raf = 0, inflight = 0, seq = 0, applied = 0, auto = false;
+
+  /* ── geometry ── */
+  function layout() {
+    const w = cv.clientWidth || 600, dpr = Math.min(2, window.devicePixelRatio || 1);
+    const sx = w / (rows + 3), sy = sx * 0.9, top = sy * 1.15;
+    const bucketY = top + (rows - 1) * sy + sy * 0.8, bucketH = Math.max(24, Math.min(40, sx * 0.62));
+    const h = bucketY + bucketH + 18;
+    cv.style.height = h + 'px'; cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    G = { w, h, sx, sy, top, bucketY, bucketH, cx: w / 2, pegR: Math.max(2.2, sx * 0.08), ballR: Math.max(4, Math.min(11, sx * 0.19)) };
+    if (heat.length !== rows + 1) heat = new Array(rows + 1).fill(0);
+    draw(performance.now());
+  }
+  const pegX = (r, i) => G.cx + (i - (r + 2) / 2) * G.sx;
+  const pegY = r => G.top + r * G.sy;
+  const slotX = k => G.cx + (k - rows / 2) * G.sx;
+  const table = () => cfg.tables[rows][risk];
+
+  /* ── colors ── */
+  const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+  const stops = [[18, 104, 110], [43, 179, 163], [255, 210, 63], [255, 111, 89], [214, 40, 63]];
+  function bucketColor(m, max) {
+    const t = Math.max(0, Math.min(1, Math.log(Math.max(m, .1) / .1) / Math.log(max / .1)));
+    const s = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(s));
+    const c = mix(stops[i], stops[i + 1], s - i);
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }
+
+  /* ── drawing ── */
+  function activeGold(now) {
+    const set = new Map();
+    drops.forEach(d => { if (now < d.goldUntil) d.gold.forEach(([r, i]) => set.set(r + ':' + i, d)); });
+    return set;
+  }
+  function draw(now) {
+    const { w, h, sx, pegR, ballR, bucketY, bucketH } = G;
+    ctx.clearRect(0, 0, w, h);
+    const gold = activeGold(now);
+    // pegs
+    for (let r = 0; r < rows; r++) {
+      for (let i = 0; i < r + 3; i++) {
+        const x = pegX(r, i), y = pegY(r), k = r + ':' + i;
+        const f = flashes.get(k), age = f ? now - f.t : 1e9;
+        if (gold.has(k)) {
+          const pulse = 1 + Math.sin(now / 160) * .18;
+          const g = ctx.createRadialGradient(x, y, 0, x, y, pegR * 5 * pulse);
+          g.addColorStop(0, 'rgba(255,217,138,.85)'); g.addColorStop(1, 'rgba(255,182,39,0)');
+          ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, pegR * 5 * pulse, 0, 7); ctx.fill();
+          ctx.fillStyle = '#ffd98a'; ctx.beginPath(); ctx.arc(x, y, pegR * 1.8, 0, 7); ctx.fill();
+          ctx.strokeStyle = '#fff3cf'; ctx.lineWidth = 1.2; ctx.stroke();
+        } else {
+          ctx.fillStyle = age < 220 ? `rgba(255,255,255,${1 - age / 400})` : 'rgba(245,236,215,.72)';
+          ctx.beginPath(); ctx.arc(x, y, pegR * (age < 220 ? 1.5 : 1), 0, 7); ctx.fill();
+        }
+        if (age < 360) {
+          ctx.strokeStyle = f.gold ? `rgba(255,217,138,${1 - age / 360})` : `rgba(255,255,255,${.5 - age / 720})`;
+          ctx.lineWidth = f.gold ? 3 : 1.5;
+          ctx.beginPath(); ctx.arc(x, y, pegR + age / 360 * sx * (f.gold ? .7 : .35), 0, 7); ctx.stroke();
+        }
+      }
+    }
+    // heat bars + buckets
+    const tb = table(), max = Math.max(...tb), hmax = Math.max(1, ...heat);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const fs = Math.max(8, Math.min(13, sx * 0.27));
+    ctx.font = `600 ${fs}px "Chivo Mono", monospace`;
+    for (let k = 0; k <= rows; k++) {
+      const x = slotX(k), p = pulses.get(k), age = p ? now - p : 1e9;
+      const bounce = age < 320 ? Math.sin(age / 320 * Math.PI) * 7 : 0;
+      const bw = sx * 0.9, y = bucketY + bounce;
+      if (heat[k]) { ctx.fillStyle = 'rgba(255,243,207,.22)'; ctx.fillRect(x - bw / 2, bucketY - 4 - heat[k] / hmax * 14, bw, heat[k] / hmax * 14); }
+      ctx.fillStyle = bucketColor(tb[k], max);
+      roundRect(x - bw / 2, y, bw, bucketH, 6); ctx.fill();
+      if (age < 500) { ctx.fillStyle = `rgba(255,255,255,${.55 - age / 900})`; roundRect(x - bw / 2, y, bw, bucketH, 6); ctx.fill(); }
+      ctx.fillStyle = tb[k] >= 1 && tb[k] < max * .02 ? '#1a1204' : (tb[k] < 1 ? '#e8fff9' : '#1a1204');
+      ctx.fillText(fmtMult(tb[k]), x, y + bucketH / 2 + 1);
+    }
+    // sparks
+    for (const s of sparks) { ctx.fillStyle = `rgba(255,217,138,${s.life})`; ctx.beginPath(); ctx.arc(s.x, s.y, 2.2 * s.life + .5, 0, 7); ctx.fill(); }
+    // balls
+    for (const b of balls) {
+      if (!b.pos) continue;
+      b.trail.forEach((t, i) => { ctx.fillStyle = b.goldHits ? `rgba(255,217,138,${i / 18})` : `rgba(255,255,255,${i / 26})`; ctx.beginPath(); ctx.arc(t[0], t[1], ballR * (.4 + i / 12), 0, 7); ctx.fill(); });
+      const [x, y] = b.pos;
+      const g = ctx.createRadialGradient(x - ballR * .35, y - ballR * .35, ballR * .1, x, y, ballR);
+      if (b.goldHits) { g.addColorStop(0, '#fffbe8'); g.addColorStop(.5, '#ffd98a'); g.addColorStop(1, '#d19a1a'); }
+      else { g.addColorStop(0, '#ffffff'); g.addColorStop(.6, '#f3e9ff'); g.addColorStop(1, '#b9a6dc'); }
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, ballR, 0, 7); ctx.fill();
+      if (b.goldHits > 1) { ctx.fillStyle = '#1a1204'; ctx.font = `800 ${ballR}px Figtree, sans-serif`; ctx.fillText('×' + (2 ** b.goldHits), x, y + .5); }
+    }
+    // floats
+    for (const f of floats) {
+      const age = (now - f.t) / f.dur; if (age < 0) continue;
+      ctx.globalAlpha = Math.max(0, 1 - age);
+      ctx.fillStyle = f.color; ctx.font = `${f.weight} ${f.size}px ${f.font}`;
+      ctx.fillText(f.text, f.x, f.y - age * f.rise);
+      ctx.globalAlpha = 1;
+    }
+  }
+  function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+  const fmtMult = m => (m >= 100 ? Math.round(m) : +m.toFixed(2)) + '×';
+  function float(text, x, y, o = {}) { floats.push({ text, x, y, t: performance.now(), dur: o.dur || 900, rise: o.rise || 26, color: o.color || '#fff3cf', size: o.size || 13, weight: o.weight || 700, font: o.font || 'Figtree, sans-serif' }); }
+
+  /* ── pearls ── */
+  function makeBall(b, drop, t0) {
+    const bits = b.path.split('').map(Number), ks = [0];
+    bits.forEach((d, r) => ks.push(ks[r] + d));
+    return { ...b, bits, ks, hitSet: new Set(b.hits), drop, t0, row: -1, goldHits: 0, pos: null, trail: [], done: false };
+  }
+  const contact = (b, r) => [G.cx + (b.ks[r] - r / 2) * G.sx, pegY(r) - G.pegR - G.ballR * .9];
+  function step(b, now) {
+    const D = turbo() ? 62 : 118, e = now - b.t0;
+    if (e < 0) return;
+    const start = [G.cx, G.top - G.sy * 1.05];
+    let P, Q, u, hop = G.sy * .26;
+    if (e < D) { P = start; Q = contact(b, 0); u = e / D; b.pos = [P[0], P[1] + (Q[1] - P[1]) * u * u]; }
+    else {
+      const e2 = e - D, r = Math.floor(e2 / D);
+      while (b.row < Math.min(r, rows - 1)) { b.row++; hitPeg(b, b.row, now); }
+      if (r >= rows - 1) {
+        P = contact(b, rows - 1); Q = [slotX(b.slot), G.bucketY + G.bucketH * .3]; u = (e2 - (rows - 1) * D) / (D * 1.25);
+        if (u >= 1) { land(b, now); return; }
+        hop = G.sy * .18;
+      } else { P = contact(b, r); Q = contact(b, r + 1); u = (e2 - r * D) / D; }
+      const eo = 1 - (1 - u) * (1 - u);
+      b.pos = [P[0] + (Q[0] - P[0]) * eo, P[1] + (Q[1] - P[1]) * u * u - hop * Math.sin(Math.PI * u)];
+    }
+    b.trail.push(b.pos); if (b.trail.length > 7) b.trail.shift();
+  }
+  function hitPeg(b, r, now) {
+    const i = 1 + b.ks[r], k = r + ':' + i, x = pegX(r, i), y = pegY(r);
+    const isGold = b.hitSet.has(r);
+    flashes.set(k, { t: now, gold: isGold });
+    if (isGold) {
+      b.goldHits++;
+      for (let n = 0; n < 16; n++) { const a = Math.random() * 7, v = 1 + Math.random() * 2.4; sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, life: 1 }); }
+      float('×' + (2 ** b.goldHits), x, y - 12, { color: '#ffd98a', size: 16, weight: 800, font: 'Limelight, serif' });
+      pdAudio.gold();
+    } else pdAudio.tink(r);
+  }
+  function land(b, now) {
+    b.done = true; b.pos = null;
+    pulses.set(b.slot, now); heat[b.slot]++;
+    const x = slotX(b.slot), y = G.bucketY - 10;
+    float(fmtMult(b.mult), x, y, { color: b.mult >= 10 ? '#ff9f8f' : b.mult >= 1 ? '#fff3cf' : '#9fd6cf', size: b.mult >= 10 ? 18 : 13, weight: 800, rise: b.mult >= 10 ? 60 : 30, dur: b.mult >= 10 ? 1500 : 900, font: b.mult >= 10 ? 'Limelight, serif' : 'Figtree, sans-serif' });
+    pdAudio.land(b.mult);
+    pushHist(b);
+    stats.balls++; stats.best = Math.max(stats.best, b.mult);
+    if (--b.drop.left === 0) finishDrop(b.drop, now);
+  }
+
+  /* ── loop ── */
+  function frame(now) {
+    for (const b of balls) if (!b.done) step(b, now);
+    for (let i = balls.length - 1; i >= 0; i--) if (balls[i].done) balls.splice(i, 1);
+    for (const s of sparks) { s.x += s.vx; s.y += s.vy; s.vy += .08; s.life -= .03; }
+    for (let i = sparks.length - 1; i >= 0; i--) if (sparks[i].life <= 0) sparks.splice(i, 1);
+    for (let i = floats.length - 1; i >= 0; i--) if (now - floats[i].t > floats[i].dur) floats.splice(i, 1);
+    for (let i = drops.length - 1; i >= 0; i--) if (drops[i].left === 0 && now > drops[i].goldUntil + 200) drops.splice(i, 1);
+    draw(now);
+    const busy = balls.length || sparks.length || floats.length || drops.length || [...flashes.values()].some(f => now - f.t < 400) || [...pulses.values()].some(p => now - p < 500);
+    raf = busy ? requestAnimationFrame(frame) : 0;
+  }
+  const kick = () => { if (!raf) raf = requestAnimationFrame(frame); };
+
+  /* ── session stats + history ── */
+  let stats = { drops: 0, balls: 0, wagered: 0, won: 0, best: 0 };
+  try { stats = Object.assign(stats, JSON.parse(sessionStorage.getItem('pd_stats') || '{}')); } catch (e) {}
+  function paintStats() {
+    const set = (k, v) => { const e = el.querySelector(`[data-st="${k}"]`); if (e) e.textContent = v; };
+    set('drops', fmt(stats.drops)); set('balls', fmt(stats.balls)); set('wagered', fmt(stats.wagered)); set('won', fmt(stats.won));
+    const net = stats.won - stats.wagered; set('net', (net >= 0 ? '+' : '') + fmt(net));
+    const ne = el.querySelector('[data-st="net"]'); if (ne) ne.className = net >= 0 ? 'pos' : 'neg';
+    set('best', stats.best ? fmtMult(stats.best) : '–');
+    try { sessionStorage.setItem('pd_stats', JSON.stringify(stats)); } catch (e) {}
+  }
+  $('[data-pd-reset]', el).addEventListener('click', () => { stats = { drops: 0, balls: 0, wagered: 0, won: 0, best: 0 }; heat = new Array(rows + 1).fill(0); paintStats(); draw(performance.now()); });
+  function pushHist(b) {
+    const li = document.createElement('li');
+    li.className = b.mult >= 10 ? 'top' : b.mult >= 2 ? 'hi' : b.mult >= 1 ? 'mid' : 'lo';
+    li.textContent = fmtMult(b.mult) + (b.hits.length ? ' ✦' : '');
+    hist.prepend(li);
+    while (hist.children.length > 18) hist.lastElementChild.remove();
+  }
+  paintStats();
+
+  /* ── controls ── */
+  const updCost = () => { costEl.textContent = fmt((+form.bet.value || 0) * (+pick('balls') || 1)); };
+  form.addEventListener('input', updCost);
+  form.addEventListener('change', e => {
+    if (e.target.name === 'rows' || e.target.name === 'risk') {
+      if (balls.length) { e.preventDefault(); return; }
+      rows = +pick('rows'); risk = pick('risk'); heat = new Array(rows + 1).fill(0); layout();
+    }
+    updCost();
+  });
+  const lockGeometry = on => $$('input[name="rows"], input[name="risk"]', form).forEach(i => { i.disabled = on; });
+
+  function finishDrop(drop, now) {
+    drop.goldUntil = now + 1100;
+    const d = drop.d;
+    stats.drops++; stats.wagered += d.bet; stats.won += d.payout; paintStats();
+    if (drop.seq >= applied) { applied = drop.seq; setBalance(d.balance); }
+    resEl.textContent = d.message;
+    resEl.classList.toggle('win', d.payout > d.bet);
+    const best = Math.max(...d.balls.map(b => b.mult));
+    if (best >= 10) {
+      const tier = best >= 1000 ? 'LEGENDARY' : best >= 100 ? 'MEGA WIN' : 'BIG WIN';
+      banner.innerHTML = `<b>${tier}</b><span>${fmtMult(best)}</span>`;
+      banner.classList.remove('show'); void banner.offsetWidth; banner.classList.add('show');
+      burst(banner, best >= 100 ? 30 : 18); pdAudio.big();
+      if (!reduce) el.querySelector('.pd-board').animate([{ transform: 'translate(0,0)' }, { transform: 'translate(-4px,2px)' }, { transform: 'translate(4px,-2px)' }, { transform: 'translate(0,0)' }], { duration: 220, iterations: 2 });
+    } else if (d.payout > d.bet) burst(resEl, 8);
+    if (!balls.some(b => !b.done)) lockGeometry(false);
+    drop.resolve && drop.resolve(d);
+  }
+
+  async function drop() {
+    if (inflight >= 2) return null;
+    pdAudio.unlock();
+    const fd = new FormData(form);
+    const cost = (+form.bet.value || 0) * (+pick('balls') || 1);
+    const balEl = document.querySelector('[data-balance]');
+    const before = balEl ? +balEl.dataset.balance : null;
+    if (before !== null && cost > before) { toast('Not enough Gold Coins for that drop.', 'err'); return null; }
+    inflight++; const my = ++seq;
+    lockGeometry(true);
+    if (before !== null) setBalance(before - cost);
+    let d;
+    try { d = await post(playUrl('plinko'), fd); }
+    catch (err) {
+      inflight--; toast(err.message, 'err');
+      if (before !== null) setBalance(before);
+      if (!balls.length) lockGeometry(false);
+      return null;
+    }
+    inflight--;
+    const now = performance.now(), gap = turbo() ? 55 : 105;
+    const dropObj = { d, gold: d.gold, left: d.balls.length, seq: my, goldUntil: Infinity };
+    drops.push(dropObj);
+    d.balls.forEach((b, i) => balls.push(makeBall(b, dropObj, now + i * gap)));
+    const nonceEl = document.querySelector('[data-fair-nonce]'); if (nonceEl) nonceEl.textContent = d.next_nonce;
+    kick();
+    if (reduce) { // no motion: settle instantly
+      balls.forEach(b => { if (b.drop === dropObj) { for (let r = 0; r < rows; r++) hitPeg(b, r, now); land(b, now); } });
+    }
+    return new Promise(res => { dropObj.resolve = res; if (dropObj.left === 0) res(d); });
+  }
+  form.addEventListener('submit', e => { e.preventDefault(); drop(); });
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space' && e.target === document.body && el.isConnected) { e.preventDefault(); drop(); }
+  });
+
+  autoBtn.addEventListener('click', async () => {
+    if (auto) { auto = false; return; }
+    auto = true;
+    const n = +$('[data-pd-auto-n]', el).value;
+    const sm = +$('[data-pd-stop-mult]', el).value || 0, sw = +$('[data-pd-stop-win]', el).value || 0, sl = +$('[data-pd-stop-loss]', el).value || 0;
+    const startNet = stats.won - stats.wagered;
+    let count = 0;
+    autoBtn.classList.add('coral');
+    while (auto && (n === 0 || count < n)) {
+      autoBtn.textContent = `Stop autoplay (${count}${n ? '/' + n : ''})`;
+      const d = await drop();
+      if (!d) break;
+      count++;
+      const net = stats.won - stats.wagered - startNet;
+      if (sm && d.balls.some(b => b.mult >= sm)) { toast(`Autoplay stopped: hit ${fmtMult(Math.max(...d.balls.map(b => b.mult)))}`, 'ok'); break; }
+      if (sw && net >= sw) { toast('Autoplay stopped: profit target reached.', 'ok'); break; }
+      if (sl && -net >= sl) { toast('Autoplay stopped: loss limit reached.', 'info'); break; }
+      await sleep(turbo() ? 60 : 220);
+    }
+    auto = false;
+    autoBtn.classList.remove('coral');
+    autoBtn.textContent = 'Start autoplay';
+  });
+
+  const snd = $('[data-pd-sound]', el);
+  const paintSnd = () => { snd.setAttribute('aria-pressed', pdAudio.on ? 'true' : 'false'); snd.setAttribute('aria-label', pdAudio.on ? 'Sound on' : 'Sound off'); snd.classList.toggle('muted', !pdAudio.on); };
+  snd.addEventListener('click', () => { pdAudio.set(!pdAudio.on); paintSnd(); });
+  paintSnd();
+
+  $('[data-pd-fair-open]', el).addEventListener('click', e => { e.preventDefault(); const f = $('#pd-fair'); f.open = true; f.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' }); });
+
+  /* ── provably fair ── */
+  const vIn = k => $(`[data-v="${k}"]`, el), out = $('[data-fair-out]', el);
+  const fillVerify = o => { vIn('seed').value = o.seed; vIn('client').value = o.client; vIn('nonce').value = Math.max(0, (o.n || 1) - 1); };
+  el.addEventListener('click', e => { const b = e.target.closest('[data-fair-use]'); if (b) fillVerify(JSON.parse(b.dataset.fairUse)); });
+  $('[data-fair-rotate]', el).addEventListener('submit', async e => {
+    e.preventDefault();
+    try {
+      const d = await post(e.target.action, new FormData(e.target));
+      $('[data-fair-hash]', el).textContent = d.active.server_hash;
+      $('[data-fair-client]', el).textContent = d.active.client_seed;
+      $('[data-fair-nonce]', el).textContent = '0';
+      const list = $('[data-fair-revealed]', el), r = d.revealed;
+      const li = document.createElement('li');
+      li.innerHTML = `<button type="button" class="linkish"><code>${esc(r.server_seed.slice(0, 16))}…</code> · ${r.nonces} drops</button>`;
+      li.firstChild.dataset.fairUse = JSON.stringify({ seed: r.server_seed, client: r.client_seed, n: r.nonces });
+      const empty = list.querySelector('.muted'); if (empty) empty.remove();
+      list.prepend(li);
+      fillVerify({ seed: r.server_seed, client: r.client_seed, n: r.nonces });
+      e.target.reset();
+      toast(d.message, 'ok');
+    } catch (err) { toast(err.message, 'err'); }
+  });
+  $('[data-fair-check]', el).addEventListener('click', async () => {
+    if (!(window.crypto && crypto.subtle)) { out.textContent = 'Your browser only allows this check over HTTPS.'; return; }
+    const seed = vIn('seed').value.trim(), client = vIn('client').value.trim(), nonce = +vIn('nonce').value, vr = +vIn('rows').value, ball = Math.max(1, +vIn('ball').value) - 1;
+    if (!seed || !client) { out.textContent = 'Need both a server seed and a client seed.'; return; }
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey('raw', enc.encode(seed), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const hm = async m => new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(m)));
+    const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(seed)))].map(x => x.toString(16).padStart(2, '0')).join('');
+    const pb = await hm(`${client}:${nonce}:ball:${ball}`);
+    const bits = []; for (let r = 0; r < vr; r++) bits.push(pb[r] >= 128 ? 1 : 0);
+    const slot = bits.reduce((a, b) => a + b, 0);
+    const pegs = []; for (let r = 0; r < vr; r++) for (let i = 1; i <= r + 1; i++) pegs.push([r, i]);
+    const gb = await hm(`${client}:${nonce}:gold`), gold = [];
+    for (let j = 0; j < cfg.gold; j++) {
+      const u = ((gb[j * 4] << 24 | gb[j * 4 + 1] << 16 | gb[j * 4 + 2] << 8 | gb[j * 4 + 3]) >>> 0) % (pegs.length - j);
+      [pegs[j], pegs[j + u]] = [pegs[j + u], pegs[j]]; gold.push(pegs[j]);
+    }
+    let k = 0, hits = 0;
+    const gs = new Set(gold.map(([r, i]) => r + ':' + i));
+    bits.forEach((d, r) => { if (gs.has(r + ':' + (1 + k))) hits++; k += d; });
+    const m = rk => +(cfg.tables[vr][rk][slot] * 2 ** hits).toFixed(2);
+    out.textContent = [
+      `sha256(server seed) = ${hash}`,
+      `path (pearl #${ball + 1}): ${bits.map(b => b ? 'R' : 'L').join(' ')}`,
+      `lands in bucket ${slot} of 0–${vr}`,
+      `golden pegs: ${gold.map(([r, i]) => `row ${r + 1} peg ${i}`).join(', ')}`,
+      `golden pegs touched: ${hits}  →  ×${2 ** hits}`,
+      `multiplier: low ${m('low')}× · medium ${m('med')}× · high ${m('high')}×`,
+    ].join('\n');
+  });
+
+  if ('ResizeObserver' in window) new ResizeObserver(() => { if (Math.abs((cv.clientWidth || 0) - G.w) > 1) layout(); }).observe(cv);
+  layout(); updCost();
 }
 
 enhance(document);
