@@ -12,6 +12,9 @@
  * Money rules: every Gold Coin that enters or leaves a poker table goes through move_coins() inside tx(),
  * mirrored by a poker_seats row (buy-in, add-on, end-of-hand stack, cash-out). On start-up and on SIGTERM
  * every seat row still in the database is refunded, so a crash can at worst void the interrupted hand.
+ * Only the one process that owns the database may do that: run() takes an exclusive flock on data/ws.lock
+ * and binds the listening socket BEFORE it touches a single row, so a second copy (double launch, restart
+ * overlap, two servers on one database) exits without refunding seats the live server still holds.
  * Bots (pid 0) never touch the ledger. Nothing here calls fail()/redirect()/json_out(): those exit.
  *
  * Environment (tests shorten the timers): GT_WS_IDLE, GT_WS_AWAY (seconds), GT_PK_STUB=1 loads
@@ -95,6 +98,7 @@ final class GTClient {
     public int $posN = 0, $strikes = 0, $fragOp = 0;
     public string $fragBuf = '';
     public array $chatTimes = [];        // send times inside the last minute
+    public array $rl = [];               // kind => [window start, count] for the per-second limiters (seat, sitout)
     public array $watch = [];            // poker table id => true
 
     public function __construct(public int $id, public $sock, public string $ip, public float $connectedAt) {
@@ -111,6 +115,7 @@ final class GTServer {
     private const BOT_NAMES = ['Marina', 'Dutch', 'Rosie', 'Sal', 'Tino', 'Birdie', 'Lupe', 'Hank', 'Coco', 'Ray', 'Nita', 'Gus', 'Pearl', 'Mo', 'Vera', 'Ike'];
 
     private $srv = null;
+    private $lock = null;          // data/ws.lock handle, held for the life of the process (see lockOrExit)
     private array $clients = [];   // id => GTClient
     private array $bySock = [];    // resource id => client id
     private array $byUid = [];     // uid => [client id => true]
@@ -134,8 +139,9 @@ final class GTServer {
         db();
         if (defined('GT_PK_STUB_ACTIVE')) { ws_log('WARNING: poker engine STUB active (tests/pk_stub.php). Never run this in production.'); }
         if (!GT_POKER) { ws_log('WARNING: no poker engine (pk_* functions missing): hosting the floor only, poker messages get pk_err.'); }
-        $this->refundAllSeats('table reset');
-        if (GT_POKER) { $this->pkLoadTables(); }
+        // Ownership first, ledger last: the lock keeps a second copy off this database and the bound socket proves
+        // this process is the server. Failing either step exits here with nothing written; the live server's seats stand.
+        $this->lockOrExit();
         $ctx = stream_context_create(['socket' => ['so_reuseaddr' => true, 'backlog' => 128, 'tcp_nodelay' => true]]);
         $bind = $this->opt['bind'];
         if (str_contains($bind, ':') && $bind[0] !== '[') { $bind = "[$bind]"; }   // IPv6 literal
@@ -143,11 +149,32 @@ final class GTServer {
         $this->srv = @stream_socket_server($addr, $errno, $errstr, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $ctx);
         if (!$this->srv) { ws_log("Cannot listen on $addr: $errstr ($errno)"); exit(1); }
         stream_set_blocking($this->srv, false);
+        $this->refundAllSeats('table reset');
+        if (GT_POKER) { $this->pkLoadTables(); }
         pcntl_async_signals(true);
         foreach ([SIGINT, SIGTERM] as $sig) { pcntl_signal($sig, function () { $this->stop = true; }); }
         ws_log("listening on ws://{$this->opt['bind']}:{$this->opt['port']}/  tick {$this->opt['tick']} ms, idle {$this->opt['idle']} s, away {$this->opt['away']} s, tables " . count($this->tables));
         while (!$this->stop) { $this->tick(); }
         $this->shutdown();
+    }
+
+    /**
+     * One server per database: an exclusive, non-blocking flock on data/ws.lock, kept on $this->lock so the handle
+     * (and with it the lock) lives exactly as long as the process. Two servers on one database would each "recover"
+     * the other's live seats and pay every stack out twice; the loser exits 1 before it has touched the ledger.
+     */
+    private function lockOrExit(): void {
+        $file = DATA_DIR . '/ws.lock';
+        $fh = @fopen($file, 'c+');
+        if (!$fh) { ws_log("Cannot open $file for the instance lock"); exit(1); }
+        if (!flock($fh, LOCK_EX | LOCK_NB)) {
+            $owner = trim((string)stream_get_contents($fh));
+            ws_log('Another ws.php already owns ' . DB_FILE . ($owner !== '' ? " (pid $owner)" : '') . ': not starting, nothing refunded');
+            fclose($fh);
+            exit(1);
+        }
+        ftruncate($fh, 0); fwrite($fh, getmypid() . "\n"); fflush($fh);
+        $this->lock = $fh;
     }
 
     /** One loop iteration: wait up to one tick for socket activity, then run the timers. */
@@ -530,7 +557,17 @@ final class GTServer {
         if ($ps) { $this->broadcast('floor', ['t' => 'snap', 'ps' => $ps]); }
     }
 
-    /** Cosmetic station id (≤ 32 chars) so other avatars can be posed; null = stood up. Real poker seating is pk_join. */
+    /** Per-connection limiter: at most $perSec messages of one kind inside a one-second window; the caller drops the rest. */
+    private function allow(GTClient $c, string $kind, int $perSec): bool {
+        if (!isset($c->rl[$kind]) || $this->now - $c->rl[$kind][0] >= 1.0) { $c->rl[$kind] = [$this->now, 0]; }
+        return ++$c->rl[$kind][1] <= $perSec;
+    }
+
+    /**
+     * Cosmetic station id (≤ 32 chars) so other avatars can be posed; null = stood up. Real poker seating is pk_join.
+     * Every one of these fans out to the whole floor, so a repeat of the current station is ignored and at most 4
+     * changes a second are relayed per connection: one client cannot turn its uplink into a broadcast storm.
+     */
     private function onSeat(GTClient $c, array $m): void {
         if ($c->room !== 'floor') { return; }
         $st = $m['st'] ?? null;
@@ -539,6 +576,7 @@ final class GTServer {
             $st = mb_substr((string)preg_replace('/[\x00-\x1F\x7F]/u', '', $st), 0, 32);
             if ($st === '') { $st = null; }
         }
+        if ($st === $c->st || !$this->allow($c, 'seat', 4)) { return; }
         $c->st = $st;
         $this->broadcast('floor', ['t' => 'seat', 'id' => $c->id, 'st' => $st], $c->id);
     }
@@ -785,9 +823,30 @@ final class GTServer {
         $this->pkSendState($c, $s['tid']);
     }
 
+    /**
+     * pk_view() plus the rule ws.php enforces itself, whatever engine is loaded (REALTIME.md → Security rules): hole
+     * cards reach a viewer only for their own seat and for seats with show=true, in players[] AND in winners[] (a pot
+     * taken because everyone else folded is won without showing), and the deck and its salt never leave the server.
+     */
+    private function pkView(array $t, ?string $uid): array {
+        $v = pk_view($t, $uid);
+        unset($v['deck'], $v['deck_salt']);
+        $shown = [];
+        foreach ((array)($v['players'] ?? []) as $i => $p) {
+            if (!is_array($p)) { continue; }
+            $ok = ($uid !== null && ($p['uid'] ?? null) === $uid) || !empty($p['show']);
+            $shown[(int)($p['seat'] ?? $i)] = $ok;
+            if (!$ok && array_key_exists('cards', $p)) { $v['players'][$i]['cards'] = null; }
+        }
+        foreach ((array)($v['winners'] ?? []) as $i => $w) {
+            if (is_array($w) && array_key_exists('cards', $w) && empty($shown[(int)($w['seat'] ?? -1)])) { $v['winners'][$i]['cards'] = null; }
+        }
+        return $v;
+    }
+
     private function pkSendState(GTClient $c, int $tid): void {
         if (!isset($this->tables[$tid])) { return; }
-        try { $this->send($c, ['t' => 'pk_state', 'table' => pk_view($this->tables[$tid]['t'], $c->uid)]); }
+        try { $this->send($c, ['t' => 'pk_state', 'table' => $this->pkView($this->tables[$tid]['t'], $c->uid)]); }
         catch (Throwable $e) { ws_log("table $tid: pk_view failed: " . $e->getMessage()); }
     }
 
@@ -821,7 +880,7 @@ final class GTServer {
                 if (!$c || $c->room === '' || $c->closing) { continue; }
                 if ($evFrame) { $this->raw($c, $evFrame); }
                 if (!isset($views[$c->uid])) {
-                    try { $views[$c->uid] = $this->frame((string)json_encode(['t' => 'pk_state', 'table' => pk_view($T['t'], $c->uid)], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)); }
+                    try { $views[$c->uid] = $this->frame((string)json_encode(['t' => 'pk_state', 'table' => $this->pkView($T['t'], $c->uid)], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)); }
                     catch (Throwable $e) { ws_log("table $tid: pk_view failed: " . $e->getMessage()); continue; }
                 }
                 $this->raw($c, $views[$c->uid]);
@@ -925,10 +984,14 @@ final class GTServer {
         $this->pkStand($tid, $c->uid, 'cash-out');
     }
 
+    /** Sit out / back in. A repeat of the current state is a no-op; more than 2 real toggles a second → pk_err (each one costs every viewer a pk_events + pk_state). */
     private function pkSitout(GTClient $c, array $m): void {
         $this->pkNeed();
         [$tid, $seat] = $this->pkSeated($c);
-        pk_sitout($this->tables[$tid]['t'], $seat, !empty($m['on']));
+        $on = !empty($m['on']);
+        if (!empty($this->tables[$tid]['t']['players'][$seat]['sitout']) === $on) { return; }
+        if (!$this->allow($c, 'sitout', 2)) { throw new DomainException('Slow down.'); }
+        pk_sitout($this->tables[$tid]['t'], $seat, $on);
         $this->tables[$tid]['dirty'] = true;
     }
 
@@ -1105,6 +1168,7 @@ final class GTServer {
         $this->clients = []; $this->bySock = [];
         if ($this->srv) { @fclose($this->srv); }
         $this->refundAllSeats('table reset');
+        if ($this->lock) { flock($this->lock, LOCK_UN); fclose($this->lock); $this->lock = null; }
         ws_log('bye');
     }
 }

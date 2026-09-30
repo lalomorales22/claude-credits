@@ -66,6 +66,25 @@ function health(int $port): ?array {
     return str_starts_with($status, 'HTTP/1.1 200') ? (json_decode($body, true) ?: null) : null;
 }
 
+/** Start another ws.php against the same scratch database and wait (≤ 5 s) for it to exit. [exit code (null = still running, killed), output]. */
+function second_server(string $tmp, int $port): array {
+    $pr = proc_open([PHP_BINARY, "$tmp/ws.php", '--port', (string)$port, '--bind', '127.0.0.1'], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pp, $tmp, ['GT_PK_STUB' => '1'] + getenv());
+    if (!is_resource($pr)) { return [null, 'proc_open failed']; }
+    fclose($pp[0]);
+    stream_set_blocking($pp[1], false); stream_set_blocking($pp[2], false);
+    $out = ''; $code = null; $t0 = microtime(true);
+    while (microtime(true) - $t0 < 5) {
+        $out .= (string)stream_get_contents($pp[1]) . (string)stream_get_contents($pp[2]);
+        $st = proc_get_status($pr);
+        if (!$st['running']) { $code = $st['exitcode']; break; }
+        usleep(50000);
+    }
+    if ($code === null) { proc_terminate($pr, SIGKILL); }
+    $out .= (string)stream_get_contents($pp[1]) . (string)stream_get_contents($pp[2]);
+    fclose($pp[1]); fclose($pp[2]); proc_close($pr);
+    return [$code, $out];
+}
+
 function ticket_for(int $pid, string $name, array $extra = []): string {
     return rt_ticket_make(['uid' => 'p' . $pid, 'pid' => $pid, 'name' => $name] + $extra);
 }
@@ -340,6 +359,14 @@ check($s !== null && $s['id'] === $wb['id'] && $s['st'] === 'slot:tiki:2', 'seat
 $b->send(['t' => 'seat', 'st' => str_repeat('x', 50)]);
 $s = $a->waitFor('seat');
 check($s !== null && strlen($s['st']) === 32, 'station ids are cut to 32 chars', short($s));
+$b->send(['t' => 'seat', 'st' => str_repeat('x', 50)]);   // the same station again
+check($a->waitFor('seat', 0.3) === null, 'a repeat of the current station is not relayed');
+$a->pump(0.8);   // a fresh one-second window for the seat limiter
+for ($i = 1; $i <= 30; $i++) { $b->send(['t' => 'seat', 'st' => "spam:$i"]); }
+$a->pump(0.6);
+$nSeat = count(array_filter($a->inbox, fn($m) => $m['t'] === 'seat'));
+$a->inbox = array_values(array_filter($a->inbox, fn($m) => $m['t'] !== 'seat'));
+check($nSeat === 4, 'seat changes beyond 4 per second are dropped (30 sent in a burst, 4 relayed)', "relayed $nSeat");
 
 $b->send(['t' => 'chat', 'text' => "  hello <b> & \x01friends " . str_repeat('!', 200)]);
 $ca = $a->waitFor('chat');
@@ -404,9 +431,31 @@ check($r && (int)$r['table_id'] === 1 && (int)$r['seat'] === 0 && (int)$r['stack
 $led = row('SELECT * FROM ledger WHERE player_id = ? ORDER BY id DESC LIMIT 1', [$A]);
 check($led && $led['kind'] === 'wager' && $led['game'] === 'poker' && (int)$led['amount'] === -1000 && str_starts_with($led['detail'], 'buy-in'), 'buy-in is a poker wager in the ledger', short($led));
 check($sa !== null && $sa['table']['me'] === 0 && $sa['table']['players'][0]['uid'] === 'p' . $A, 'A sees itself in seat 0', short($sa['table'] ?? null));
+
+// a second ws.php against the same database (double launch, restart overlap) must exit before it "recovers" A's live seat
+$ledgerN = (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$A]);
+[$code2, $out2] = second_server($tmp, free_port());   // another port: only the database is shared
+check($code2 !== null && $code2 !== 0 && str_contains($out2, 'already owns'), 'a second ws.php on another port refuses to start: the database already has a server', short([$code2, substr($out2, -200)]));
+[$code3] = second_server($tmp, $port);                // the same port
+check($code3 !== null && $code3 !== 0, 'a second ws.php on the same port exits non-zero', short($code3));
+check($balance($A) === 9000 && (int)($seatRow($A)['stack'] ?? 0) === 1000 && (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$A]) === $ledgerN, 'neither touched the ledger: A still has 9000 GC in the bank and 1000 GC on the table, no phantom "table reset" refund', short([$balance($A), $seatRow($A)]));
+check(health($port) !== null, 'the live server is unaffected');
 $a->send(['t' => 'pk_join', 'table' => 1, 'seat' => 2, 'buyin' => 1000]);
 $e = $a->waitFor('pk_err');
 check($e !== null && str_contains($e['msg'], 'already seated'), 'a second pk_join for a seated player → pk_err', short($e));
+$a->send(['t' => 'pk_sitout', 'on' => true]);
+$a->send(['t' => 'pk_sitout', 'on' => true]);    // a repeat: no-op
+$a->send(['t' => 'pk_sitout', 'on' => false]);
+$a->send(['t' => 'pk_sitout', 'on' => true]);    // the third real toggle inside a second
+$e = $a->waitFor('pk_err');
+$a->pump(0.3);
+$so = [];
+foreach ($a->inbox as $i => $m) {
+    if ($m['t'] === 'pk_events') { foreach ($m['events'] as $ev) { if ($ev['t'] === 'sitout') { $so[] = $ev['on']; } } }
+    if ($m['t'] === 'pk_events' || $m['t'] === 'pk_state') { unset($a->inbox[$i]); }
+}
+$a->inbox = array_values($a->inbox);
+check($e !== null && $e['msg'] === 'Slow down.' && $so === [true, false], 'pk_sitout: a repeat is a no-op, the third toggle inside a second → pk_err "Slow down." (events: on, off; A is back in)', short([$e, $so]));
 $b->send(['t' => 'pk_join', 'table' => 1, 'seat' => 0, 'buyin' => 1000]);
 $e = $b->waitFor('pk_err');
 check($e !== null && str_contains($e['msg'], 'taken'), 'pk_join on a taken seat → pk_err', short($e));
@@ -497,7 +546,52 @@ check((int)$pa['rounds_played'] === 1 && (int)$pb['rounds_played'] === 1, 'recor
 check((int)$pa['total_wagered'] + (int)$pb['total_wagered'] === (int)$hand['pot'] && (int)$pa['total_won'] + (int)$pb['total_won'] === (int)$hand['pot'] && (int)$hand['pot'] > 0, 'wagered and won across the table both add up to the pot', short([$pa, $pb, $hand['pot']]));
 check($stacks['p' . $A] + $stacks['p' . $B] === 2000, 'chips are conserved: 1000 + 1000 in, same out', short($stacks));
 
-$a->send(['t' => 'pk_leave']);
+// hand 2 ends without a showdown: the first player to act folds. The winner never showed, so nobody else may see the winning hole cards
+$a->inbox = []; $b->inbox = [];
+$started2 = false; $folded = null; $ended2 = null; $mine2 = []; $deadline = microtime(true) + 12;
+while (microtime(true) < $deadline && !$ended2) {
+    foreach ($players as $k => [$cl, $pid]) {
+        $cl->pump(0.05);
+        foreach ($cl->inbox as $i => $m) {
+            if ($m['t'] === 'pk_events') {
+                foreach ($m['events'] as $e) { if ($e['t'] === 'hand_start' && (int)$e['hand'] === 2) { $started2 = true; } if ($e['t'] === 'hand_end' && $started2) { $ended2 = $e; } }
+                unset($cl->inbox[$i]); continue;
+            }
+            if ($m['t'] !== 'pk_state') { continue; }
+            unset($cl->inbox[$i]);
+            $tbl = $m['table'];
+            if ((int)$tbl['hand_no'] !== 2) { continue; }
+            $started2 = true;
+            foreach ($tbl['players'] as $p) { if ($p['uid'] === 'p' . $pid && $p['cards']) { $mine2[$k] = $p['cards']; } }
+            if (!empty($tbl['legal']) && $folded === null) { $folded = $k; $cl->send(['t' => 'pk_act', 'act' => 'fold', 'amt' => 0, 'hand' => 2, 'seq' => $tbl['seq']]); }
+        }
+        $cl->inbox = array_values($cl->inbox);
+    }
+}
+$stacks = ['p' . $A => (int)($seatRow($A)['stack'] ?? -1), 'p' . $B => (int)($seatRow($B)['stack'] ?? -1)];
+$a->send(['t' => 'pk_leave']);   // now, before the next hand deals A in again; the checks below read what has already arrived
+check($ended2 !== null && $folded !== null, 'hand 2: the first player to act folded and the hand ended uncontested', short([$folded, $ended2]));
+check($stacks['p' . $A] + $stacks['p' . $B] === 2000, 'chips are still conserved after the uncontested pot', short($stacks));
+$winner = $folded === 'A' ? 'B' : 'A';
+$winUid = 'p' . ($winner === 'A' ? $A : $B);
+$winCards = $mine2[$winner] ?? [];
+check(count($winCards) === 2, "the winner ($winner) saw their own hole cards", short($mine2));
+$leak2 = 0; $settled = 0; $ownSeen = false;
+foreach ([['A', $a], ['B', $b], ['guest', $g]] as [$who, $cl]) {
+    foreach ($cl->seen as $m) {
+        if ($m['t'] !== 'pk_state' || (int)($m['table']['hand_no'] ?? 0) !== 2) { continue; }
+        $tbl = $m['table'];
+        if ($who === $winner) { foreach ($tbl['winners'] as $w) { if (($w['cards'] ?? null) === $winCards) { $ownSeen = true; } } continue; }
+        if ($tbl['winners']) { $settled++; }
+        $json = (string)json_encode($m);
+        foreach ($winCards as $card) { if (str_contains($json, '"' . $card . '"')) { $leak2++; } }
+        foreach ($tbl['winners'] as $w) { if (($w['cards'] ?? null) !== null) { $leak2++; } }
+        foreach ($tbl['players'] as $p) { if ($p['uid'] === $winUid && ($p['cards'] !== null || !empty($p['show']))) { $leak2++; } }
+    }
+}
+check($settled > 0 && $leak2 === 0, "the winner never showed: no view of the loser or the watcher carried the winning hole cards, in players[] or winners[] ($settled settled views scanned)", "leaks: $leak2");
+check($ownSeen, 'the winner still sees their own cards in winners[]');
+
 $bal = $a->waitFor('bal', 6);
 check($bal !== null && $bal['balance'] === 9000 + $stacks['p' . $A] && $balance($A) === $bal['balance'] && !$seatRow($A), 'pk_leave cashes out: stack back to the balance, seat row gone', short([$bal, $balance($A)]));
 $led = row("SELECT * FROM ledger WHERE player_id = ? AND kind = 'payout' ORDER BY id DESC LIMIT 1", [$A]);

@@ -281,7 +281,7 @@ function pk_tick(array &$t, float $now): array {
     return $ev;
 }
 
-/** What one viewer may know: own hole cards, shown cards, never the deck or the salt. */
+/** What one viewer may know: own hole cards, shown cards (in players[] and winners[] alike), never the deck or the salt. */
 function pk_view(array $t, ?string $uid): array {
     $me = null;
     foreach ($t['players'] as $s => $p) { if ($uid !== null && $p['uid'] === $uid) { $me = $s; } }
@@ -292,10 +292,15 @@ function pk_view(array $t, ?string $uid): array {
             'in' => $p['in'], 'allin' => $p['allin'], 'sitout' => $p['sitout'], 'away' => $p['away'], 'leaving' => $p['leaving'], 'show' => $p['show'], 'last' => $p['last'],
             'holding' => count($p['cards']), 'cards' => $vis ? $p['cards'] : null];
     }
+    $winners = [];   // an uncontested pot is won without showing: the same rule as players[] decides whose cards appear here
+    foreach ($t['winners'] as $w) {
+        $w['cards'] = ($w['seat'] === $me || !empty($t['players'][$w['seat']]['show'])) ? $w['cards'] : null;
+        $winners[] = $w;
+    }
     $now = microtime(true);
     return ['id' => $t['id'], 'name' => $t['name'], 'seats' => $t['seats'], 'sb' => $t['sb'], 'bb' => $t['bb'], 'min_buy' => $t['min_buy'], 'max_buy' => $t['max_buy'],
         'act_secs' => $t['act_secs'], 'hand_no' => $t['hand_no'], 'phase' => $t['phase'], 'button' => $t['button'], 'players' => $players, 'board' => $t['board'],
         'pot' => $t['pot'], 'pots' => $t['pots'], 'to_act' => $t['to_act'], 'ms' => $t['deadline'] !== null ? max(0, (int)(($t['deadline'] - $now) * 1000)) : null,
-        'cur_bet' => $t['cur_bet'], 'min_raise' => $t['min_raise'], 'seq' => $t['seq'], 'winners' => $t['winners'], 'log' => $t['log'], 'deck_hash' => $t['deck_hash'],
+        'cur_bet' => $t['cur_bet'], 'min_raise' => $t['min_raise'], 'seq' => $t['seq'], 'winners' => $winners, 'log' => $t['log'], 'deck_hash' => $t['deck_hash'],
         'me' => $me, 'legal' => $me !== null ? pk_legal($t, $me) : null, 'stub' => true];
 }
