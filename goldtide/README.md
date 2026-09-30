@@ -32,13 +32,13 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | | **Sunset Scratchers** | scratch 9 spots with your finger/mouse, match 3 | 91% |
 | | **Kelp Keno** | pick 1–10 of 40, ten drawn | 94–96% |
 | Table Games | **Coronado Roulette** | single-zero wheel, full board | 97.3% |
-| | **Bayfront Baccarat** | player / banker / tie, full third-card tableau | 98.8% banker |
-| | **Surf Sic Bo** | three dice, 50 bets on the board | 97% small/big |
+| | **Bayfront Baccarat** | player / banker / tie, full third-card tableau; 5% commission rounds to the nearest coin | 98.8% player / 98.9% banker |
+| | **Surf Sic Bo** | three dice, 50 bets on the board (incl. 15 two-dice combinations at 6:1) | 97.2% small/big/combos, 92.1% singles, 81–90% the rest |
 | | **Boardwalk Big Six** | 54-stop carnival money wheel | 78–89% (it's a carnival wheel) |
 | | **Crab Crawl Derby** | six racing crabs at fixed odds, animated race | 93.9% |
-| Card Room | **Harbor Blackjack** | 6 decks, S17, 3:2, double | ~99.5% |
+| Card Room | **Harbor Blackjack** | 6 decks, S17, 3:2, double any two, split once (DAS), late surrender, peek | 99.6% (basic strategy, measured over 600k hands) |
 | | **Boardwalk Poker** | Jacks or Better 9/6 video poker | 99.5% perfect play |
-| | **Coastline 3-Card** | ante/play vs dealer + Pair Plus | ~97% |
+| | **Coastline 3-Card** | ante/play vs dealer + Pair Plus | ~98% ante/play (Q-6-4), 97.7% Pair Plus |
 | | **Tide Hi-Lo** | higher or lower, multiplier builds, cash out anytime | 99% |
 | Boardwalk Arcade | **Tide Crash** | live multiplier curve, cash out before it breaks, auto cash-out | 99% |
 | | **Pearl Drop** ★ | the flagship plinko (see below) | 98.5–99% |
@@ -75,7 +75,7 @@ The house favorite, and it's featured at the top of the lobby.
 - **Autoplay** with stop-on-big-hit, a profit target and a loss limit, plus **turbo** and the space bar.
 - Synthesized sound (peg tinks, gold chimes, bucket thuds) with a mute toggle, a live bucket heatmap, session stats, a multiplier history strip, and BIG / MEGA / LEGENDARY win banners.
 
-Every paytable was checked with exact math or a 200k-hand simulation. The formulas are in comments next to each engine.
+Every paytable was checked with exact math or a 200k-hand simulation. The formulas are in comments next to each engine. Fractional payouts (baccarat banker 0.95:1, blackjack 3:2 and surrender) round to the nearest whole coin, half up, never down. `tests/audit_tables_test.php` re-derives the table-game figures: all 22,100 three-card hands against a brute-force ranker, the blackjack return with basic strategy through the live engine, and the exact 216-roll sic bo returns.
 
 - **Free coins**: 10,000 GC welcome stack, a daily bonus with a 7-day streak, a "running low" refill every 4h, and **promo codes** you can hand out at events
 - **Leaderboards**: biggest stack, biggest single win, most rounds
