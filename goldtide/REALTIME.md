@@ -60,6 +60,7 @@ JSON text frames, one message per frame, `t` is the type. Unknown types are igno
 | `pk_addon` | `amount` | top up between hands, up to `max_buyin` total stack |
 | `pk_leave` | | cash out, coins return to balance (after the current hand if in one: the player is folded/marked leaving and paid when the hand ends) |
 | `pk_sitout` | `on` (bool) | |
+| `pk_post` | `on` (bool) | post a big blind to be dealt into the next hand instead of waiting for the big blind; only matters while the seat `owes` one |
 | `pk_act` | `act` (`fold`,`check`,`call`,`raise`,`allin`), `amt` (raise TO total, only for `raise`), `hand`, `seq` | `hand` and `seq` must match the current hand number and action sequence, else `pk_err` and no-op (protects against double clicks and stale UIs) |
 | `ping` | | server replies `pong` |
 
@@ -92,7 +93,9 @@ When a player sits at a station the floor module loads `?action=<slug>&embed=1` 
 
 ## Poker engine API (`index.php`)
 
-All functions are pure over a table state array except that `pk_start_hand()` draws randomness with `random_int` / `random_bytes`. Nothing here touches the database or the session; `ws.php` owns persistence. Seats are 0-based.
+All functions are pure over a table state array except that `pk_start_hand()` draws randomness with `random_int` / `random_bytes` (and bots / bot timing use `random_int`). Nothing here touches the database or the session; `ws.php` owns persistence. Seats are 0-based.
+
+Tests: `php goldtide/tests/poker_test.php` (no framework, exit 0 = green, ~5 s): evaluator against a brute-force reference, scripted betting scenarios, side pots, timers, a 5,000-hand fuzz with invariants after every action, record verification and a throughput figure. A casino partner's auditor can run it as is.
 
 ### Table state
 
@@ -106,7 +109,8 @@ All functions are pure over a table state array except that `pk_start_hand()` dr
     0 => ['uid' => 'p12', 'pid' => 12, 'name' => 'lalo', 'bot' => false,
           'stack' => 4000, 'bet' => 0, 'total' => 0,   // bet = this street, total = whole hand
           'cards' => [], 'in' => false, 'allin' => false, 'sitout' => false, 'acted' => false,
-          'timeouts' => 0, 'show' => false, 'last' => null, 'leaving' => false, 'away' => false],
+          'timeouts' => 0, 'show' => false, 'last' => null, 'leaving' => false, 'away' => false,
+          'owes' => true, 'post' => false],             // owes a big blind (new seat / sat a hand out); post = asked to post one to be dealt in now
   ],
   'deck' => [], 'deck_salt' => '', 'deck_hash' => '',   // deck is the full shuffled 52 in deal order
   'board' => [], 'pot' => 0,          // pot = chips committed on finished streets (bets of the live street are in players[*].bet)
@@ -117,10 +121,28 @@ All functions are pure over a table state array except that `pk_start_hand()` dr
   'winners' => [],                    // at settle: [['seat' => 2, 'amount' => 300, 'hand' => 'Two Pair, Kings and Nines', 'cards' => ['Kh','9d']]]
   'started_at' => null, 'next_at' => null, 'bot_at' => null,
   'log' => [],                        // last 30 human-readable lines
+  // private bookkeeping, never serialised by pk_view(): sb_seat, bb_seat, dpos (next deck position), hand_chips (chips dealt in, for the
+  // conservation check), clock (last $now the engine saw), events (queued sit/stand/sitout/away/leaver-fold events, flushed by the next
+  // pk_tick), hrec (record of the last finished hand), runout (streets dealt with no betting). Per player: dealt, abet (bet after the seat's
+  // last action, for the reopen rule), sstack (stack at hand start), hand (hand name once shown).
 ]
 ```
 
 Cards are two-character strings: rank `2..9 T J Q K A`, suit `s h d c` (e.g. `As`, `Td`).
+
+### House rules the engine implements
+
+- Simple moving button: it moves clockwise to the next seat that will be dealt in; no dead button / dead small blind. Heads-up the button posts the small blind, acts first preflop and last postflop.
+- Missed blinds (so sitting out, disconnecting or seat-hopping never dodges a blind): the moving button carries the game on without a seat that is not dealt in (its blinds land on the seats after it), so every seat that sits a hand out (sitting out, away, busted, or new) owes a big blind (`owes: true`) before it is dealt in again. It is dealt in when the big blind comes round to it, or, from behind the big blind, by posting a live big blind to play at once (`pk_post()`, wire `pk_post`; house players always post). Nobody enters between the button and the big blind. A posted big blind is live: it counts as the seat's bet and the seat keeps the option, like a second big blind (`post` event with `kind: "post"`, action `post`). When fewer than two seats are free of debt the game is (re)starting: everyone is dealt in and the debts are waived. (With a moving button "which seats the big blind passed" stops being well defined once several seats are out, so the rule is the simple one: a hand out costs a big blind on the way back in.)
+- Short blinds post what they have and are all-in; the price to see the flop stays the full big blind.
+- Min bet = big blind; min raise = size of the last full raise; a short all-in does not reopen the action for a player who already acted unless the bet has grown by a full raise since that player's own last action (TDA rule 44, so several short all-ins can add up to a reopen). Nobody may raise when no other player can still act.
+- `call` is only legal when there is something to call (`legal['call'] > 0`); with nothing to call the client sends `check`.
+- Uncalled chips (the excess over the largest other bet of the street, folded players' bets included) go back at the end of the street with a `return` event.
+- When at most one player can still act the board runs out in the same call: one `street` event per street, and the settle pause is 5 s + 1.2 s per run-out street so clients can animate. Clients pace the animation themselves from the events.
+- Everyone who reaches the showdown shows (no mucking); the last player standing wins without showing. Side pots by total contribution; ties split evenly; odd chips one each to the first winning seats clockwise from the button (35 three ways is 12 / 12 / 11).
+- Timeout: check if free, else fold; two timeouts sit the player out (they still finish the hand folded). A sit-out asked for mid-hand takes effect at the next hand. `away` (set by ws.php on disconnect) counts as sitting out for dealing and for `pk_ready()`.
+- Leaving mid-hand folds the player at once (in turn or out of turn; an all-in player has no decision left and stays in) and pays them at hand end. Leaving during `settle` folds nothing: the hand is decided, so `seq`, `actions` and the players' `in`/`show` are untouched and no `action` event is emitted; the seat is only marked `leaving` and paid at `hand_end`.
+- Burn cards: one before the flop, turn and river, so with n players dealt in the flop is `deck[2n+1..2n+3]`, the turn `deck[2n+5]`, the river `deck[2n+7]`.
 
 ### Functions
 
@@ -130,23 +152,38 @@ pk_new_table(array $row): array
 
 pk_sit(array &$t, int $seat, string $uid, int $pid, string $name, int $stack, bool $bot = false): void
     // DomainException if the seat is taken or out of range, the uid already sits here, or stack is outside [min_buy, max_buy].
-    // A player who sits during a live hand waits for the next one (in=false).
+    // Never joins a running hand (in=false). A new seat owes a big blind: it is dealt in when the big blind reaches it, or at once
+    // by posting one (pk_post) from behind the big blind; on a (re)starting table (fewer than two debt-free seats) everyone is dealt in.
 
 pk_addon(array &$t, int $seat, int $amount): void
-    // only when the seat is not in a live hand; stack after add-on ≤ max_buy.
+    // only when the seat is not in a live hand (a seat dealt into the running hand waits for hand_end, even after folding);
+    // stack after add-on ≤ max_buy. Also how ws.php rebuys a busted bot (stack 0 → any amount ≤ max_buy).
 
 pk_leave(array &$t, int $seat): int
-    // Removes the seat immediately if not in a live hand and returns the stack. If in a live hand: folds them (if to act or later),
-    // marks leaving=true and returns -1; pk_tick() removes them at hand end and the 'hand_end' event carries ['leavers' => [seat => stack]].
+    // Removes the seat immediately if not in a live hand and returns the stack. If in a live hand: folds them at once (in turn through the
+    // normal action path, otherwise out of turn; an all-in player stays in; during 'settle' nothing is folded), marks leaving=true and
+    // returns -1; pk_tick() removes them at hand end and the 'hand_end' event carries ['leavers' => [seat => stack]]. The fold's events
+    // arrive with the next pk_tick().
 
 pk_sitout(array &$t, int $seat, bool $on): void
+    // Takes effect from the next hand (a player mid-hand keeps acting in it). Off resets the timeout counter. A seat that sits a hand out
+    // owes a big blind (owes=true) and comes back only as the big blind or by posting (pk_post).
+
+pk_post(array &$t, int $seat, bool $on = true): void
+    // Ask to post a live big blind to be dealt in at the next hand instead of waiting for the big blind. Only matters while owes=true;
+    // consumed when the seat is dealt in; never honoured between the button and the big blind. Bots post without asking.
+
+pk_away(array &$t, int $seat, bool $on): void
+    // Same as a sit-out, flagged separately so clients can show "away"; ws.php sets it on disconnect and clears it on reconnect.
 
 pk_ready(array $t, float $now): bool
-    // phase idle, next_at reached (or null), and ≥ 2 seats with stack > 0 and !sitout and !leaving.
+    // phase idle, next_at reached (or null), and ≥ 2 seats with stack > 0 and !sitout and !away and !leaving.
 
 pk_start_hand(array &$t, float $now): array   // events
-    // Moves the button (first hand: random seat among the ready ones). Heads-up: button is the small blind and acts first preflop.
-    // Posts blinds (a short stack posts what it has and is all-in). Shuffles with csprng_shuffle(), salt = bin2hex(random_bytes(16)),
+    // Moves the button among the debt-free dealable seats (first hand: random). Deals in every debt-free seat, an owing seat that has
+    // become the big blind, and owing seats behind the big blind that asked to post (or are bots); every occupied seat not dealt in owes a
+    // big blind from now on (owes=true, log line). Heads-up: button is the small blind and acts first preflop.
+    // Posts blinds and the posters' live big blinds (a short stack posts what it has and is all-in). Shuffles with csprng_shuffle(), salt = bin2hex(random_bytes(16)),
     // deck_hash = hash('sha256', implode(' ', $deck) . '|' . $salt). Deals two cards each starting left of the button.
     // Sets to_act (left of the big blind, or the button heads-up), deadline = now + act_secs, cur_bet = bb, min_raise = bb.
 
@@ -157,22 +194,30 @@ pk_legal(array $t, int $seat): ?array
     //  'allin' => int (total the seat would have in front after shoving)]
 
 pk_act(array &$t, int $seat, string $act, int $amt, float $now): array   // events
-    // Validates against pk_legal, DomainException on anything illegal. 'raise' with $amt = the total to raise TO.
-    // 'allin' is always legal in turn. A shove that doesn't reach a full min raise does not reopen the action for players who already acted.
+    // Validates against pk_legal, DomainException on anything illegal (state untouched). 'raise' with $amt = the total to raise TO;
+    // 'call' only when legal['call'] > 0. 'allin' is always legal in turn. A shove that doesn't reach a full min raise does not reopen
+    // the action for players who already acted (unless it adds up to a full raise since their last action).
     // Advances the street when everyone has acted and matched (or is all-in), runs out the board when ≤1 player can still act,
-    // and runs the showdown + settlement, filling pots/winners and moving to phase 'settle' with next_at = now + 5.
-    // Each accepted action bumps seq and appends to actions. Odd chips go to the first winning seat left of the button.
+    // and runs the showdown + settlement, filling pots/winners and moving to phase 'settle' with next_at = now + 5 (+1.2 s per run-out street).
+    // Each accepted action bumps seq and appends to actions ('amt' = the seat's bet after the action, 'put' = chips added, 'auto' on
+    // timeouts and leaver folds). Odd chips go one each to the first winning seats left of the button.
 
 pk_tick(array &$t, float $now): array   // events
-    // Called every loop tick by ws.php. Handles: action timeouts (check if free, else fold; timeouts++ and sitout after 2),
-    // bot decisions when to_act is a bot and now ≥ bot_at (bot_at is set to now + 0.8..2.5 s when a bot comes to act),
-    // settle → idle after next_at, removing leavers and busted real players, marking busted bots for rebuy (ws.php rebuys them),
-    // idle → start the next hand when pk_ready(). Returns [] when nothing happened.
+    // Called every loop tick by ws.php. Returns queued sit/stand/sitout/away events first, then handles at most one player decision:
+    // action timeouts (check if free, else fold; timeouts++ and sitout after 2), bot decisions when to_act is a bot and now ≥ bot_at
+    // (bot_at is set to now + 0.8..2.5 s when a bot comes to act), settle → idle after next_at (the 'hand_end' event; removes leavers and
+    // busted real players, busted bots stay seated with stack 0 for ws.php to rebuy with pk_addon), idle → start the next hand when
+    // pk_ready(). A hand never ends and restarts in the same tick, so ws.php can persist the record, pay leavers and rebuy bots
+    // between the two. Returns [] when nothing happened. ws.php calls pk_tick() before pk_view(): the view's clocks use the last $now seen.
 
 pk_view(array $t, ?string $uid): array
-    // What one viewer may know. Hole cards only for the viewer's own seat, plus every seat with show=true (showdown).
-    // Never includes deck or deck_salt (deck_hash yes). Includes legal actions for the viewer when it is their turn,
-    // ms remaining on the clock, seq, hand_no, and everything the client needs to render the table.
+    // What one viewer may know. Hole cards only for the viewer's own seat, plus every seat with show=true (showdown); other seats get
+    // 'cards' => <int count> so clients can draw backs. Never includes deck or deck_salt (deck_hash yes).
+    // Keys: id, name, seats, sb, bb, min_buy, max_buy, act_secs, hand_no, phase, button, sb_seat, bb_seat, board, pot (finished streets),
+    // pot_total (pot + live bets), pots (from showdown), cur_bet, min_raise, to_act, ms_left, next_ms (until the next hand / null), seq,
+    // deck_hash, winners (cards only for seats that show), log (last 30), players (seat => uid, name, bot, stack, bet, total, in, allin,
+    // sitout, away, leaving, show, owes, post, last, cards, hand), me (viewer's seat or null), legal (pk_legal() for the viewer in turn, else null).
+    // Clients show owes as "waiting for the big blind" with a "post to play" control that sends pk_post.
 
 pk_bot_act(array $t, int $seat): array   // ['act' => 'raise', 'amt' => 60]
     // Rule-based: preflop chart by hand class and position, postflop by made-hand strength + draws + pot odds, an occasional bluff.
@@ -183,13 +228,29 @@ pk_eval7(array $cards): array
     //                   'name' => 'Full House, Kings over Nines', 'best' => the five cards used]
 
 pk_hand_record(array $t): array
-    // After a hand: everything needed for poker_hands + a public verifier: hand_no, deck_hash, deck_salt, deck (in deal order),
-    // board, players (seat, uid, name, bot, start_stack, end_stack, cards, result), actions, pots, winners, started_at, ended_at.
+    // The last finished hand (frozen at settle, kept until the next settle; read it when 'hand_end' arrives): hand_no,
+    // table (id, name, seats, sb, bb, min_buy, max_buy), deck_hash, deck_salt, deck (in deal order), button, sb_seat, bb_seat, board, pot,
+    // players (seat, uid, name, bot, start_stack, end_stack, net, cards, show, hand, won, result 'win'|'lose'|'fold'), actions, pots,
+    // winners, started_at, ended_at. Folded players' cards are in the record too: the verifier needs every dealt card.
+
+pk_verify_record(array $rec): array   // ['hash_ok' => bool, 'deal_ok' => bool]
+    // Recomputes deck_hash from deck + salt and checks every player's hole cards and the board against the deal order. Safe on untrusted
+    // input (a pasted hand history): pk_record_shape_ok() first bounds every field it uses (seats 2..9, button in range, 52 distinct card
+    // strings, string salt/hash, ≤ seats players with distinct in-range integer seats and two card strings, a 0/3/4/5 card board) and a
+    // malformed record fails both checks without warnings or unbounded loops.
+
+pk_deal_order(int $seats, int $button, array $occupiedSeats): array
+    // Seats in deal order: clockwise from the seat left of the button, button last. Pure; the hand-history page reuses it.
+
+pk_assert_invariants(array $t): void
+    // Debug helper (tests): RuntimeException naming the first broken invariant (chip conservation, stacks ≥ 0, board length per phase, ...).
 ```
 
 ### Events (returned by the engine, relayed by `ws.php` as `pk_events`)
 
-`['t' => 'hand_start', 'hand' => n, 'button' => seat, 'deck_hash' => ..]`, `['t' => 'post', 'seat', 'amt', 'kind' => 'sb'|'bb']`, `['t' => 'deal']`, `['t' => 'action', 'seat', 'act', 'amt', 'seq']`, `['t' => 'street', 'phase' => 'flop', 'cards' => [..]]`, `['t' => 'showdown', 'shows' => [seat => cards]]`, `['t' => 'win', 'seat', 'amount', 'hand', 'pot' => index]`, `['t' => 'hand_end', 'deck_salt', 'deck', 'leavers' => [..], 'busted' => [..]]`, `['t' => 'timeout', 'seat']`, `['t' => 'sitout', 'seat', 'on']`, `['t' => 'sit', 'seat']`, `['t' => 'stand', 'seat']`.
+`['t' => 'hand_start', 'hand' => n, 'button' => seat, 'deck_hash' => ..]`, `['t' => 'post', 'seat', 'amt', 'kind' => 'sb'|'bb'|'post']` (`post` = a live big blind posted to be dealt in), `['t' => 'deal']`, `['t' => 'action', 'seat', 'act', 'amt' (bet after the action), 'put' (chips added), 'seq']`, `['t' => 'street', 'phase' => 'flop', 'cards' => [..]]`, `['t' => 'return', 'seat', 'amt']` (uncalled chips back), `['t' => 'showdown', 'shows' => [seat => cards]]`, `['t' => 'win', 'seat', 'amount', 'hand', 'pot' => index]`, `['t' => 'hand_end', 'deck_salt', 'deck', 'leavers' => [seat => stack], 'busted' => [seat => ['uid', 'bot']]]`, `['t' => 'timeout', 'seat']`, `['t' => 'sitout', 'seat', 'on']`, `['t' => 'away', 'seat', 'on']`, `['t' => 'sit', 'seat']`, `['t' => 'stand', 'seat']`.
+
+Events from `pk_sit`, `pk_leave`, `pk_sitout` and `pk_away` are queued and come out of the next `pk_tick()`; `ws.php` should still broadcast a fresh `pk_state` right after those calls.
 
 ### Deck commitment (why players can trust the deal)
 

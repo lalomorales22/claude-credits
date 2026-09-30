@@ -2054,7 +2054,863 @@ function pusher_play(): array {
  * ws.php hosts the tables and owns persistence; nothing in here touches the database or the session.
  */
 // [[REGION poker-engine]]
-function pk_placeholder(): void {}
+/*
+ * House rules (live-room correct; where a live room has options the simplest fair one is used and named here):
+ *  - Blinds: small + big. Heads-up the button posts the small blind, acts first preflop and last after the flop.
+ *    A short stack posts what it has and is all-in; the amount to call stays the full big blind.
+ *  - Button: simple moving button. It moves clockwise to the next seat that will be dealt in (skipping empty and
+ *    sitting-out seats). There is no dead button or dead small blind; both blinds are always live seats.
+ *  - Missed blinds (so sitting out, disconnecting or seat-hopping never dodges a blind): the moving button carries the
+ *    game on without a seat that is not dealt in (its blinds land on the seats after it), so every seat that sits a
+ *    hand out (sitting out, away, busted, or new) owes a big blind before it is dealt in again. It is dealt in when the
+ *    big blind comes round to it, or, from behind the big blind, by posting a live big blind to play at once
+ *    (pk_post(); house players always post). Nobody enters between the button and the big blind. When fewer than two
+ *    seats are free of debt the game is (re)starting and everyone is dealt in with the debts waived.
+ *  - Betting: min bet = big blind; min raise = size of the last full raise (starts at the big blind); raises are
+ *    "raise TO" totals; a call is capped at the stack (a partial call is an all-in). An all-in that is less than a
+ *    full raise does not reopen the action for a player who has already acted, unless the increase since that
+ *    player's own last action adds up to a full raise (TDA rule 44); such a player may only call or fold.
+ *    A player cannot raise when nobody else can still act (a raise would only come back as uncalled).
+ *  - A street ends when every player still in has acted and matched the current bet, or is all-in. When at most
+ *    one player can still act, the rest of the board is dealt out with no further betting: one 'street' event per
+ *    street, all in the same call, and the settle pause grows by PK_RUNOUT_SECS per run-out street for animation.
+ *  - Uncalled bets (the excess over the largest other bet of the street) are returned at the end of the street.
+ *  - Showdown: side pots from total contributions (sorted all-in levels); the best pk_eval7() hand takes each pot;
+ *    ties split evenly and odd chips go one each to the first winning seats clockwise from the button. Everyone who
+ *    reaches the showdown shows (no mucking): simplest, fully transparent, and it makes every hand history checkable.
+ *  - The last player standing wins without showing (show=false).
+ *  - Clock: act_secs per decision. A timeout checks if free, else folds; two timeouts sit a player out. Sitting out
+ *    (and 'away', which ws.php sets on disconnect) means dealt out of future hands with no blinds posted; a sit-out
+ *    requested mid-hand takes effect at the next hand. Leaving mid-hand folds the player at once (an all-in player
+ *    has no decision left, stays in and can still win; once the hand is decided there is nothing left to fold) and
+ *    pays them at hand end.
+ *  - Burn cards: one card is burned before the flop, the turn and the river. With n players dealt in, hole cards are
+ *    deck[0 .. 2n-1] (two rounds clockwise from the seat left of the button), the flop is deck[2n+1 .. 2n+3], the
+ *    turn deck[2n+5] and the river deck[2n+7]. pk_verify_record() checks exactly that.
+ * Chip conservation: within a hand, pot + sum(stack + bet) over the players dealt in is constant
+ * (pk_assert_invariants()). Events produced outside pk_act()/pk_tick() (sit, stand, sitout, away, and the fold of a
+ * leaver) are queued in $t['events'] and returned by the next pk_tick().
+ * Private state (never serialised by pk_view): sb_seat, bb_seat, dpos, hand_chips, clock, events, hrec, runout;
+ * per player: dealt, abet (bet after their last action), sstack (stack at hand start), hand (name at showdown).
+ * Per player and public: owes (a big blind, see missed blinds) and post (asked to post it to be dealt in now).
+ */
+const PK_RANKS = '23456789TJQKA';
+const PK_SUITS = 'shdc';
+const PK_RV = ['2' => 2, '3' => 3, '4' => 4, '5' => 5, '6' => 6, '7' => 7, '8' => 8, '9' => 9, 'T' => 10, 'J' => 11, 'Q' => 12, 'K' => 13, 'A' => 14];
+const PK_PHASES = ['idle', 'preflop', 'flop', 'turn', 'river', 'showdown', 'settle'];
+const PK_NEXT_STREET = ['preflop' => 'flop', 'flop' => 'turn', 'turn' => 'river'];
+const PK_STREET_CARDS = ['flop' => 3, 'turn' => 1, 'river' => 1];
+const PK_WORD = [2 => 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Jack', 'Queen', 'King', 'Ace'];
+const PK_PLURAL = [2 => 'Twos', 'Threes', 'Fours', 'Fives', 'Sixes', 'Sevens', 'Eights', 'Nines', 'Tens', 'Jacks', 'Queens', 'Kings', 'Aces'];
+const PK_CATS = ['High Card', 'Pair', 'Two Pair', 'Three of a Kind', 'Straight', 'Flush', 'Full House', 'Four of a Kind', 'Straight Flush'];
+const PK_SETTLE_SECS = 5;      // pause on 'settle' before the next hand
+const PK_RUNOUT_SECS = 1.2;    // extra pause per street dealt without betting (all-in run-out)
+const PK_LOG_LINES = 30;
+
+function pk_rank(string $c): int { return PK_RV[$c[0] ?? ''] ?? throw new InvalidArgumentException("Bad card '$c'"); }
+function pk_suit(string $c): string { return $c[1] ?? throw new InvalidArgumentException("Bad card '$c'"); }
+function pk_deck(): array { $d = []; foreach (str_split(PK_SUITS) as $s) { foreach (str_split(PK_RANKS) as $r) { $d[] = $r . $s; } } return $d; }
+
+/* ── evaluator ── */
+
+/** Best five of 5–7 cards. score is a total order: rank << 20 | tiebreak ranks base 15 (five slots, high to low). */
+function pk_eval7(array $cards): array {
+    $n = count($cards);
+    if ($n < 5 || $n > 7) { throw new InvalidArgumentException('pk_eval7 needs 5 to 7 cards'); }
+    $byRank = []; $bySuit = [];
+    foreach ($cards as $c) { $r = pk_rank($c); $byRank[$r][] = $c; $bySuit[pk_suit($c)][] = $c; }
+    krsort($byRank);
+    $flush = null;
+    foreach ($bySuit as $cs) { if (count($cs) >= 5) { $flush = $cs; break; } }
+    if ($flush) {
+        $sf = pk_straight_cards($flush);
+        if ($sf) { $top = pk_rank($sf[0]); return pk_result(8, [$top], $sf, $top === 14 ? 'Royal Flush' : 'Straight Flush, ' . PK_WORD[$top] . ' high'); }
+    }
+    $groups = [];
+    foreach ($byRank as $r => $cs) { $groups[] = [count($cs), $r]; }
+    usort($groups, fn($a, $b) => $b[0] <=> $a[0] ?: $b[1] <=> $a[1]);
+    [$c0, $r0] = $groups[0];
+    [$c1, $r1] = $groups[1] ?? [0, 0];
+    if ($c0 === 4) {
+        $k = pk_top_ranks($byRank, [$r0], 1);
+        return pk_result(7, [$r0, $k[0]], [...array_slice($byRank[$r0], 0, 4), $byRank[$k[0]][0]], 'Four of a Kind, ' . PK_PLURAL[$r0]);
+    }
+    if ($c0 === 3 && $c1 >= 2) {
+        return pk_result(6, [$r0, $r1], [...array_slice($byRank[$r0], 0, 3), ...array_slice($byRank[$r1], 0, 2)], 'Full House, ' . PK_PLURAL[$r0] . ' over ' . PK_PLURAL[$r1]);
+    }
+    if ($flush) {
+        usort($flush, fn($a, $b) => pk_rank($b) <=> pk_rank($a));
+        $best = array_slice($flush, 0, 5);
+        return pk_result(5, array_map('pk_rank', $best), $best, 'Flush, ' . PK_WORD[pk_rank($best[0])] . ' high');
+    }
+    $st = pk_straight_cards($cards);
+    if ($st) { $top = pk_rank($st[0]); return pk_result(4, [$top], $st, 'Straight, ' . PK_WORD[$top] . ' high'); }
+    if ($c0 === 3) {
+        $k = pk_top_ranks($byRank, [$r0], 2);
+        return pk_result(3, [$r0, ...$k], [...$byRank[$r0], $byRank[$k[0]][0], $byRank[$k[1]][0]], 'Three of a Kind, ' . PK_PLURAL[$r0]);
+    }
+    if ($c0 === 2 && $c1 === 2) {
+        $k = pk_top_ranks($byRank, [$r0, $r1], 1);
+        return pk_result(2, [$r0, $r1, $k[0]], [...$byRank[$r0], ...$byRank[$r1], $byRank[$k[0]][0]], 'Two Pair, ' . PK_PLURAL[$r0] . ' and ' . PK_PLURAL[$r1]);
+    }
+    if ($c0 === 2) {
+        $k = pk_top_ranks($byRank, [$r0], 3);
+        return pk_result(1, [$r0, ...$k], [...$byRank[$r0], ...array_map(fn($r) => $byRank[$r][0], $k)], 'Pair of ' . PK_PLURAL[$r0]);
+    }
+    $k = pk_top_ranks($byRank, [], 5);
+    return pk_result(0, $k, array_map(fn($r) => $byRank[$r][0], $k), 'High Card, ' . PK_WORD[$k[0]]);
+}
+/** The highest five-card straight in $cards (one card per rank, high to low; the ace plays low in the wheel), or null. */
+function pk_straight_cards(array $cards): ?array {
+    $one = [];
+    foreach ($cards as $c) { $one[pk_rank($c)] ??= $c; }
+    if (isset($one[14])) { $one[1] = $one[14]; }
+    for ($top = 14; $top >= 5; $top--) {
+        $run = [];
+        for ($r = $top; $r > $top - 5; $r--) { if (!isset($one[$r])) { continue 2; } $run[] = $one[$r]; }
+        return $run;
+    }
+    return null;
+}
+function pk_top_ranks(array $byRank, array $exclude, int $n): array {
+    $out = [];
+    foreach ($byRank as $r => $_) { if (!in_array($r, $exclude, true)) { $out[] = $r; if (count($out) === $n) { break; } } }
+    return $out;
+}
+function pk_result(int $rank, array $kick, array $best, string $name): array {
+    $v = 0;
+    for ($i = 0; $i < 5; $i++) { $v = $v * 15 + ($kick[$i] ?? 0); }
+    return ['rank' => $rank, 'score' => ($rank << 20) | $v, 'name' => $name, 'best' => array_values($best)];
+}
+
+/* ── table lifecycle ── */
+
+/** From a poker_tables row (name, seats, small_blind, big_blind, min_buyin, max_buyin). act_secs: row key or the poker_action_seconds setting. */
+function pk_new_table(array $row): array {
+    $sb = (int)($row['small_blind'] ?? 0); $bb = (int)($row['big_blind'] ?? 0);
+    $min = (int)($row['min_buyin'] ?? 0); $max = (int)($row['max_buyin'] ?? 0); $seats = (int)($row['seats'] ?? 6);
+    if ($sb < 1 || $bb < $sb || $min < 1 || $max < $min || $seats < 2 || $seats > 9) { throw new InvalidArgumentException('Bad poker table configuration.'); }
+    $act = (int)($row['act_secs'] ?? isetting('poker_action_seconds', 20));
+    return [
+        'id' => (int)($row['id'] ?? 0), 'name' => (string)($row['name'] ?? 'Table'), 'seats' => $seats, 'sb' => $sb, 'bb' => $bb,
+        'min_buy' => $min, 'max_buy' => $max, 'act_secs' => max(3, $act),
+        'hand_no' => 0, 'phase' => 'idle', 'button' => null, 'players' => [],
+        'deck' => [], 'deck_salt' => '', 'deck_hash' => '', 'board' => [], 'pot' => 0, 'pots' => [],
+        'to_act' => null, 'deadline' => null, 'cur_bet' => 0, 'min_raise' => $bb, 'last_aggressor' => null,
+        'seq' => 0, 'actions' => [], 'winners' => [], 'started_at' => null, 'next_at' => null, 'bot_at' => null, 'log' => [],
+        'sb_seat' => null, 'bb_seat' => null, 'dpos' => 0, 'hand_chips' => 0, 'clock' => 0.0, 'events' => [], 'hrec' => null, 'runout' => 0,
+    ];
+}
+function pk_player(string $uid, int $pid, string $name, int $stack, bool $bot): array {
+    return ['uid' => $uid, 'pid' => $pid, 'name' => $name, 'bot' => $bot, 'stack' => $stack, 'bet' => 0, 'total' => 0, 'cards' => [],
+        'in' => false, 'allin' => false, 'sitout' => false, 'acted' => false, 'timeouts' => 0, 'show' => false, 'last' => null,
+        'leaving' => false, 'away' => false, 'dealt' => false, 'abet' => 0, 'sstack' => $stack, 'hand' => null,
+        'owes' => true, 'post' => false];   // a new seat owes a big blind: it waits for the big blind or posts one (missed-blind rule)
+}
+function pk_log(array &$t, string $line): void {
+    $t['log'][] = $line;
+    if (count($t['log']) > PK_LOG_LINES) { $t['log'] = array_slice($t['log'], -PK_LOG_LINES); }
+}
+function pk_pname(array $t, int $s): string { return $t['players'][$s]['name'] ?? ('Seat ' . ($s + 1)); }
+/** Will this seat be dealt into the next hand? */
+function pk_dealable(array $p): bool { return $p['stack'] > 0 && !$p['sitout'] && !$p['away'] && !$p['leaving']; }
+function pk_betting(array $t): bool { return isset(PK_NEXT_STREET[$t['phase']]) || $t['phase'] === 'river'; }
+/** Seats still holding live cards. */
+function pk_seats_in(array $t): array { $o = []; foreach ($t['players'] as $s => $p) { if ($p['in']) { $o[] = $s; } } return $o; }
+function pk_count_can_act(array $t): int { $n = 0; foreach ($t['players'] as $p) { if ($p['in'] && !$p['allin']) { $n++; } } return $n; }
+/** First seat in $set strictly after $from, clockwise (wrapping). */
+function pk_next_seat(int $seats, int $from, array $set): int {
+    $in = array_flip($set);
+    for ($i = 1; $i <= $seats; $i++) { $s = ($from + $i) % $seats; if (isset($in[$s])) { return $s; } }
+    throw new LogicException('Empty seat set.');
+}
+/** The order cards are dealt in: clockwise from the seat left of the button, the button last. Pure; the verifier page reuses it. */
+function pk_deal_order(int $seats, int $button, array $occupiedSeats): array {
+    $occ = array_flip(array_map('intval', $occupiedSeats)); $out = [];
+    for ($i = 1; $i <= $seats; $i++) { $s = ($button + $i) % $seats; if (isset($occ[$s])) { $out[] = $s; } }
+    return $out;
+}
+
+function pk_sit(array &$t, int $seat, string $uid, int $pid, string $name, int $stack, bool $bot = false): void {
+    if ($seat < 0 || $seat >= $t['seats']) { throw new DomainException('That seat does not exist.'); }
+    if (isset($t['players'][$seat])) { throw new DomainException('That seat is taken.'); }
+    foreach ($t['players'] as $p) { if ($p['uid'] === $uid) { throw new DomainException('You already have a seat at this table.'); } }
+    if ($stack < $t['min_buy'] || $stack > $t['max_buy']) { throw new DomainException('Buy-in must be between ' . coins($t['min_buy']) . ' and ' . coins($t['max_buy']) . ' GC.'); }
+    $t['players'][$seat] = pk_player($uid, $pid, $name, $stack, $bot);   // waits for the big blind or posts one (owes=true), never into a running hand
+    ksort($t['players']);
+    pk_log($t, $name . ' sits down with ' . coins($stack));
+    $t['events'][] = ['t' => 'sit', 'seat' => $seat];
+}
+/** Top up between hands; a seat that was dealt into the running hand waits until it ends. */
+function pk_addon(array &$t, int $seat, int $amount): void {
+    $p = $t['players'][$seat] ?? throw new DomainException('Nobody sits there.');
+    if ($amount < 1) { throw new DomainException('Add-on must be positive.'); }
+    if ($p['dealt'] && $t['phase'] !== 'idle') { throw new DomainException('Wait for the hand to finish before adding on.'); }
+    if ($p['stack'] + $amount > $t['max_buy']) { throw new DomainException('That would put you over the ' . coins($t['max_buy']) . ' GC maximum.'); }
+    $t['players'][$seat]['stack'] += $amount; $t['players'][$seat]['allin'] = false;
+    pk_log($t, $p['name'] . ' adds on ' . coins($amount));
+}
+/** Stack if the seat is freed now; -1 when the player is in a live hand (folded now, paid at hand end via 'leavers'). */
+function pk_leave(array &$t, int $seat): int {
+    $p = $t['players'][$seat] ?? throw new DomainException('Nobody sits there.');
+    if (!$p['dealt'] || $t['phase'] === 'idle') {
+        unset($t['players'][$seat]);
+        pk_log($t, $p['name'] . ' leaves the table');
+        $t['events'][] = ['t' => 'stand', 'seat' => $seat];
+        return $p['stack'];
+    }
+    // a live decision is folded now; an all-in player has none left and stays in, and once the hand is decided ('settle') there is nothing to fold
+    if (pk_betting($t) && $p['in'] && !$p['allin']) { pk_fold_out($t, $seat); }
+    $t['players'][$seat]['leaving'] = true;
+    pk_log($t, $p['name'] . ' is leaving after this hand');
+    return -1;
+}
+function pk_sitout(array &$t, int $seat, bool $on): void {
+    $p = $t['players'][$seat] ?? throw new DomainException('Nobody sits there.');
+    if ($p['sitout'] === $on) { return; }
+    $t['players'][$seat]['sitout'] = $on;
+    if (!$on) { $t['players'][$seat]['timeouts'] = 0; }
+    pk_log($t, $p['name'] . ($on ? ' sits out' : ' is back'));
+    $t['events'][] = ['t' => 'sitout', 'seat' => $seat, 'on' => $on];
+}
+/** Ask to post a big blind to be dealt into the next hand at once instead of waiting for the big blind. Only matters while the seat owes one
+ *  (new seat, or it sat a hand out); consumed when the seat is dealt in. Not honoured between the button and the big blind. */
+function pk_post(array &$t, int $seat, bool $on = true): void {
+    $p = $t['players'][$seat] ?? throw new DomainException('Nobody sits there.');
+    if ($p['post'] === $on) { return; }
+    $t['players'][$seat]['post'] = $on;
+    if ($p['owes']) { pk_log($t, $p['name'] . ($on ? ' will post a big blind to play' : ' waits for the big blind')); }
+}
+/** ws.php marks a disconnected player away (auto sit-out); clearing it seats them back in from the next hand. */
+function pk_away(array &$t, int $seat, bool $on): void {
+    $p = $t['players'][$seat] ?? throw new DomainException('Nobody sits there.');
+    if ($p['away'] === $on) { return; }
+    $t['players'][$seat]['away'] = $on;
+    pk_log($t, $p['name'] . ($on ? ' stepped away' : ' is back'));
+    $t['events'][] = ['t' => 'away', 'seat' => $seat, 'on' => $on];
+}
+function pk_ready(array $t, float $now): bool {
+    if ($t['phase'] !== 'idle' || ($t['next_at'] !== null && $now < $t['next_at'])) { return false; }
+    $n = 0;
+    foreach ($t['players'] as $p) { if (pk_dealable($p)) { $n++; } }
+    return $n >= 2;
+}
+/** Move up to $amt from a seat's stack into its bet (capped at the stack; flags all-in). Returns what moved. */
+function pk_put(array &$t, int $s, int $amt): int {
+    $p = &$t['players'][$s];
+    $put = min($amt, $p['stack']);
+    $p['stack'] -= $put; $p['bet'] += $put; $p['total'] += $put;
+    if ($p['stack'] === 0) { $p['allin'] = true; }
+    unset($p);
+    return $put;
+}
+
+function pk_start_hand(array &$t, float $now): array {
+    if ($t['phase'] !== 'idle') { throw new DomainException('A hand is already in progress.'); }
+    $base = []; $owing = [];   // seats dealt in freely / seats that owe a big blind (new, or they sat a hand out)
+    foreach ($t['players'] as $s => $p) { if (pk_dealable($p)) { if ($p['owes']) { $owing[] = $s; } else { $base[] = $s; } } }
+    if (count($base) < 2) { $base = [...$base, ...$owing]; sort($base); $owing = []; }   // the game is (re)starting: everyone in, debts waived
+    if (count($base) < 2) { throw new DomainException('Not enough players to deal.'); }
+    // simple moving button: next seat that is dealt in, clockwise from wherever the button was (random on the first hand)
+    $btn = $t['button'] === null ? $base[random_int(0, count($base) - 1)] : pk_next_seat($t['seats'], $t['button'], $base);
+    // who is dealt in: every base seat; an owing seat only when the big blind has come round to it, or (from behind the big blind)
+    // by posting a live big blind now. Nobody enters between the button and the big blind: that is exactly how a blind gets dodged.
+    $ready = [$btn]; $posters = []; $isBase = array_flip($base); $isOwing = array_flip($owing); $sbFound = false; $bbFound = false;
+    for ($i = 1; $i < $t['seats']; $i++) {
+        $s = ($btn + $i) % $t['seats'];
+        if (isset($isBase[$s])) { $ready[] = $s; if ($sbFound) { $bbFound = true; } $sbFound = true; continue; }
+        if (!isset($isOwing[$s]) || !$sbFound) { continue; }
+        if (!$bbFound) { $bbFound = true; $ready[] = $s; continue; }   // it is the big blind: the debt is paid the ordinary way
+        if ($t['players'][$s]['post'] || $t['players'][$s]['bot']) { $ready[] = $s; $posters[] = $s; }   // posts to play (house players always do)
+    }
+    sort($ready);
+    $n = count($ready);
+    $order = pk_deal_order($t['seats'], $btn, $ready);
+    [$sbSeat, $bbSeat] = $n === 2 ? [$btn, $order[0]] : [$order[0], $order[1]];   // heads-up: the button is the small blind
+    $deck = csprng_shuffle(pk_deck());
+    $salt = bin2hex(random_bytes(16));
+    $t = array_replace($t, ['hand_no' => $t['hand_no'] + 1, 'seq' => $t['seq'] + 1, 'phase' => 'preflop', 'button' => $btn, 'sb_seat' => $sbSeat, 'bb_seat' => $bbSeat,
+        'deck' => $deck, 'deck_salt' => $salt, 'deck_hash' => hash('sha256', implode(' ', $deck) . '|' . $salt), 'dpos' => 0,
+        'board' => [], 'pot' => 0, 'pots' => [], 'to_act' => null, 'deadline' => null, 'cur_bet' => 0, 'min_raise' => $t['bb'], 'last_aggressor' => null,
+        'actions' => [], 'winners' => [], 'started_at' => $now, 'next_at' => null, 'bot_at' => null, 'clock' => $now, 'runout' => 0]);   // hrec (last finished hand) stays until the next settle
+    $in = array_flip($ready);
+    foreach ($t['players'] as $s => &$p) {
+        $dealt = isset($in[$s]);
+        $p = array_replace($p, ['dealt' => $dealt, 'in' => $dealt, 'cards' => [], 'bet' => 0, 'total' => 0, 'allin' => false, 'acted' => false,
+            'abet' => 0, 'show' => false, 'last' => null, 'hand' => null, 'sstack' => $p['stack']]);
+        if ($dealt) { $p['owes'] = false; $p['post'] = false; }   // dealt in: the blind debt (if any) is settled by this hand's blinds / post / waiver
+        // missed blind: the moving button carries the game on without a seat that is not dealt in (its blinds land on the seats after it),
+        // so the seat re-enters only as the big blind or by posting one. Which seats "the big blind passed" is not well defined once
+        // several seats are out, so every seat that sits a hand out owes: simple, and it cannot be gamed.
+        elseif (!$p['owes']) { $p['owes'] = true; pk_log($t, $p['name'] . ' sits this hand out and owes a big blind'); }
+    }
+    unset($p);
+    $ev = [['t' => 'hand_start', 'hand' => $t['hand_no'], 'button' => $btn, 'deck_hash' => $t['deck_hash']]];
+    pk_log($t, 'Hand #' . $t['hand_no'] . ', button ' . pk_pname($t, $btn));
+    $posts = [[$sbSeat, $t['sb'], 'sb'], [$bbSeat, $t['bb'], 'bb']];
+    foreach ($order as $s) { if (in_array($s, $posters, true)) { $posts[] = [$s, $t['bb'], 'post']; } }   // live big blinds posted to play, in seat order
+    foreach ($posts as [$s, $amt, $kind]) {
+        $put = pk_put($t, $s, $amt);   // a short stack posts what it has and is all-in
+        $t['players'][$s]['last'] = $kind;
+        $t['actions'][] = ['street' => 'preflop', 'seat' => $s, 'act' => $kind, 'amt' => $put, 'put' => $put, 'at' => $now];
+        $ev[] = ['t' => 'post', 'seat' => $s, 'amt' => $put, 'kind' => $kind];
+        pk_log($t, pk_pname($t, $s) . ' posts ' . match ($kind) { 'sb' => 'the small blind', 'bb' => 'the big blind', 'post' => 'a big blind to play' } . ', ' . coins($put) . ($t['players'][$s]['allin'] ? ' (all-in)' : ''));
+    }
+    $t['cur_bet'] = $t['bb'];   // the price to see a flop is the full big blind even when the big blind is short
+    foreach ([0, 1] as $round) { foreach ($order as $s) { $t['players'][$s]['cards'][] = $deck[$t['dpos']++]; } }
+    $ev[] = ['t' => 'deal'];
+    $t['hand_chips'] = 0;
+    foreach ($ready as $s) { $t['hand_chips'] += $t['players'][$s]['stack'] + $t['players'][$s]['bet']; }
+    pk_continue($t, $bbSeat, $now, $ev);   // first to act is left of the big blind (heads-up that is the button)
+    return $ev;
+}
+
+/* ── betting flow ── */
+
+/** Does this seat still owe a decision on the current street? */
+function pk_needs_act(array $t, int $s): bool {
+    $p = $t['players'][$s];
+    if (!$p['in'] || $p['allin']) { return false; }
+    $opp = false; $live = false;   // any opponent still holding cards? any who can still act?
+    foreach ($t['players'] as $q => $o) { if ($q !== $s && $o['in']) { $opp = true; if (!$o['allin']) { $live = true; } } }
+    if (!$opp) { return false; }                     // everyone else folded or left (a raiser can leave out of turn): the pot is theirs, nothing to decide
+    if ($p['bet'] < $t['cur_bet']) { return true; }  // facing chips: call or fold, even if nobody else can act
+    return !$p['acted'] && $live;                    // the option / opening bet only matters with an opponent who can respond
+}
+/** Next seat clockwise after $after that owes a decision (the loop wraps all the way round to $after itself). */
+function pk_next_actor(array $t, int $after): ?int {
+    for ($i = 1; $i <= $t['seats']; $i++) { $s = ($after + $i) % $t['seats']; if (isset($t['players'][$s]) && pk_needs_act($t, $s)) { return $s; } }
+    return null;
+}
+function pk_set_turn(array &$t, int $s, float $now): void {
+    $t['to_act'] = $s; $t['deadline'] = $now + $t['act_secs'];
+    $t['bot_at'] = $t['players'][$s]['bot'] ? min($now + random_int(800, 2500) / 1000, $t['deadline'] - 0.5) : null;   // bots "think" 0.8–2.5 s
+}
+/** After seat $after acted (or the blinds were posted): hand the turn on, or close the street. */
+function pk_continue(array &$t, int $after, float $now, array &$ev): void {
+    $next = pk_next_actor($t, $after);
+    if ($next !== null) { pk_set_turn($t, $next, $now); return; }
+    pk_finish_street($t, $now, $ev);
+}
+function pk_finish_street(array &$t, float $now, array &$ev): void {
+    $t['to_act'] = null; $t['deadline'] = null; $t['bot_at'] = null;
+    pk_return_uncalled($t, $ev);
+    foreach ($t['players'] as &$p) { $t['pot'] += $p['bet']; $p['bet'] = 0; }
+    unset($p);
+    $in = pk_seats_in($t);
+    if (count($in) === 1) { pk_settle($t, $now, $ev, [['amount' => $t['pot'], 'eligible' => $in, 'winners' => $in]]); return; }
+    while (true) {
+        if ($t['phase'] === 'river') { pk_showdown($t, $now, $ev); return; }
+        pk_deal_street($t, $ev);
+        if (pk_count_can_act($t) >= 2) { $next = pk_next_actor($t, $t['button']); if ($next !== null) { pk_set_turn($t, $next, $now); return; } }
+        $t['runout']++;   // nobody left to bet against: run the board out, one 'street' event per street
+    }
+}
+/** Chips nobody matched go back before the street is raked into the pot. */
+function pk_return_uncalled(array &$t, array &$ev): void {
+    $top = null; $topBet = -1;
+    foreach ($t['players'] as $s => $p) { if ($p['in'] && $p['bet'] > $topBet) { $topBet = $p['bet']; $top = $s; } }
+    if ($top === null) { return; }
+    $other = 0;
+    foreach ($t['players'] as $s => $p) { if ($s !== $top) { $other = max($other, $p['bet']); } }   // folded players' chips count as matched
+    $back = $topBet - $other;
+    if ($back <= 0) { return; }
+    $p = &$t['players'][$top];
+    $p['bet'] -= $back; $p['total'] -= $back; $p['stack'] += $back; $p['allin'] = false;
+    unset($p);
+    $ev[] = ['t' => 'return', 'seat' => $top, 'amt' => $back];
+    pk_log($t, pk_pname($t, $top) . ' takes back ' . coins($back) . ' (uncalled)');
+}
+function pk_deal_street(array &$t, array &$ev): void {
+    $phase = PK_NEXT_STREET[$t['phase']];
+    $t['dpos']++;   // burn
+    $cards = array_slice($t['deck'], $t['dpos'], PK_STREET_CARDS[$phase]);
+    $t['dpos'] += count($cards);
+    $t['board'] = [...$t['board'], ...$cards];
+    $t['phase'] = $phase; $t['cur_bet'] = 0; $t['min_raise'] = $t['bb'];
+    foreach ($t['players'] as &$p) { $p['acted'] = false; $p['abet'] = 0; if ($p['in']) { $p['last'] = null; } }
+    unset($p);
+    $ev[] = ['t' => 'street', 'phase' => $phase, 'cards' => $cards];
+    pk_log($t, ucfirst($phase) . ': ' . implode(' ', $t['board']));
+}
+/** Side pots from total contributions: one pot per distinct all-in level among the live players; the top pot takes the rest. */
+function pk_side_pots(array $t): array {
+    $in = pk_seats_in($t);
+    $levels = [];
+    foreach ($in as $s) { $levels[$t['players'][$s]['total']] = true; }
+    $levels = array_keys($levels); sort($levels);
+    $pots = []; $prev = 0; $last = count($levels) - 1;
+    foreach ($levels as $i => $lvl) {
+        $cap = $i === $last ? PHP_INT_MAX : $lvl;
+        $amt = 0;
+        foreach ($t['players'] as $p) { $amt += max(0, min($p['total'], $cap) - $prev); }
+        $elig = array_values(array_filter($in, fn($s) => $t['players'][$s]['total'] >= $lvl));
+        if ($amt > 0) { $pots[] = ['amount' => $amt, 'eligible' => $elig, 'winners' => []]; }
+        $prev = $lvl;
+    }
+    return $pots;
+}
+function pk_showdown(array &$t, float $now, array &$ev): void {
+    $t['phase'] = 'showdown';
+    $shows = []; $score = [];
+    foreach ($t['players'] as $s => &$p) {
+        if (!$p['in']) { continue; }
+        $e = pk_eval7([...$p['cards'], ...$t['board']]);
+        $p['show'] = true; $p['hand'] = $e['name']; $score[$s] = $e['score']; $shows[$s] = $p['cards'];
+    }
+    unset($p);
+    foreach ($shows as $s => $c) { pk_log($t, pk_pname($t, $s) . ' shows ' . implode(' ', $c) . ': ' . $t['players'][$s]['hand']); }
+    $ev[] = ['t' => 'showdown', 'shows' => $shows];
+    $pots = pk_side_pots($t);
+    foreach ($pots as &$pot) {
+        $best = max(array_map(fn($s) => $score[$s], $pot['eligible']));
+        $pot['winners'] = array_values(array_filter($pot['eligible'], fn($s) => $score[$s] === $best));
+    }
+    unset($pot);
+    pk_settle($t, $now, $ev, $pots);
+}
+/** Pay the pots, fill winners[], move to 'settle' and freeze the hand record. Odd chips: one each to the first winners clockwise from the button. */
+function pk_settle(array &$t, float $now, array &$ev, array $pots): void {
+    $order = array_flip(pk_deal_order($t['seats'], $t['button'], array_keys($t['players'])));
+    $won = [];
+    foreach ($pots as $i => &$pot) {
+        $w = $pot['winners'];
+        usort($w, fn($a, $b) => $order[$a] <=> $order[$b]);
+        $pot['winners'] = $w;
+        $k = count($w); $share = intdiv($pot['amount'], $k); $odd = $pot['amount'] - $share * $k;
+        foreach ($w as $j => $s) {
+            $amt = $share + ($j < $odd ? 1 : 0);
+            $t['players'][$s]['stack'] += $amt; $t['players'][$s]['allin'] = false; $won[$s] = ($won[$s] ?? 0) + $amt;
+            $ev[] = ['t' => 'win', 'seat' => $s, 'amount' => $amt, 'hand' => $t['players'][$s]['hand'], 'pot' => $i];
+        }
+    }
+    unset($pot);
+    $t['pot'] = 0; $t['pots'] = $pots; $t['winners'] = [];
+    foreach ($won as $s => $amt) {
+        $p = $t['players'][$s];
+        $t['winners'][] = ['seat' => $s, 'amount' => $amt, 'hand' => $p['hand'], 'cards' => $p['show'] ? $p['cards'] : []];
+        pk_log($t, $p['name'] . ' wins ' . coins($amt) . ($p['hand'] ? ' with ' . $p['hand'] : ' (no showdown)'));
+    }
+    $t['phase'] = 'settle'; $t['to_act'] = null; $t['deadline'] = null; $t['bot_at'] = null;
+    $t['next_at'] = $now + PK_SETTLE_SECS + PK_RUNOUT_SECS * $t['runout'];
+    pk_build_record($t, $now);
+}
+function pk_build_record(array &$t, float $now): void {
+    $players = [];
+    foreach ($t['players'] as $s => $p) {
+        if (!$p['dealt']) { continue; }
+        $won = 0;
+        foreach ($t['winners'] as $w) { if ($w['seat'] === $s) { $won = $w['amount']; } }
+        $players[] = ['seat' => $s, 'uid' => $p['uid'], 'name' => $p['name'], 'bot' => $p['bot'], 'start_stack' => $p['sstack'], 'end_stack' => $p['stack'],
+            'net' => $p['stack'] - $p['sstack'], 'cards' => $p['cards'], 'show' => $p['show'], 'hand' => $p['show'] ? $p['hand'] : null, 'won' => $won,
+            'result' => $won > 0 ? 'win' : ($p['in'] ? 'lose' : 'fold')];
+    }
+    $t['hrec'] = ['hand_no' => $t['hand_no'],
+        'table' => ['id' => $t['id'], 'name' => $t['name'], 'seats' => $t['seats'], 'sb' => $t['sb'], 'bb' => $t['bb'], 'min_buy' => $t['min_buy'], 'max_buy' => $t['max_buy']],
+        'deck_hash' => $t['deck_hash'], 'deck_salt' => $t['deck_salt'], 'deck' => $t['deck'], 'button' => $t['button'], 'sb_seat' => $t['sb_seat'], 'bb_seat' => $t['bb_seat'],
+        'board' => $t['board'], 'pot' => array_sum(array_column($t['pots'], 'amount')), 'players' => $players, 'actions' => $t['actions'], 'pots' => $t['pots'],
+        'winners' => $t['winners'], 'started_at' => $t['started_at'], 'ended_at' => $now];
+}
+
+/** null unless it is this seat's turn. Raise amounts are totals to raise TO. */
+function pk_legal(array $t, int $seat): ?array {
+    if (!pk_betting($t) || $t['to_act'] !== $seat || !isset($t['players'][$seat])) { return null; }
+    $p = $t['players'][$seat];
+    if (!$p['in'] || $p['allin']) { return null; }
+    $toCall = $t['cur_bet'] - $p['bet'];
+    $max = $p['bet'] + $p['stack'];
+    $min = $t['cur_bet'] === 0 ? $t['bb'] : $t['cur_bet'] + $t['min_raise'];
+    $others = false;
+    foreach ($t['players'] as $q => $o) { if ($q !== $seat && $o['in'] && !$o['allin']) { $others = true; break; } }
+    // reopened for this player? never acted this street, or the bet grew by a full raise since their last action (TDA 44)
+    $reopen = !$p['acted'] || $t['cur_bet'] - $p['abet'] >= $t['min_raise'];
+    return ['fold' => true, 'check' => $toCall === 0, 'call' => $toCall === 0 ? 0 : min($toCall, $p['stack']),
+        'raise' => $others && $reopen && $max >= $min ? ['min' => $min, 'max' => $max] : null, 'allin' => $max];
+}
+function pk_act(array &$t, int $seat, string $act, int $amt, float $now): array { return pk_do_act($t, $seat, $act, $amt, $now, false); }
+function pk_do_act(array &$t, int $seat, string $act, int $amt, float $now, bool $auto): array {
+    $L = pk_legal($t, $seat);
+    if ($L === null) { throw new DomainException('It is not your turn.'); }
+    $p = &$t['players'][$seat];
+    $put = 0; $opening = $t['cur_bet'] === 0;
+    switch ($act) {
+        case 'fold': $p['in'] = false; break;
+        case 'check': if (!$L['check']) { throw new DomainException('You cannot check: there is a bet to call.'); } break;
+        case 'call': if ($L['call'] <= 0) { throw new DomainException('Nothing to call: check instead.'); } $put = $L['call']; break;
+        case 'raise':
+            if (!$L['raise']) { throw new DomainException('You cannot raise here.'); }
+            if ($amt < $L['raise']['min'] || $amt > $L['raise']['max']) { throw new DomainException('Raise must be between ' . coins($L['raise']['min']) . ' and ' . coins($L['raise']['max']) . '.'); }
+            $put = $amt - $p['bet']; break;
+        case 'allin': $put = $p['stack']; break;
+        default: throw new DomainException('Unknown action.');
+    }
+    $t['clock'] = $now;
+    if ($put > 0) {
+        $p['stack'] -= $put; $p['bet'] += $put; $p['total'] += $put;
+        if ($p['stack'] === 0) { $p['allin'] = true; }
+        if ($p['bet'] > $t['cur_bet']) {
+            $inc = $p['bet'] - $t['cur_bet'];
+            if ($inc >= $t['min_raise']) { $t['min_raise'] = $inc; }   // a full bet/raise sets the new minimum; a short all-in leaves it
+            $t['cur_bet'] = $p['bet']; $t['last_aggressor'] = $seat;
+        }
+    }
+    $p['acted'] = true; $p['abet'] = $p['bet']; $p['last'] = $act;
+    if (!$auto) { $p['timeouts'] = 0; }
+    $bet = $p['bet']; $name = $p['name']; $allin = $p['allin'];
+    unset($p);
+    $t['seq']++;
+    $rec = ['street' => $t['phase'], 'seat' => $seat, 'act' => $act, 'amt' => $put > 0 ? $bet : 0, 'put' => $put, 'at' => $now];
+    if ($auto) { $rec['auto'] = true; }
+    $t['actions'][] = $rec;
+    $ev = [['t' => 'action', 'seat' => $seat, 'act' => $act, 'amt' => $rec['amt'], 'put' => $put, 'seq' => $t['seq']]];
+    pk_log($t, $name . ' ' . match ($act) { 'fold' => 'folds', 'check' => 'checks', 'call' => 'calls ' . coins($put), 'raise' => ($opening ? 'bets ' : 'raises to ') . coins($bet), 'allin' => 'is all-in for ' . coins($bet) }
+        . ($allin && $act !== 'allin' ? ' (all-in)' : '') . ($auto ? ' (auto)' : ''));
+    pk_continue($t, $seat, $now, $ev);
+    return $ev;
+}
+/** Fold a live player who is leaving, in turn or out of turn (events queued for the next tick). No-op once the hand is decided. */
+function pk_fold_out(array &$t, int $seat): void {
+    if (!pk_betting($t) || !$t['players'][$seat]['in']) { return; }   // nothing to fold outside a betting round: settle must never gain an action
+    $now = $t['clock'];
+    if ($t['to_act'] === $seat) { array_push($t['events'], ...pk_do_act($t, $seat, 'fold', 0, $now, true)); return; }
+    $t['players'][$seat]['in'] = false; $t['players'][$seat]['last'] = 'fold';
+    $t['seq']++;
+    $t['actions'][] = ['street' => $t['phase'], 'seat' => $seat, 'act' => 'fold', 'amt' => 0, 'put' => 0, 'at' => $now, 'auto' => true];
+    $t['events'][] = ['t' => 'action', 'seat' => $seat, 'act' => 'fold', 'amt' => 0, 'put' => 0, 'seq' => $t['seq']];
+    pk_log($t, pk_pname($t, $seat) . ' folds (leaving)');
+    // the fold may end the street: the player to act may only have held the option because this one could still respond
+    if ($t['to_act'] !== null && !pk_needs_act($t, $t['to_act'])) { $ev = []; pk_continue($t, $t['to_act'], $now, $ev); array_push($t['events'], ...$ev); }
+}
+
+/* ── clock: timeouts, hand end, tick ── */
+
+function pk_timeout(array &$t, int $s, float $now): array {
+    $L = pk_legal($t, $s);
+    $ev = [['t' => 'timeout', 'seat' => $s]];
+    $p = &$t['players'][$s];
+    $p['timeouts']++;
+    $sitout = !$p['bot'] && !$p['sitout'] && $p['timeouts'] >= 2;   // two clocks in a row and you're sitting out (still folded out of this hand)
+    if ($sitout) { $p['sitout'] = true; }
+    $name = $p['name'];
+    unset($p);
+    pk_log($t, $name . ' ran out of time');
+    if ($sitout) { $ev[] = ['t' => 'sitout', 'seat' => $s, 'on' => true]; pk_log($t, $name . ' is sitting out'); }
+    array_push($ev, ...pk_do_act($t, $s, $L['check'] ? 'check' : 'fold', 0, $now, true));
+    return $ev;
+}
+/** settle → idle: reveal the deck, pay leavers, drop busted players (bots stay seated with 0 for ws.php to rebuy). */
+function pk_hand_end(array &$t, float $now): array {
+    $e = ['t' => 'hand_end', 'deck_salt' => $t['deck_salt'], 'deck' => $t['deck'], 'leavers' => [], 'busted' => []];
+    foreach ($t['players'] as $s => $p) {
+        if ($p['leaving']) { $e['leavers'][$s] = $p['stack']; unset($t['players'][$s]); pk_log($t, $p['name'] . ' leaves the table'); continue; }
+        if ($p['stack'] === 0) {
+            $e['busted'][$s] = ['uid' => $p['uid'], 'bot' => $p['bot']];
+            pk_log($t, $p['name'] . ' is busted');
+            if (!$p['bot']) { unset($t['players'][$s]); }
+        }
+    }
+    foreach ($t['players'] as &$p) { $p = array_replace($p, ['in' => false, 'dealt' => false, 'cards' => [], 'bet' => 0, 'total' => 0, 'allin' => false, 'acted' => false, 'abet' => 0]); }
+    unset($p);
+    $t['phase'] = 'idle'; $t['next_at'] = null; $t['to_act'] = null; $t['deadline'] = null; $t['bot_at'] = null; $t['clock'] = $now;
+    return [$e];
+}
+/** One loop tick. At most one player decision per call so the room keeps its pace; a hand never ends and restarts in the same tick. */
+function pk_tick(array &$t, float $now): array {
+    $t['clock'] = $now;
+    $ev = $t['events']; $t['events'] = [];
+    for ($guard = 0; $guard < 8; $guard++) {
+        $n = count($ev);
+        if (pk_betting($t)) {
+            $s = $t['to_act'];
+            if ($s === null) { break; }
+            if ($t['players'][$s]['bot'] && $t['bot_at'] !== null && $now >= $t['bot_at']) {
+                $a = pk_bot_act($t, $s);
+                array_push($ev, ...pk_act($t, $s, $a['act'], (int)($a['amt'] ?? 0), $now));
+            } elseif ($now >= $t['deadline']) {
+                array_push($ev, ...pk_timeout($t, $s, $now));
+            }
+        } elseif ($t['phase'] === 'settle') {
+            if ($now >= $t['next_at']) { array_push($ev, ...pk_hand_end($t, $now)); break; }   // next hand starts on the next tick: ws.php persists, pays leavers, rebuys bots first
+        } elseif ($t['phase'] === 'idle') {
+            if (pk_ready($t, $now)) { array_push($ev, ...pk_start_hand($t, $now)); }
+        }
+        if (count($ev) === $n) { break; }
+    }
+    return $ev;
+}
+
+/* ── what a viewer may see ── */
+
+function pk_view(array $t, ?string $uid): array {
+    $me = null;
+    if ($uid !== null) { foreach ($t['players'] as $s => $p) { if ($p['uid'] === $uid) { $me = $s; break; } } }
+    $players = []; $potTotal = $t['pot'];
+    foreach ($t['players'] as $s => $p) {
+        $vis = $s === $me || $p['show'];
+        $players[$s] = ['uid' => $p['uid'], 'name' => $p['name'], 'bot' => $p['bot'], 'stack' => $p['stack'], 'bet' => $p['bet'], 'total' => $p['total'],
+            'in' => $p['in'], 'allin' => $p['allin'], 'sitout' => $p['sitout'], 'away' => $p['away'], 'leaving' => $p['leaving'], 'show' => $p['show'],
+            'owes' => $p['owes'], 'post' => $p['post'],
+            'last' => $p['last'], 'cards' => $vis ? $p['cards'] : count($p['cards']), 'hand' => $p['show'] ? $p['hand'] : null];
+        $potTotal += $p['bet'];
+    }
+    $winners = [];
+    foreach ($t['winners'] as $w) { $w['cards'] = ($t['players'][$w['seat']]['show'] ?? false) ? $w['cards'] : []; $winners[] = $w; }
+    $now = $t['clock'];
+    return ['id' => $t['id'], 'name' => $t['name'], 'seats' => $t['seats'], 'sb' => $t['sb'], 'bb' => $t['bb'], 'min_buy' => $t['min_buy'], 'max_buy' => $t['max_buy'],
+        'act_secs' => $t['act_secs'], 'hand_no' => $t['hand_no'], 'phase' => $t['phase'], 'button' => $t['button'], 'sb_seat' => $t['sb_seat'], 'bb_seat' => $t['bb_seat'],
+        'board' => $t['board'], 'pot' => $t['pot'], 'pot_total' => $potTotal, 'pots' => $t['pots'], 'cur_bet' => $t['cur_bet'], 'min_raise' => $t['min_raise'],
+        'to_act' => $t['to_act'], 'ms_left' => $t['deadline'] === null ? null : max(0, (int)round(($t['deadline'] - $now) * 1000)),
+        'next_ms' => $t['next_at'] === null ? null : max(0, (int)round(($t['next_at'] - $now) * 1000)),
+        'seq' => $t['seq'], 'deck_hash' => $t['deck_hash'], 'winners' => $winners, 'log' => array_slice($t['log'], -PK_LOG_LINES), 'players' => $players,
+        'me' => $me, 'legal' => $me !== null && $t['to_act'] === $me ? pk_legal($t, $me) : null];
+}
+
+/* ── house players (bots): rule-based, always legal ── */
+
+/** Preflop hand class: 3 premium, 2 strong, 1 speculative, 0 trash. */
+function pk_bot_class(array $cards): int {
+    $a = pk_rank($cards[0]); $b = pk_rank($cards[1]);
+    $hi = max($a, $b); $lo = min($a, $b); $suited = pk_suit($cards[0]) === pk_suit($cards[1]); $pair = $a === $b; $gap = $hi - $lo;
+    if ($pair && $hi >= 11) { return 3; }                                    // JJ+
+    if ($hi === 14 && $lo === 13) { return 3; }                              // AK
+    if ($pair && $hi >= 8) { return 2; }                                     // 88–TT
+    if ($hi === 14 && $lo >= 12) { return 2; }                               // AQ
+    if ($hi === 14 && $lo >= 10 && $suited) { return 2; }                    // ATs, AJs
+    if ($hi === 13 && $lo >= 11 && $suited) { return 2; }                    // KJs, KQs
+    if ($hi === 14 && $lo === 11) { return 2; }                              // AJo
+    if ($hi === 13 && $lo === 12) { return 2; }                              // KQo
+    if ($pair) { return 1; }                                                 // 22–77
+    if ($hi === 14 && $suited) { return 1; }                                 // suited aces
+    if ($suited && $lo >= 10) { return 1; }                                  // suited broadways
+    if ($suited && $gap <= 2 && $lo >= 4) { return 1; }                      // suited connectors / one- and two-gappers, 54s and up
+    if ($lo >= 10) { return 1; }                                             // ATo, KJo, KTo, QJo, QTo, JTo
+    return 0;
+}
+/** Made-hand class 0..5 (nothing, weak pair, middle pair, top pair/overpair, two pair or trips, straight+) and draws on the current board. */
+function pk_bot_strength(array $hole, array $board): array {
+    $all = [...$hole, ...$board];
+    $bRanks = array_map('pk_rank', $board); rsort($bRanks);
+    $h = [pk_rank($hole[0]), pk_rank($hole[1])];
+    $class = 0; $rank = 0;
+    if (count($all) >= 5) {
+        $e = pk_eval7($all); $rank = $e['rank'];
+        $uses = count(array_intersect($e['best'], $hole)) > 0;
+        if (!$uses) { $class = 0; }
+        elseif ($rank >= 4) { $class = 5; }
+        elseif ($rank >= 2) { $class = 4; }
+        elseif ($rank === 1) {
+            $pr = pk_rank($e['best'][0]);
+            $class = $pr >= $bRanks[0] ? 3 : ($pr >= $bRanks[intdiv(count($bRanks), 2)] ? 2 : 1);
+        }
+    } else {
+        // flop-less board can't happen postflop; kept for completeness
+        $class = 0;
+    }
+    // draws: four to a flush holding at least one of the suit; open-ended (four in a row, both ends open) or gutshot
+    $fd = false; $suits = [];
+    foreach ($all as $c) { $suits[pk_suit($c)] = ($suits[pk_suit($c)] ?? 0) + 1; }
+    foreach ($suits as $s => $n) { if ($n === 4 && ($s === pk_suit($hole[0]) || $s === pk_suit($hole[1]))) { $fd = true; } }
+    $have = []; foreach ($all as $c) { $have[pk_rank($c)] = true; } if (isset($have[14])) { $have[1] = true; }
+    $oesd = false; $gut = false;
+    if ($rank < 4) {
+        for ($lo = 2; $lo <= 10; $lo++) {   // four in a row from $lo, open on both ends (needs a card below and above to exist)
+            if (isset($have[$lo], $have[$lo + 1], $have[$lo + 2], $have[$lo + 3]) && ($h[0] >= $lo && $h[0] <= $lo + 3 || $h[1] >= $lo && $h[1] <= $lo + 3)) { $oesd = true; }
+        }
+        for ($lo = 1; $lo <= 10; $lo++) {   // any five-window with exactly four present
+            $n = 0; for ($r = $lo; $r < $lo + 5; $r++) { $n += isset($have[$r]) ? 1 : 0; }
+            if ($n === 4) { $gut = true; }
+        }
+    }
+    $over = 0; foreach ($h as $r) { if ($bRanks && $r > $bRanks[0]) { $over++; } }
+    return ['class' => $class, 'rank' => $rank, 'fd' => $fd, 'oesd' => $oesd, 'gut' => $gut && !$oesd, 'over' => $over];
+}
+/** Round a bet total down to a chip-friendly multiple of the small blind (never below $min). */
+function pk_bot_size(array $t, float $to, int $min): int {
+    $sb = $t['sb'];
+    $v = (int)(floor($to / $sb) * $sb);
+    return max($min, $v);
+}
+/** Force an intention into something pk_legal() accepts. */
+function pk_bot_clamp(array $L, array $p, string $act, int $amt): array {
+    if ($act === 'raise') {
+        if ($L['raise']) {
+            $amt = max($L['raise']['min'], min($L['raise']['max'], $amt));
+            if ($amt >= 0.6 * $L['allin']) { return ['act' => 'allin', 'amt' => 0]; }   // most of the stack: just shove
+            return ['act' => 'raise', 'amt' => $amt];
+        }
+        return $L['call'] > 0 && $L['call'] < $p['stack'] && $amt < $L['allin'] ? ['act' => 'call', 'amt' => 0] : ['act' => 'allin', 'amt' => 0];
+    }
+    if ($act === 'call') { return $L['call'] > 0 ? ['act' => 'call', 'amt' => 0] : ['act' => 'check', 'amt' => 0]; }
+    if ($act === 'check') { return $L['check'] ? ['act' => 'check', 'amt' => 0] : ['act' => 'fold', 'amt' => 0]; }
+    if ($act === 'fold') { return $L['check'] ? ['act' => 'check', 'amt' => 0] : ['act' => 'fold', 'amt' => 0]; }
+    return ['act' => 'allin', 'amt' => 0];
+}
+function pk_bot_act(array $t, int $seat): array {
+    $L = pk_legal($t, $seat);
+    if ($L === null) { throw new DomainException('Not this seat\'s turn.'); }
+    $p = $t['players'][$seat]; $bb = $t['bb'];
+    $pot = $t['pot']; foreach ($t['players'] as $o) { $pot += $o['bet']; }
+    $toCall = $L['call']; $stackBB = ($p['stack'] + $p['bet']) / $bb; $short = $stackBB < 10;
+    $roll = random_int(1, 100);
+    $late = $seat === $t['button'] || ($t['button'] !== null && $seat === pk_prev_dealt($t, $t['button']));
+    $blind = $seat === $t['sb_seat'] || $seat === $t['bb_seat'];
+    if ($t['phase'] === 'preflop') {
+        $class = pk_bot_class($p['cards']);
+        $raises = 0; $limpers = 0;
+        foreach ($t['actions'] as $a) { if ($a['street'] === 'preflop' && in_array($a['act'], ['raise', 'allin'], true) && $a['amt'] > $bb) { $raises++; } if ($a['act'] === 'call' && $a['amt'] === $bb) { $limpers++; } }
+        $facing = $t['cur_bet'] > $bb;
+        if ($short) {
+            if ($class >= 2 || ($class === 1 && (!$facing || $roll <= 40))) { return pk_bot_clamp($L, $p, 'allin', 0); }
+            if (!$facing && $L['check']) { return pk_bot_clamp($L, $p, 'check', 0); }
+            if ($facing && $class === 1 && $toCall <= $p['stack'] * 0.25) { return pk_bot_clamp($L, $p, 'call', 0); }
+            return pk_bot_clamp($L, $p, 'fold', 0);
+        }
+        if (!$facing) {   // nobody has raised: open, limp behind or check the option
+            $open = pk_bot_size($t, (2.5 + ($roll % 3) * 0.25 + $limpers) * $bb, $t['cur_bet'] + $t['min_raise']);
+            if ($class === 3) { return pk_bot_clamp($L, $p, 'raise', $open); }
+            if ($class === 2) { return pk_bot_clamp($L, $p, $roll <= 85 ? 'raise' : 'call', $open); }
+            if ($class === 1) {
+                if ($late || $blind) { return pk_bot_clamp($L, $p, $roll <= 55 ? 'raise' : 'call', $open); }
+                return pk_bot_clamp($L, $p, $roll <= 35 ? 'raise' : ($roll <= 70 ? 'call' : 'fold'), $open);
+            }
+            if ($L['check']) { return pk_bot_clamp($L, $p, 'check', 0); }
+            if ($late && $roll <= 8) { return pk_bot_clamp($L, $p, 'raise', $open); }   // the occasional steal
+            if ($blind && $toCall <= $bb / 2 && $roll <= 25) { return pk_bot_clamp($L, $p, 'call', 0); }
+            return pk_bot_clamp($L, $p, 'fold', 0);
+        }
+        $reraise = pk_bot_size($t, $t['cur_bet'] * 3, $t['cur_bet'] + $t['min_raise']);
+        if ($class === 3) {
+            if ($raises >= 3 || $t['cur_bet'] >= 0.3 * $L['allin']) { return pk_bot_clamp($L, $p, 'allin', 0); }
+            return pk_bot_clamp($L, $p, $roll <= 75 ? 'raise' : 'call', $reraise);
+        }
+        if ($class === 2) {
+            if ($raises >= 2) { return pk_bot_clamp($L, $p, $toCall <= 0.15 * $p['stack'] ? 'call' : 'fold', 0); }
+            if ($t['cur_bet'] <= 5 * $bb) { return pk_bot_clamp($L, $p, $roll <= 25 ? 'raise' : 'call', $reraise); }
+            return pk_bot_clamp($L, $p, $toCall <= 0.12 * $p['stack'] ? 'call' : 'fold', 0);
+        }
+        if ($class === 1) { return pk_bot_clamp($L, $p, $raises === 1 && $toCall <= 4 * $bb && $toCall <= 0.08 * $p['stack'] ? 'call' : 'fold', 0); }
+        if ($late && $raises === 1 && $roll <= 4) { return pk_bot_clamp($L, $p, 'raise', $reraise); }   // light 3-bet bluff
+        return pk_bot_clamp($L, $p, 'fold', 0);
+    }
+    // postflop
+    $s = pk_bot_strength($p['cards'], $t['board']);
+    $class = $s['class'];
+    $streetsLeft = $t['phase'] === 'flop' ? 2 : ($t['phase'] === 'turn' ? 1 : 0);
+    $drawEq = $streetsLeft === 0 ? 0.0 : (($s['fd'] ? ($streetsLeft === 2 ? 0.35 : 0.19) : 0.0) + ($s['oesd'] ? ($streetsLeft === 2 ? 0.31 : 0.17) : ($s['gut'] ? ($streetsLeft === 2 ? 0.16 : 0.09) : 0.0)));
+    $drawEq = min(0.55, $drawEq);
+    if ($t['cur_bet'] === 0) {
+        $bet = fn(float $f) => pk_bot_size($t, $pot * $f, $bb);
+        if ($short && $class >= 3) { return pk_bot_clamp($L, $p, 'allin', 0); }
+        if ($class >= 4) { return pk_bot_clamp($L, $p, $roll <= 80 ? 'raise' : 'check', $bet(0.66)); }   // slow-play 20%
+        if ($class === 3) { return pk_bot_clamp($L, $p, $roll <= 70 ? 'raise' : 'check', $bet(0.6)); }
+        if ($class === 2) { return pk_bot_clamp($L, $p, $roll <= 40 ? 'raise' : 'check', $bet(0.5)); }
+        if ($drawEq >= 0.16 && $roll <= 45) { return pk_bot_clamp($L, $p, 'raise', $bet(0.6)); }        // semi-bluff
+        if ($t['last_aggressor'] === $seat && $roll <= 60) { return pk_bot_clamp($L, $p, 'raise', $bet(0.55)); }   // continuation bet
+        if ($roll <= 8) { return pk_bot_clamp($L, $p, 'raise', $bet(0.6)); }                                // pure bluff
+        return pk_bot_clamp($L, $p, 'check', 0);
+    }
+    $odds = $toCall / max(1, $pot + $toCall);
+    $raise = pk_bot_size($t, max($t['cur_bet'] * 3, $t['cur_bet'] + $pot), $t['cur_bet'] + $t['min_raise']);
+    if ($class >= 5) { return pk_bot_clamp($L, $p, $short || $roll <= 75 ? ($short ? 'allin' : 'raise') : 'call', $raise); }
+    if ($class === 4) { return pk_bot_clamp($L, $p, $short ? 'allin' : ($roll <= 50 ? 'raise' : 'call'), $raise); }
+    if ($class === 3) {
+        if ($short && $odds <= 0.45) { return pk_bot_clamp($L, $p, 'allin', 0); }
+        if ($odds <= 0.35) { return pk_bot_clamp($L, $p, $roll <= 25 ? 'raise' : 'call', $raise); }
+        return pk_bot_clamp($L, $p, $odds <= 0.45 && $roll <= 70 ? 'call' : 'fold', 0);
+    }
+    if ($drawEq > 0 && $odds < $drawEq * 1.1) { return pk_bot_clamp($L, $p, $roll <= 10 ? 'raise' : 'call', $raise); }
+    if ($class === 2) { return pk_bot_clamp($L, $p, $odds <= 0.25 ? 'call' : 'fold', 0); }
+    if ($class === 1) { return pk_bot_clamp($L, $p, $odds <= 0.15 ? 'call' : 'fold', 0); }
+    if ($roll <= 5 && $streetsLeft > 0) { return pk_bot_clamp($L, $p, 'raise', $raise); }   // bluff-raise
+    return pk_bot_clamp($L, $p, 'fold', 0);
+}
+/** The dealt-in seat counter-clockwise from $from (the cutoff when $from is the button). */
+function pk_prev_dealt(array $t, int $from): ?int {
+    for ($i = 1; $i < $t['seats']; $i++) { $s = ($from - $i + $t['seats']) % $t['seats']; if (!empty($t['players'][$s]['dealt'])) { return $s; } }
+    return null;
+}
+
+/* ── hand records and the public verifier ── */
+
+/** The frozen record of the last finished hand (built at settle; available until the next hand starts). */
+function pk_hand_record(array $t): array { return $t['hrec'] ?? throw new DomainException('No finished hand to record.'); }
+/** Shape check for a hand record before the verifier trusts any field in it: a record can come from anywhere (a pasted hand history), so
+ *  every value the verifier indexes or loops on is bounded here. seats 2..9 (as pk_new_table), button in range, a deck of 52 distinct card
+ *  strings, string salt and hash, at most `seats` players with distinct in-range integer seats and two card strings each, a 0/3/4/5 card board. */
+function pk_record_shape_ok(array $rec): bool {
+    $isCard = array_flip(pk_deck());
+    $cards = function ($x, int $n) use ($isCard): bool {
+        if (!is_array($x) || count($x) !== $n) { return false; }
+        foreach ($x as $c) { if (!is_string($c) || !isset($isCard[$c])) { return false; } }
+        return true;
+    };
+    $seats = $rec['table']['seats'] ?? null; $button = $rec['button'] ?? null;
+    if (!is_array($rec['table'] ?? null) || !is_int($seats) || $seats < 2 || $seats > 9 || !is_int($button) || $button < 0 || $button >= $seats) { return false; }
+    if (!is_string($rec['deck_salt'] ?? null) || !is_string($rec['deck_hash'] ?? null)) { return false; }
+    if (!$cards($rec['deck'] ?? null, 52) || count(array_unique($rec['deck'])) !== 52) { return false; }
+    if (!is_array($rec['players'] ?? null) || count($rec['players']) > $seats) { return false; }
+    $seen = [];
+    foreach ($rec['players'] as $p) {
+        $s = is_array($p) ? ($p['seat'] ?? null) : null;
+        if (!is_int($s) || $s < 0 || $s >= $seats || isset($seen[$s]) || !$cards($p['cards'] ?? null, 2)) { return false; }
+        $seen[$s] = true;
+    }
+    $board = $rec['board'] ?? null;
+    return is_array($board) && in_array(count($board), [0, 3, 4, 5], true) && $cards($board, count($board));
+}
+/** Recompute the deck commitment and check every hole card and board card against the deal order. A malformed record fails both checks. */
+function pk_verify_record(array $rec): array {
+    if (!pk_record_shape_ok($rec)) { return ['hash_ok' => false, 'deal_ok' => false]; }
+    $deck = array_values($rec['deck']);
+    $hashOk = hash_equals(hash('sha256', implode(' ', $deck) . '|' . $rec['deck_salt']), $rec['deck_hash']);
+    $dealt = [];
+    foreach ($rec['players'] as $p) { $dealt[$p['seat']] = array_values($p['cards']); }
+    $seats = $rec['table']['seats']; $button = $rec['button'];
+    $dealOk = count($dealt) >= 2;
+    if ($dealOk) {
+        $order = pk_deal_order($seats, $button, array_keys($dealt)); $n = count($order);   // n ≤ 9, so 2n + 7 ≤ 25 < 52: every index below exists
+        foreach ($order as $i => $s) { if ($dealt[$s][0] !== $deck[$i] || $dealt[$s][1] !== $deck[$n + $i]) { $dealOk = false; } }
+        $b = 2 * $n;   // burn, flop, burn, turn, burn, river
+        $expect = [$deck[$b + 1], $deck[$b + 2], $deck[$b + 3], $deck[$b + 5], $deck[$b + 7]];
+        $board = array_values($rec['board']);
+        if ($board !== array_slice($expect, 0, count($board))) { $dealOk = false; }
+    }
+    return ['hash_ok' => $hashOk, 'deal_ok' => $dealOk];
+}
+
+/** Debug helper for the test-suite: throws RuntimeException naming the first broken invariant. */
+function pk_assert_invariants(array $t): void {
+    $fail = fn(string $m) => throw new RuntimeException('poker invariant: ' . $m);
+    if (!in_array($t['phase'], PK_PHASES, true)) { $fail('bad phase ' . $t['phase']); }
+    if ($t['pot'] < 0) { $fail('negative pot'); }
+    $live = $t['phase'] !== 'idle';
+    $sum = $t['pot']; $seen = [];
+    foreach ($t['players'] as $s => $p) {
+        if ($p['stack'] < 0 || $p['bet'] < 0 || $p['total'] < $p['bet']) { $fail("seat $s chips: stack {$p['stack']} bet {$p['bet']} total {$p['total']}"); }
+        if (!in_array(count($p['cards']), [0, 2], true)) { $fail("seat $s holds " . count($p['cards']) . ' cards'); }
+        if ($p['bet'] > $t['cur_bet'] && pk_betting($t)) { $fail("seat $s bet above cur_bet"); }
+        if ($p['allin'] && $p['stack'] !== 0) { $fail("seat $s all-in with chips"); }
+        if ($p['in'] && !$p['dealt']) { $fail("seat $s in the hand without being dealt"); }
+        if ($p['dealt'] && $p['owes']) { $fail("seat $s dealt in while owing a blind"); }
+        foreach ($p['cards'] as $c) { if (isset($seen[$c])) { $fail("card $c dealt twice"); } $seen[$c] = true; }
+        if ($p['dealt']) { $sum += $p['stack'] + $p['bet']; }
+    }
+    foreach ($t['board'] as $c) { if (isset($seen[$c])) { $fail("board card $c also in a hand"); } $seen[$c] = true; }
+    if ($live && $sum !== $t['hand_chips']) { $fail("chips: $sum at the table, {$t['hand_chips']} dealt in"); }
+    $boardLen = ['preflop' => 0, 'flop' => 3, 'turn' => 4, 'river' => 5, 'showdown' => 5][$t['phase']] ?? null;
+    if ($boardLen !== null && count($t['board']) !== $boardLen) { $fail('board has ' . count($t['board']) . ' cards on the ' . $t['phase']); }
+    if (pk_betting($t)) {
+        if ($t['to_act'] === null) { $fail('betting phase with nobody to act'); }
+        if (!pk_needs_act($t, $t['to_act'])) { $fail('to_act seat owes no decision'); }
+        if (pk_legal($t, $t['to_act']) === null) { $fail('to_act has no legal actions'); }
+        if ($t['deadline'] === null) { $fail('no deadline'); }
+    } elseif ($t['to_act'] !== null) { $fail('to_act set outside betting'); }
+    if ($t['phase'] === 'settle') {
+        if (array_sum(array_column($t['pots'], 'amount')) !== array_sum(array_column($t['winners'], 'amount'))) { $fail('pots and winners disagree'); }
+        if ($t['pot'] !== 0) { $fail('pot left after settle'); }
+    }
+    if ($live && count(array_unique($t['deck'])) !== 52) { $fail('deck is not 52 distinct cards'); }
+}
 // [[/REGION poker-engine]]
 
 /* ═════════════════════════ FREE COINS ═════════════════════════ */
