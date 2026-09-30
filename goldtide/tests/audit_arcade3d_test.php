@@ -9,7 +9,8 @@
  * One or more checks per audit finding: craps buy vig (5% of the buy, on the win) and the per-number edges, craps chip
  * increments and exact place / odds / lay payouts at every legal amount, integer multiplier payouts (pay_mult), crash
  * ties (inclusive for manual and auto), dice over/under boundary, keno 94–96% per pick count, Pearl Drop RTP claim and
- * per-drop cap, pre-committed next server seed, the Reef Mines 5,000× cap, and settling a live crash wave on a break.
+ * per-drop cap (plus an exhaustive RTP sweep over every stake), pre-committed next server seed, the Reef Mines 5,000× cap,
+ * settling a live crash wave on a break, and the verifier's follow-up: hi-lo and video-slot payouts in integer math.
  */
 declare(strict_types=1);
 error_reporting(E_ALL);
@@ -18,9 +19,9 @@ $SRC = dirname(__DIR__) . '/index.php';
 $DIR = sys_get_temp_dir() . '/gt_audit_arcade3d_' . getmypid();
 @mkdir($DIR, 0700, true);
 copy($SRC, "$DIR/index.php") || exit("cannot copy index.php to $DIR\n");
-register_shutdown_function(function () use ($DIR) {
-    foreach (glob("$DIR/data/*") ?: [] as $f) { @unlink($f); } @rmdir("$DIR/data");
-    foreach (glob("$DIR/*") ?: [] as $f) { @unlink($f); } @rmdir($DIR);
+register_shutdown_function(function () use ($DIR) {   // scandir, not glob: data/ holds a .htaccess that glob('*') skips
+    $wipe = function (string $d) { foreach (array_diff(scandir($d) ?: [], ['.', '..']) as $f) { @unlink("$d/$f"); } @rmdir($d); };
+    if (is_dir("$DIR/data")) { $wipe("$DIR/data"); } $wipe($DIR);
 });
 // child runner: php child.php <pid> <function> <json POST>  → the JSON the action printed, or the return value / flash
 file_put_contents("$DIR/child.php", <<<'PHP'
@@ -28,7 +29,7 @@ file_put_contents("$DIR/child.php", <<<'PHP'
 define('GT_NO_ROUTE', 1); require __DIR__ . '/index.php';
 [, $pid, $fn, $post] = $argv;
 $_SESSION['pid'] = (int)$pid; $_SERVER['HTTP_X_REQUESTED_WITH'] = 'fetch';
-$_POST = json_decode($post, true) ?: []; $_POST['csrf'] = csrf_token();
+$_POST = json_decode($post, true) ?: []; $_GET = $_POST['_get'] ?? []; unset($_POST['_get']); $_POST['csrf'] = csrf_token();
 ob_start();
 register_shutdown_function(function () { $o = ob_get_clean(); echo $o !== '' ? $o : json_encode(['ok' => true, 'data' => null, 'flash' => $_SESSION['flash'] ?? []]); });
 echo json_encode(['ok' => true, 'data' => $fn()]);
@@ -136,6 +137,19 @@ check(round(min($exactR), 1) >= 98.5 && round(max($exactR), 1) <= 98.9, 'Pearl D
 check(max(array_map(fn($a, $b) => abs($a - $b), $exactR, $bet100R)) < 1e-9, 'Pearl Drop pays the exact RTP at 100 GC per pearl');
 check(round(min($minR), 1) >= 97.5 && round(max($minR), 1) <= 99.4, 'Pearl Drop RTP at the 10 GC minimum is the claimed 97.5–99.4% (to 0.1) (' . sprintf('%.2f–%.2f', min($minR), max($minR)) . ')');
 check(str_contains(implode(' ', GAME_RULES['plinko']), '97.5–99.4%') && str_contains(implode(' ', GAME_RULES['plinko']), '98.5–98.9%'), 'Pearl Drop rules text carries both RTP figures');
+// exhaustive: every stake 10..5000 GC per pearl, all 15 tables (the swing comes from odd stakes under 100 GC, e.g. 12 GC)
+$all = [1e9, 0]; $from100 = [1e9, 0];
+foreach (PD_TABLES as $R => $risks) { foreach ($risks as $risk => $tab) {
+    $P = $R * ($R + 1) / 2; $cells = [];
+    foreach ($tab as $slot => $m0) { $ps = choose($R, $slot) / 2 ** $R; for ($h = 0; $h <= 3; $h++) { $cells[] = [$ps * choose($R, $h) * choose($P - $R, 3 - $h) / choose($P, 3), round($m0 * 2 ** $h, 2)]; } }
+    for ($b = 10; $b <= 5000; $b++) {
+        $r = 0.0; foreach ($cells as [$pr, $m]) { $r += $pr * pay_mult($b, $m); } $r = $r / $b * 100;
+        $all = [min($all[0], $r), max($all[1], $r)]; if ($b >= 100) { $from100 = [min($from100[0], $r), max($from100[1], $r)]; }
+    }
+} }
+check(round($all[0], 1) >= 96.8 && round($all[1], 1) <= 100.3 && round($from100[0], 1) >= 98.3 && round($from100[1], 1) <= 99.1, sprintf('Pearl Drop RTP over every stake 10–5,000 GC is the stated 96.8–100.3%% (%.2f–%.2f) and 98.3–99.1%% from 100 GC up (%.2f–%.2f)', $all[0], $all[1], $from100[0], $from100[1]));
+$pr = implode(' ', GAME_RULES['plinko']);
+check(str_contains($pr, '96.8–100.3%') && str_contains($pr, '98.3–99.1%') && str_contains($pr, 'every stake from 10 to 5,000 GC'), 'Pearl Drop rules text quotes the exhaustive range, not just the 10 GC and 100-GC-multiple figures');
 $g = game_cfg('plinko'); $cap = (int)$g['max_bet'] * 10;
 $d = child($P1, 'plinko_play', ['bet' => (int)$g['max_bet'], 'balls' => 20, 'rows' => 8, 'risk' => 'med']);
 check(!($d['ok'] ?? true) && str_contains((string)($d['error'] ?? ''), 'Drop limit'), 'a drop wagering max_bet × 20 is refused: ' . ($d['error'] ?? ''));
@@ -164,6 +178,25 @@ $bal0 = bal($P2); $last = null;
 for ($t = 0; $t < 13; $t++) { $last = child($P2, 'mines_act', ['move' => 'reveal', 'tile' => $t]); if (!($last['ok'] ?? false) || $last['data']['payout'] > 0 || $last['data']['boom']) { break; } }
 check(($last['ok'] ?? false) && $t + 1 === $kcap && $last['data']['payout'] === 5000 * 100 && bal($P2) === $bal0 + 500000, "mines auto-cashes at pearl $kcap when the ladder reaches 5,000× and pays 5,000 × bet: " . ($last['data']['message'] ?? $last['error'] ?? ''));
 check(str_contains(implode(' ', GAME_RULES['mines']), '5,000×'), 'mines rules text states the cap');
+
+/* ── Verifier follow-up: hi-lo and the video-slot engine pay bet × multiplier in integer math too ── */
+check(floor(100 * 1.15) === 114.0 && pay_mult(100, 1.15, 4) === 115, 'premise: floor(100 * 1.15) on doubles is 114, pay_mult pays 115');
+$r = tx(fn() => round_open($P2, 'hilo', 100, ['card' => ['r' => 7, 's' => 'H'], 'mult' => 1.15, 'steps' => 1, 'trail' => []]));
+$d = child($P2, 'hilo_act', ['move' => 'cashout']);
+check(($d['ok'] ?? false) && $d['data']['payout'] === 115 && str_contains($d['data']['message'], '+115 GC'), 'hilo cash-out at 1.15× on 100 GC pays 115, not floor()\'s 114: ' . ($d['data']['message'] ?? $d['error'] ?? ''));
+$r = tx(fn() => round_open($P2, 'hilo', 100, ['card' => ['r' => 7, 's' => 'H'], 'mult' => 4999.9999, 'steps' => 9, 'trail' => []]));
+$d = child($P2, 'hilo_act', ['move' => 'cashout']);
+check(($d['ok'] ?? false) && $d['data']['payout'] === 500000, 'hilo pays 4,999.9999× on 100 GC as 500,000 (nearest coin, 4-dp multiplier)');
+$slug = array_key_first(VSLOTS); $bad = []; $paid = 0; $bal0 = bal($P2);
+for ($i = 0; $i < 60; $i++) {
+    $d = child($P2, 'vs_play', ['bet' => 100, '_get' => ['g' => $slug]]);
+    if (!($d['ok'] ?? false)) { $bad[] = $d['error'] ?? '?'; break; }
+    $x = $d['data']; $paid += $x['payout'];
+    if ($x['payout'] !== pay_mult(100, (float)$x['x']) || $x['base_win'] !== pay_mult(100, array_sum(array_column($x['wins'], 'x')) + (VS_SCATTER_PAY[min(5, count($x['scatters']))] ?? 0))) { $bad[] = json_encode([$x['x'], $x['payout'], $x['base_win']]); }
+}
+check(!$bad && bal($P2) === $bal0 - 6000 + $paid, "vs_play ($slug) pays pay_mult(bet, x) on every spin and the base win matches its ways + scatter total: " . implode('; ', array_slice($bad, 0, 3)));
+$fs = VSLOTS[$slug]['pays']['L5'][0] * 2;   // two ways of the smallest 3-of-a-kind, e.g. 0.36 × 100 = 36.00000000000001 or 35.99…
+check(pay_mult(100, $fs) === (int)round($fs * 100), 'a fractional ways total pays its nearest coin');
 
 /* ── Finding 3: crash ties ── */
 $mk = fn(int $pid, float $crash, float $auto, float $at) => tx(fn() => round_open($pid, 'crash', 100, ['start' => microtime(true) - log($at) / CRASH_K, 'crash' => $crash, 'auto' => $auto]));

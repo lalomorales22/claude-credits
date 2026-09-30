@@ -1416,7 +1416,7 @@ function hilo_act(): array {
         }
         if ($move === 'cashout') {
             if ($s['steps'] < 1) { throw new DomainException('Make at least one call before cashing out.'); }
-            return round_close($r, $s, (int)floor($r['bet'] * $s['mult']), 'cashout');
+            return round_close($r, $s, pay_mult((int)$r['bet'], $s['mult'], 4), 'cashout');
         }
         if ($move !== 'hi' && $move !== 'lo') { throw new DomainException('Unknown move.'); }
         $pOdds = hilo_odds($s['card']['r'])[$move];
@@ -1427,11 +1427,11 @@ function hilo_act(): array {
         if (!$ok) { return round_close($r, $s, 0, 'wrong'); }
         $s['mult'] = min(5000, floor($s['mult'] * 0.99 / $pOdds * 10000) / 10000);
         $s['steps']++;
-        if ($s['mult'] >= 5000) { return round_close($r, $s, (int)floor($r['bet'] * $s['mult']), 'max'); }
+        if ($s['mult'] >= 5000) { return round_close($r, $s, pay_mult((int)$r['bet'], $s['mult'], 4), 'max'); }
         return round_save($r, $s);
     });
     $s = st($r);
-    $msg = $r['status'] === 'active' ? 'Run at ' . number_format($s['mult'], 2) . '× · worth ' . coins((int)floor($r['bet'] * $s['mult'])) . ' GC'
+    $msg = $r['status'] === 'active' ? 'Run at ' . number_format($s['mult'], 2) . '× · worth ' . coins(pay_mult((int)$r['bet'], $s['mult'], 4)) . ' GC'
         : ($r['outcome'] === 'wrong' ? 'Wrong call. The tide took it.' : 'Cashed out at ' . number_format($s['mult'], 2) . '× · +' . coins((int)$r['payout']) . ' GC');
     return ['payout' => (int)$r['payout'], 'win' => (int)$r['payout'] > 0, 'balance' => bal($pid), 'message' => $msg];
 }
@@ -1695,7 +1695,7 @@ function vs_play(): array {
     $ev = vs_eval($base, $t['pays']);
     $x = $ev['x'];
     $bonus = null;
-    if (vs_bonus_hit($base)) { $bonus = vs_bonus($t); $x += $bonus['x']; $bonus['win'] = (int)floor($bet * $bonus['x']); }
+    if (vs_bonus_hit($base)) { $bonus = vs_bonus($t); $x += $bonus['x']; $bonus['win'] = pay_mult($bet, (float)$bonus['x']); }
     $fs = null;
     $n = count($ev['scatters']);
     if ($n >= 3) {
@@ -1706,15 +1706,15 @@ function vs_play(): array {
             $e = vs_eval($gr, $t['pays']);
             $m = $e['x'] * $t['mult'];
             $fx += $m;
-            $spins[] = ['grid' => $gr, 'wins' => $e['wins'], 'scatters' => $e['scatters'], 'win' => (int)floor($bet * $m)];
+            $spins[] = ['grid' => $gr, 'wins' => $e['wins'], 'scatters' => $e['scatters'], 'win' => pay_mult($bet, $m)];
         }
         $x += $fx;
-        $fs = ['count' => $count, 'mult' => $t['mult'], 'spins' => $spins, 'win' => (int)floor($bet * $fx)];
+        $fs = ['count' => $count, 'mult' => $t['mult'], 'spins' => $spins, 'win' => pay_mult($bet, $fx)];
     }
     $capped = $x > VS_MAX_WIN;
     $x = min($x, VS_MAX_WIN);
-    $payout = (int)floor($bet * $x);
-    $baseWin = (int)floor($bet * $ev['x']);
+    $payout = pay_mult($bet, $x);   // integer rounding: floor($bet * $x) on doubles short-pays a coin (100 × 1.15 = 114.999…)
+    $baseWin = pay_mult($bet, $ev['x']);
     $pid = (int)$p['id'];
     tx(fn() => round_oneshot($pid, $slug, $bet, $payout, $bonus ? 'bonus ' . $bonus['x'] . 'x' : ($fs ? 'free spins' : ($payout ? round($x, 2) . 'x' : 'no win')),
         ['grid' => $base, 'x' => round($x, 4), 'fs' => $fs ? ['count' => $fs['count'], 'win' => $fs['win']] : null, 'bonus' => $bonus ? ['name' => $bonus['name'], 'x' => $bonus['x'], 'win' => $bonus['win']] : null]));
@@ -4443,7 +4443,7 @@ const GAME_RULES = [
     'crash' => ['Launch your wave. The multiplier climbs from 1.00×.', 'Cash out any time before the wave breaks to lock in that multiplier. A cash-out at exactly the multiplier the wave breaks on still wins, whether you clicked or the auto target grabbed it.', 'Set an auto cash-out so the server grabs it for you, even if your connection hiccups. A reached auto target is paid even if you click later.', 'P(the wave reaches m) = 0.99 ÷ m, so any cash-out target returns 99% over time. Wins are bet × multiplier, rounded to the nearest coin. Starting a break cashes out a live wave at its current multiplier.'],
     'plinko' => ['Pick 8–16 rows, a risk level, and how many pearls to drop at once (1–20). Your bet is per pearl.',
         'Every drop, 3 golden pegs light up. Each golden peg a pearl touches doubles that pearl\'s multiplier, and they stack: ×2, ×4, ×8.',
-        'Each pearl pays bet × multiplier rounded to the nearest coin. Every row count and risk level returns 98.5–98.9% over time with the golden peg bonus included, exact when your bet per pearl is a multiple of 100 GC; at other stakes the coin rounding moves it a little (97.5–99.4% at the 10 GC minimum). One drop can wager up to 10× the table maximum (bet × pearls).',
+        'Each pearl pays bet × multiplier rounded to the nearest coin. Every row count and risk level returns 98.5–98.9% over time with the golden peg bonus included, exact when your bet per pearl is a multiple of 100 GC; at other stakes the coin rounding moves it: 97.5–99.4% at the 10 GC minimum, 96.8–100.3% across every stake from 10 to 5,000 GC (the widest swings are at odd stakes under 100 GC, e.g. 12 GC), and 98.3–99.1% at any stake of 100 GC or more. One drop can wager up to 10× the table maximum (bet × pearls).',
         'Provably fair: your drops come from a server seed that\'s locked in (and fingerprinted) before you play, and the NEXT server seed is fingerprinted too, before you choose the client seed that will go with it. Rotate any time to reveal the current seed and verify every drop right on this page.',
         'Autoplay can stop itself on a big hit, a profit target, or a loss limit. Space bar drops too.'],
     'mines' => ['Choose how many urchins hide in the reef (1–24).', 'Flip tiles. Every pearl raises the multiplier, an urchin ends the round.', 'Cash out whenever you want. More urchins, faster growth.', 'Multiplier after k pearls = 0.99 ÷ P(k safe flips), so every setting has a 1% edge; wins are bet × multiplier rounded to the nearest coin. Wins are capped at 5,000× your bet: the round cashes out by itself when the ladder reaches the cap.'],
@@ -4896,7 +4896,7 @@ function panel_hilo(array $p, array $g): string {
   </div>
   <div class="hilo-main"><?= $r ? card_html($cardCode($s['card'])) : card_html('', true) ?></div>
   <?php if ($live): $o = hilo_odds($s['card']['r']); ?>
-    <p class="result">Run: <b><?= number_format($s['mult'], 2) ?>×</b> · worth <?= coins((int)floor($r['bet'] * $s['mult'])) ?> GC</p>
+    <p class="result">Run: <b><?= number_format($s['mult'], 2) ?>×</b> · worth <?= coins(pay_mult((int)$r['bet'], $s['mult'], 4)) ?> GC</p>
     <?= play_form_open('hilo', 'controls') ?>
       <button class="btn gold lg" name="move" value="hi">▲ Higher or same <small><?= round($o['hi'] * 100) ?>% · <?= number_format(0.99 / $o['hi'], 2) ?>×</small></button>
       <button class="btn gold lg" name="move" value="lo">▼ Lower or same <small><?= round($o['lo'] * 100) ?>% · <?= number_format(0.99 / $o['lo'], 2) ?>×</small></button>
@@ -8829,7 +8829,7 @@ function initVideoSlot(root) {
   const cellHtml = s => `<div class="vs-cell" data-s="${s}"><svg viewBox="0 0 64 64" role="img" aria-label="${esc(cfg.names[s] || s)}">${cfg.art[s]}</svg></div>`;
   let busy = false, auto = false;
 
-  const paytable = () => { const b = +form.bet.value || 0; $$('[data-vs-paygrid] [data-pay]', el).forEach(x => { const s = x.closest('[data-sym]').dataset.sym; x.textContent = fmt(Math.floor(cfg.pays[s][+x.dataset.pay] * b)); }); $$('[data-jp]', el).forEach(x => { x.textContent = fmt(+x.dataset.jp * b); }); };
+  const paytable = () => { const b = +form.bet.value || 0; $$('[data-vs-paygrid] [data-pay]', el).forEach(x => { const s = x.closest('[data-sym]').dataset.sym; x.textContent = fmt(Math.floor((b * Math.round(cfg.pays[s][+x.dataset.pay] * 100) + 50) / 100)); }); $$('[data-jp]', el).forEach(x => { x.textContent = fmt(+x.dataset.jp * b); }); };
   form.addEventListener('input', paytable); paytable();
 
   function spinReel(reel, final, i, teaseMs) {
