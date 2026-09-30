@@ -1266,7 +1266,7 @@ const CRABS = [
 ];
 function crabs_play(): array {
     $p = require_playable(); $g = game_cfg('crabs');
-    [$bets, $total] = parse_bets($g, fn($k) => (bool)preg_match('/^crab:[0-5]$/', $k));
+    [$bets, $total] = parse_bets($g, fn($k) => (bool)preg_match('/^crab:[0-5]\z/', $k));   // \z, not $: 'crab:1\n' is not a spot
     $weights = array_map(fn($c) => intdiv(2310000, $c[1]), CRABS); // 2310000 divides evenly by 3,4,5,7,11,21
     $roll = random_int(1, array_sum($weights)); $winner = 0;
     foreach ($weights as $i => $w) { if ($roll <= $w) { $winner = $i; break; } $roll -= $w; }
@@ -1879,7 +1879,11 @@ function roulette3d_play(): array {
  * Returns below include the stake unless noted. "Stays up" bets (place, buy, lay, big 6/8,
  * hardways) pay their profit and remain on the layout, and are OFF on the come-out roll.
  * House edge (standard): pass 1.41%, don't pass 1.36%, come 1.41%, don't come 1.36%, odds 0%,
- * place 6/8 1.52%, place 5/9 4.0%, place 4/10 6.67%, buy (5% on win) 1.67%, lay 4/10 2.44%,
+ * place 6/8 1.52%, place 5/9 4.0%, place 4/10 6.67%, buy 4/10 1.67% / 5/9 2.0% / 6/8 2.27% (5% of the bet, paid on wins only),
+ * lay 4/10 1.67% / 5/9 2.0% / 6/8 2.27% (5% of the win, paid on wins only),
+ * Spots with fractional odds take chips only in their betting unit (craps_unit: place 6/8 in 6s, place 4/5/9/10 in 5s,
+ * odds in the unit of their true odds, buy in 20s, lay in 40/30/24) so every payout and commission is exact; an off-unit
+ * legacy stake rounds to the nearest coin, half up, never floored.
  * big 6/8 9.09%, field 2.78%, hard 6/8 9.09%, hard 4/10 11.1%, 2/12 13.9%, 3/11 11.1%,
  * any craps 11.1%, horn 12.5%, C&E 11.1%, any seven 16.7%.
  */
@@ -1894,20 +1898,51 @@ function craps_label(string $k): string {
         'ace2' => 'Aces (2)', 'ace3' => 'Ace-deuce (3)', 'yo' => 'Yo (11)', 'twelve' => 'Boxcars (12)', 'horn' => 'Horn', 'ce' => 'C & E',
         'big6' => 'Big 6', 'big8' => 'Big 8'];
     if (isset($L[$k])) { return $L[$k]; }
-    if (preg_match('/^(hard|place|buy|lay|come|comeodds|dcome|dcomeodds)(\d+)$/', $k, $m)) {
+    if (preg_match('/^(hard|place|buy|lay|come|comeodds|dcome|dcomeodds)(\d+)\z/', $k, $m)) {
         return ['hard' => 'Hard ', 'place' => 'Place ', 'buy' => 'Buy ', 'lay' => 'Lay ', 'come' => 'Come ', 'comeodds' => 'Come odds ', 'dcome' => "Don't come ", 'dcomeodds' => "Don't come odds "][$m[1]] . $m[2];
     }
     return $k;
 }
-/** Keys a player may add chips to directly (come points themselves are created by rolls). */
+/** Keys a player may add chips to directly (come points themselves are created by rolls). Exact spellings: \z, not $, so 'place6\n' is refused. */
 function craps_placeable(string $k): bool {
     if (in_array($k, ['pass', 'dontpass', 'passodds', 'dpodds', 'come', 'dontcome', 'big6', 'big8', ...CRAPS_ONE_ROLL], true)) { return true; }
-    if (preg_match('/^hard(4|6|8|10)$/', $k)) { return true; }
-    return (bool)preg_match('/^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)$/', $k);
+    if (preg_match('/^hard(4|6|8|10)\z/', $k)) { return true; }
+    return (bool)preg_match('/^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)\z/', $k);
+}
+/** Every key craps_placeable() accepts (51 spots), for the board, the tests and the 3D layout. */
+function craps_keys(): array {
+    $k = ['pass', 'dontpass', 'passodds', 'dpodds', 'come', 'dontcome', 'big6', 'big8', ...CRAPS_ONE_ROLL, 'hard4', 'hard6', 'hard8', 'hard10'];
+    foreach (CRAPS_NUMS as $n) { array_push($k, "place$n", "buy$n", "lay$n", "comeodds$n", "dcomeodds$n"); }
+    return $k;
 }
 function craps_removable(string $k): bool {
-    return !in_array($k, ['pass', 'come'], true) && !preg_match('/^come\d+$/', $k) && !in_array($k, CRAPS_ONE_ROLL, true);
+    return !in_array($k, ['pass', 'come'], true) && !preg_match('/^come\d+\z/', $k) && !in_array($k, CRAPS_ONE_ROLL, true);
 }
+/**
+ * Betting unit of a spot: the smallest amount its odds pay in whole coins, so no fractional payout is ever floored or
+ * rounded. Place 6/8 pay 7:6 (units of 6), place 4/5/9/10 pay 9:5 and 7:5 (units of 5); true odds behind pass/come on
+ * 5/9 pay 3:2 (even amounts) and on 6/8 pay 6:5 (units of 5); lay odds and lay bets pay 1:2 on 4/10 (even), 2:3 on 5/9
+ * (units of 3) and 5:6 on 6/8 (units of 6). Buy bets go in 20s (the 5% commission on the stake is exactly 1 GC per 20 and true
+ * odds are whole at 20 on every number); lay bets go in the stake that wins 20 (40 on 4/10, 30 on 5/9, 24 on 6/8), so the 5%
+ * commission on the win is exactly 1 GC per 20 won. Horn splits 4 ways, C&E 2.
+ * $pt is the point (pass/don't pass odds take their number from it).
+ */
+function craps_unit(string $k, int $pt): int {
+    if ($k === 'horn') { return 4; }
+    if ($k === 'ce') { return 2; }
+    if ($k === 'passodds') { return $pt ? CRAPS_TRUE[$pt][1] : 1; }
+    if ($k === 'dpodds') { return $pt ? CRAPS_TRUE[$pt][0] : 1; }
+    if (preg_match('/^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)\z/', $k, $m)) {
+        $n = (int)$m[2];
+        return match ($m[1]) { 'place' => CRAPS_PLACE[$n][1], 'comeodds' => CRAPS_TRUE[$n][1], 'dcomeodds' => CRAPS_TRUE[$n][0],
+            'buy' => 20, 'lay' => intdiv(20 * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]) };
+    }
+    return 1;
+}
+/** amt × num/den in whole coins. Exact at the spot's unit; a legacy off-unit stake rounds to the nearest coin, half up, never floored. */
+function craps_ratio(int $amt, int $num, int $den): int { return intdiv($amt * $num * 2 + $den, 2 * $den); }
+/** 5% commission (buy: on the stake, lay: on the win): nearest coin, half up, at least 1. Exact at the units; 30 owes 2, 12 owes 1. */
+function craps_vig(int $win): int { return max(1, intdiv($win * 5 + 50, 100)); }
 function craps_state(?array $r): array {
     $s = st($r);
     $bets = $s['bets'] ?? [];
@@ -1919,6 +1954,11 @@ function craps_state(?array $r): array {
 function craps_check_add(array $s, string $k, int $amt, array $g): void {
     $b = $s['bets']; $pt = $s['point']; $cur = ($b[$k] ?? 0) + $amt; $max = (int)$g['max_bet'];
     $need = function (bool $ok, string $why) { if (!$ok) { throw new DomainException($why); } };
+    $u = craps_unit($k, $pt);
+    if ($u > 1 && !in_array($k, ['horn', 'ce'], true) && $amt % $u !== 0) {
+        $lo = $u * intdiv($amt, $u); $hi = $lo + $u;
+        throw new DomainException(craps_label($k) . ' pays in whole coins at multiples of ' . $u . ' GC, so use ' . ($lo >= (int)$g['min_bet'] ? "$lo or $hi" : (string)$hi) . '.');
+    }
     switch (true) {
         case $k === 'pass' || $k === 'dontpass':
             $need(!$pt, 'Line bets go down on the come-out roll only.'); break;
@@ -1930,14 +1970,14 @@ function craps_check_add(array $s, string $k, int $amt, array $g): void {
         case $k === 'dpodds':
             $need($pt && !empty($b['dontpass']), 'Lay odds need a don\'t pass bet and a point.');
             $need($cur <= $b['dontpass'] * 6, 'Lay odds max out at 6× your don\'t pass.'); return;
-        case (bool)preg_match('/^comeodds(\d+)$/', $k, $m):
+        case (bool)preg_match('/^comeodds(\d+)\z/', $k, $m):
             $need(!empty($b['come' . $m[1]]), 'Come odds need a come bet sitting on ' . $m[1] . '.');
             $need($cur <= $b['come' . $m[1]] * CRAPS_ODDS_MAX[(int)$m[1]], 'Odds max out at ' . CRAPS_ODDS_MAX[(int)$m[1]] . '× the come bet.'); return;
-        case (bool)preg_match('/^dcomeodds(\d+)$/', $k, $m):
+        case (bool)preg_match('/^dcomeodds(\d+)\z/', $k, $m):
             $need(!empty($b['dcome' . $m[1]]), 'Lay odds need a don\'t come bet on ' . $m[1] . '.');
             $need($cur <= $b['dcome' . $m[1]] * 6, 'Lay odds max out at 6× the don\'t come bet.'); return;
         case $k === 'horn':
-            $need($amt % 4 === 0, 'Horn bets split four ways, so use a multiple of 4.'); break;
+            $need($amt % 4 === 0, 'Horn bets split four ways, so use a multiple of 4.'); break;   // (kept: the unit rule above skips horn/ce so these messages stay)
         case $k === 'ce':
             $need($amt % 2 === 0, 'C & E splits two ways, so use an even amount.'); break;
     }
@@ -1993,9 +2033,9 @@ function craps_act(): array {
         };
         $lose = function (string $k) use (&$B, &$events) { $events[] = ['key' => $k, 'win' => false, 'text' => craps_label($k) . ' loses']; unset($B[$k]); };
         $push = function (string $k, string $why) use (&$B, &$pay, &$events) { $pay += $B[$k]; $events[] = ['key' => $k, 'win' => null, 'text' => craps_label($k) . ' ' . $why]; unset($B[$k]); };
-        $trueRet = fn(int $amt, int $n) => $amt + intdiv($amt * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]);
-        $layRet = fn(int $amt, int $n) => $amt + intdiv($amt * CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]);
-        $vig = fn(int $win) => max(1, (int)floor($win * 0.05));
+        $trueRet = fn(int $amt, int $n) => $amt + craps_ratio($amt, CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]);
+        $layRet = fn(int $amt, int $n) => $amt + craps_ratio($amt, CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]);
+        $vig = 'craps_vig';
 
         // ── one-roll bets ──
         foreach (CRAPS_ONE_ROLL as $k) {
@@ -2018,15 +2058,15 @@ function craps_act(): array {
         if (!$comeOut) {
             foreach (CRAPS_NUMS as $n) {
                 if (isset($B["place$n"])) {
-                    if ($sum === $n) { $a = $B["place$n"]; $credit("place$n", intdiv($a * CRAPS_PLACE[$n][0], CRAPS_PLACE[$n][1]), 'pays', false); }
+                    if ($sum === $n) { $a = $B["place$n"]; $credit("place$n", craps_ratio($a, CRAPS_PLACE[$n][0], CRAPS_PLACE[$n][1]), 'pays', false); }
                     elseif ($sum === 7) { $lose("place$n"); }
                 }
                 if (isset($B["buy$n"])) {
-                    if ($sum === $n) { $a = $B["buy$n"]; $w = intdiv($a * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]); $credit("buy$n", $w - $vig($w), 'pays true odds (less 5%)', false); }
+                    if ($sum === $n) { $a = $B["buy$n"]; $w = craps_ratio($a, CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]); $credit("buy$n", $w - $vig($a), 'pays true odds (less 5% of the bet)', false); }
                     elseif ($sum === 7) { $lose("buy$n"); }
                 }
                 if (isset($B["lay$n"])) {
-                    if ($sum === 7) { $a = $B["lay$n"]; $w = intdiv($a * CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]); $credit("lay$n", $w - $vig($w), 'wins (less 5%)', false); }
+                    if ($sum === 7) { $a = $B["lay$n"]; $w = craps_ratio($a, CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]); $credit("lay$n", $w - $vig($w), 'wins (less 5%)', false); }
                     elseif ($sum === $n) { $lose("lay$n"); }
                 }
             }
@@ -4422,7 +4462,7 @@ function page_rules(): void {
 const GAME_RULES = [
     'poker' => ['No-limit Texas hold\'em, real players at the table (house players fill empty seats and are labelled). Blinds and buy-in range are set per table.', 'Buy in from your Gold Coins. Your stack lives at the table until you stand up, then it goes straight back to your balance.', 'Fold, check, call, raise or shove. Minimum raise is the size of the last raise. Side pots are handled like a live room and odd chips go to the first seat left of the button.', 'The clock gives you ' . 20 . ' seconds an action; two timeouts and you sit out. Leave any time; if you\'re in a hand, you\'re folded and paid when it ends.', 'Every deal is committed to before a card moves: the table shows a SHA-256 of the shuffled deck, and reveals the deck and salt after the hand. Open any hand history to verify it.'],
     'roulette3d' => ['Tap a chip, tap the board, hit Spin. Same single-zero payouts as the 2D table (35:1 straight up).', 'The wheel you watch is the real result: the server picks the pocket, then the ball is steered into it.', 'Right-click or long-press a spot to pull chips back.'],
-    'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay true odds with zero house edge.', 'Every number has Place (6/8 pay 7:6, 5/9 pay 7:5, 4/10 pay 9:5), Buy (true odds, 5% on wins) and Lay (bet the 7 beats it). Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.'],
+    'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay true odds with zero house edge.', 'Every number has Place (6/8 pay 7:6, 5/9 pay 7:5, 4/10 pay 9:5), Buy (true odds, 5% on wins) and Lay (bet the 7 beats it). Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Fractional odds are bet in whole units like a real table, so every payout is exact: Place 6/8 in multiples of 6 GC (12 pays 14), Place 4/5/9/10 in multiples of 5; odds on 5/9 in even amounts and on 6/8 in multiples of 5; lay odds on 4/10 even, 5/9 in multiples of 3, 6/8 in multiples of 6; Buy in multiples of 20 (5% of the bet, 1 GC per 20, charged only when it wins); Lay in the stake that wins 20: multiples of 40 on 4/10, 30 on 5/9, 24 on 6/8 (5% of the win, 1 GC per 20 won, charged only when it wins). The table tells you the nearest amounts. Returns: Place 6/8 98.5%, 5/9 96.0%, 4/10 93.3%; Buy and Lay 4/10 98.3%, 5/9 98.0%, 6/8 97.7%.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.'],
     'pusher' => ['Each coin you drop costs your coin value. Coins that spill over the front edge are yours.', 'Tap the machine or use the slider to aim. Aiming is just for fun: how many coins fall is decided the moment you drop.', 'About 46% of drops spill something, and rare avalanches pay 25× or 100×. Return to player is 95%.'],
     'scratch' => ['Buy a ticket, scratch all nine spots.', 'Three matching prizes wins that prize. Only one triple per ticket.', 'Top prize is 1,000× the ticket. About 1 in 4 tickets wins something.'],
     'keno' => ['Pick 1 to 10 numbers from 40.', 'Ten numbers are drawn. The more you catch, the more you win.', 'The paytable changes with how many you pick. Big picks, big jackpots.'],
@@ -5115,9 +5155,7 @@ function panel_craps(array $p, array $g): string {
     }
     $hist = '';
     foreach (array_reverse($s['rolls']) as $d) { $t = $d[0] + $d[1]; $hist .= '<li class="' . ($t === 7 ? 'seven' : '') . '">' . $t . '</li>'; }
-    $placeable = ['pass', 'dontpass', 'passodds', 'dpodds', 'come', 'dontcome', 'field', 'big6', 'big8', 'hard4', 'hard6', 'hard8', 'hard10',
-        'any7', 'anycraps', 'ace2', 'ace3', 'yo', 'twelve', 'horn', 'ce'];
-    foreach (CRAPS_NUMS as $n) { array_push($placeable, "place$n", "buy$n", "lay$n", "comeodds$n", "dcomeodds$n"); }
+    $placeable = craps_keys();   // the same 51 spellings the server accepts
     ob_start(); ?>
 <div class="craps" data-craps data-state="<?= h(json_encode(['point' => $s['point'], 'bets' => (object)$s['bets']])) ?>" data-max="<?= (int)$g['max_bet'] ?>" data-min="<?= (int)$g['min_bet'] ?>">
   <div class="g3d-wrap">
@@ -9070,7 +9108,16 @@ function initCraps(root) {
   const label = k => { const b = board.querySelector(`.cr-spot[data-bet="${k}"] b`); const m = /^(d?come)(\d+)$/.exec(k); return b ? b.textContent : m ? (m[1] === 'come' ? 'Come ' : "Don't come ") + m[2] : k; };
   const removable = k => !(k === 'pass' || k === 'come' || /^come\d+$/.test(k) || ONE.includes(k));
   const offOnComeOut = k => /^(place|buy|lay|hard|comeodds)\d+$/.test(k) || k === 'big6' || k === 'big8';
-  const unit = k => k === 'horn' ? 4 : k === 'ce' ? 2 : 1;
+  const TRUE_ODDS = { 4: [2, 1], 10: [2, 1], 5: [3, 2], 9: [3, 2], 6: [6, 5], 8: [6, 5] }, PLACE_DEN = { 4: 5, 10: 5, 5: 5, 9: 5, 6: 6, 8: 6 };
+  // betting unit of a spot (mirrors craps_unit on the server): the smallest stake its odds pay in whole coins
+  const unit = k => {
+    if (k === 'horn') return 4; if (k === 'ce') return 2;
+    if (k === 'passodds') return st.point ? TRUE_ODDS[st.point][1] : 1;
+    if (k === 'dpodds') return st.point ? TRUE_ODDS[st.point][0] : 1;
+    const m = /^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)$/.exec(k); if (!m) return 1;
+    if (m[1] === 'buy') return 20; if (m[1] === 'lay') return 20 * TRUE_ODDS[m[2]][0] / TRUE_ODDS[m[2]][1];
+    return m[1] === 'place' ? PLACE_DEN[m[2]] : m[1] === 'comeodds' ? TRUE_ODDS[m[2]][1] : TRUE_ODDS[m[2]][0];
+  };
   // why a spot can't take chips right now ('' means it can)
   function blocked(k) {
     const b = st.bets, pt = st.point; let m;
@@ -9142,7 +9189,7 @@ function initCraps(root) {
     if (amt < MIN || amt <= 0) { toast(`${label(k)} is maxed at ${fmt(c)} GC.`, 'err'); return; }
     if ([...pending.values()].reduce((a, v) => a + v, 0) + amt > MAX * 10) { toast(`Table limit is ${fmt(MAX * 10)} GC of new chips per roll.`, 'err'); return; }
     pending.set(k, (pending.get(k) || 0) + amt);
-    if (amt !== chip && u > 1) toast(`${label(k)} is split ${u} ways, so that's ${fmt(amt)} GC.`);
+    if (amt !== chip && u > 1) toast(k === 'horn' || k === 'ce' ? `${label(k)} is split ${u} ways, so that's ${fmt(amt)} GC.` : `${label(k)} pays in whole coins at multiples of ${u}, so that's ${fmt(amt)} GC.`);
     paint();
   });
   board.addEventListener('contextmenu', e => { const b = e.target.closest('[data-bet]'); if (b) { e.preventDefault(); pending.delete(b.dataset.bet); paint(); } });
