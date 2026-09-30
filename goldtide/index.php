@@ -13,7 +13,7 @@
 declare(strict_types=1);
 
 const APP_VERSION    = '1.0.0';
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 define('DATA_DIR', __DIR__ . '/data');
 define('DB_FILE',  DATA_DIR . '/app.sqlite');
 define('PW_FILE',  __DIR__ . '/admin_password.txt');
@@ -70,8 +70,9 @@ function csp_nonce(): string {
 function send_security_headers(): void {
     if (headers_sent()) { return; }
     $n = csp_nonce();
-    header("Content-Security-Policy: default-src 'self'; script-src 'nonce-$n' 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'");
-    header('X-Frame-Options: DENY');
+    $ws = rt_ws_csp();
+    header("Content-Security-Policy: default-src 'self'; script-src 'nonce-$n' 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' $ws; worker-src 'self' blob:; frame-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'; object-src 'none'");
+    header('X-Frame-Options: SAMEORIGIN');
     header('X-Content-Type-Options: nosniff');
     header('Referrer-Policy: strict-origin');
     header('Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()');
@@ -255,6 +256,26 @@ function install(PDO $pdo, bool $fresh): void {
     CREATE TABLE IF NOT EXISTS login_attempts (
         id INTEGER PRIMARY KEY, attempt_key TEXT NOT NULL, $ts);
     CREATE INDEX IF NOT EXISTS ix_attempts ON login_attempts(attempt_key, created_at);
+    CREATE TABLE IF NOT EXISTS poker_tables (
+        id INTEGER PRIMARY KEY, name TEXT NOT NULL CHECK (length(name) BETWEEN 2 AND 40),
+        seats INTEGER NOT NULL DEFAULT 6 CHECK (seats BETWEEN 2 AND 9),
+        small_blind INTEGER NOT NULL CHECK (small_blind > 0), big_blind INTEGER NOT NULL CHECK (big_blind >= small_blind),
+        min_buyin INTEGER NOT NULL CHECK (min_buyin > 0), max_buyin INTEGER NOT NULL CHECK (max_buyin >= min_buyin),
+        bots INTEGER NOT NULL DEFAULT 0 CHECK (bots BETWEEN 0 AND 8),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)), sort_order INTEGER NOT NULL DEFAULT 0, $ts);
+    CREATE TABLE IF NOT EXISTS poker_seats (
+        id INTEGER PRIMARY KEY,
+        table_id INTEGER NOT NULL REFERENCES poker_tables(id) ON DELETE CASCADE,
+        player_id INTEGER NOT NULL UNIQUE REFERENCES players(id) ON DELETE CASCADE,
+        seat INTEGER NOT NULL CHECK (seat BETWEEN 0 AND 8),
+        stack INTEGER NOT NULL CHECK (stack >= 0), $ts, UNIQUE (table_id, seat));
+    CREATE TABLE IF NOT EXISTS poker_hands (
+        id INTEGER PRIMARY KEY,
+        table_id INTEGER NOT NULL REFERENCES poker_tables(id) ON DELETE CASCADE,
+        hand_no INTEGER NOT NULL, deck_hash TEXT NOT NULL, deck_salt TEXT NOT NULL DEFAULT '',
+        board TEXT NOT NULL DEFAULT '', pot INTEGER NOT NULL DEFAULT 0,
+        record TEXT NOT NULL DEFAULT '{}', started_at TEXT NOT NULL, ended_at TEXT, $ts);
+    CREATE INDEX IF NOT EXISTS ix_poker_hands_table ON poker_hands(table_id, id DESC);
     ");
 
     // audit log is append-only at the database level too
@@ -276,7 +297,21 @@ function install(PDO $pdo, bool $fresh): void {
         ['refill_hours', '4', 'Hours between refills'],
         ['min_age', '21', 'Age players must confirm at signup'],
         ['registration_open', '1', '1 = new signups allowed, 0 = closed'],
+        ['ws_url', '', 'WebSocket URL for the floor and poker (e.g. wss://casino.example.com/ws). Blank = auto: same host on port 8081 in dev, wss://host/ws behind a proxy'],
+        ['rt_origins', '', 'Comma-separated origins allowed to open a WebSocket (e.g. https://casino.example.com). Blank = derive from the Host header'],
+        ['floor_enabled', '1', '1 = the 3D casino floor is open, 0 = hidden'],
+        ['poker_action_seconds', '20', 'Seconds a poker player has to act before the clock folds them'],
     ] as $s) { $seed->execute($s); }
+    // realtime secret: signs the tickets the WebSocket server checks. Never leaves the server.
+    $pdo->prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('rt_secret', ?)")->execute([bin2hex(random_bytes(32))]);
+    if (!(int)$pdo->query('SELECT COUNT(*) FROM poker_tables')->fetchColumn()) {
+        $pt = $pdo->prepare('INSERT INTO poker_tables (name, seats, small_blind, big_blind, min_buyin, max_buyin, bots, sort_order) VALUES (?,?,?,?,?,?,?,?)');
+        foreach ([
+            ['Bayside 10/20', 6, 10, 20, 800, 4000, 3, 1],
+            ['Harbor 50/100', 9, 50, 100, 4000, 20000, 4, 2],
+            ['Coronado 250/500', 6, 250, 500, 20000, 100000, 2, 3],
+        ] as $row) { $pt->execute($row); }
+    }
 
     $g = $pdo->prepare('INSERT OR IGNORE INTO games (slug, name, blurb, min_bet, max_bet, sort_order) VALUES (?,?,?,?,?,?)');
     foreach (GAME_REGISTRY as $slug => [$name, , $blurb, $sort]) { $g->execute([$slug, $name, $blurb, 10, 5000, $sort]); }
@@ -329,6 +364,68 @@ function attempts_left(string $key): int {
 }
 function note_failed_attempt(string $key): void { q('INSERT INTO login_attempts (attempt_key) VALUES (?)', [$key]); }
 function clear_attempts(string $key): void { q('DELETE FROM login_attempts WHERE attempt_key = ?', [$key]); }
+
+/* ───────────────────────── realtime: tickets + socket discovery (see REALTIME.md) ───────────────────────── */
+
+/** Signs WebSocket tickets. Lives in `meta`, generated at install, never sent to a browser. */
+function rt_secret(): string {
+    static $s = null;
+    return $s ??= (string)(val("SELECT value FROM meta WHERE key = 'rt_secret'") ?? '');
+}
+function rt_host(): string {
+    $h = strtolower((string)($_SERVER['HTTP_HOST'] ?? 'localhost'));
+    return preg_match('/^[a-z0-9.\-\[\]:]{1,253}$/', $h) ? $h : 'localhost';
+}
+/** Where the browser should open its socket. Setting wins; dev on a non-standard port gets :8081; a proxied site gets /ws. */
+function rt_ws_url(): string {
+    $set = trim(setting('ws_url'));
+    if ($set !== '' && preg_match('#^wss?://#i', $set)) { return $set; }
+    $host = rt_host();
+    $name = preg_replace('/:\d+$/', '', $host);
+    $port = (string)($_SERVER['SERVER_PORT'] ?? '');
+    $std = $port === '' || $port === '80' || $port === '443';
+    if (!$std && !is_https()) { return 'ws://' . $name . ':8081/'; }
+    return (is_https() ? 'wss://' : 'ws://') . $host . '/ws';
+}
+/** The socket origin(s) for the CSP connect-src. */
+function rt_ws_csp(): string {
+    try { $u = rt_ws_url(); } catch (Throwable) { return ''; }
+    $p = parse_url($u);
+    if (!$p || empty($p['host'])) { return ''; }
+    $o = ($p['scheme'] ?? 'ws') . '://' . $p['host'] . (isset($p['port']) ? ':' . $p['port'] : '');
+    return $o;
+}
+function rt_b64(string $bin): string { return rtrim(strtr(base64_encode($bin), '+/', '-_'), '='); }
+function rt_unb64(string $s): string|false { return base64_decode(strtr($s, '-_', '+/'), true); }
+/** ticket = base64url(json payload) . '.' . hex(hmac). 60 s to use it, once. */
+function rt_ticket_make(array $payload): string {
+    $payload += ['exp' => time() + 60, 'nonce' => bin2hex(random_bytes(8))];
+    $body = rt_b64(json_encode($payload, JSON_UNESCAPED_SLASHES));
+    return $body . '.' . hash_hmac('sha256', $body, rt_secret());
+}
+/** Returns the payload or null. Callers must also reject reused nonces. */
+function rt_ticket_verify(string $ticket, ?int $now = null): ?array {
+    if (rt_secret() === '' || strlen($ticket) > 1024 || substr_count($ticket, '.') !== 1) { return null; }
+    [$body, $sig] = explode('.', $ticket, 2);
+    if (!preg_match('/^[0-9a-f]{64}$/', $sig) || !hash_equals(hash_hmac('sha256', $body, rt_secret()), $sig)) { return null; }
+    $raw = rt_unb64($body);
+    $p = $raw !== false ? json_decode($raw, true) : null;
+    if (!is_array($p) || empty($p['uid']) || !isset($p['exp'], $p['nonce'], $p['name'])) { return null; }
+    if ((int)$p['exp'] < ($now ?? time())) { return null; }
+    return $p;
+}
+/** POST ?action=rt_ticket → {ticket, ws, uid, name, guest}. Guests can walk and chat, not sit. */
+function do_rt_ticket(): never {
+    csrf_check();
+    $p = current_player();
+    if ($p) {
+        $payload = ['uid' => 'p' . (int)$p['id'], 'pid' => (int)$p['id'], 'name' => $p['username'], 'brk' => on_break($p) !== null];
+    } else {
+        $_SESSION['guest'] ??= bin2hex(random_bytes(4));
+        $payload = ['uid' => 'g' . $_SESSION['guest'], 'pid' => 0, 'name' => 'Guest ' . substr($_SESSION['guest'], 0, 4)];
+    }
+    ok(['ticket' => rt_ticket_make($payload), 'ws' => rt_ws_url(), 'uid' => $payload['uid'], 'name' => $payload['name'], 'guest' => !$p]);
+}
 
 /* ───────────────────────── audit ───────────────────────── */
 
@@ -697,6 +794,7 @@ const GAME_REGISTRY = [
     'videopoker' => ['Boardwalk Poker', 'cards', 'Jacks or Better video poker. Hold, draw, hope for royals.', 21],
     'threecard'  => ['Coastline 3-Card', 'cards', 'Three-card poker against the dealer, with a Pair Plus side bet.', 22],
     'hilo'       => ['Tide Hi-Lo', 'cards', 'Higher or lower? Every right call grows the multiplier.', 23],
+    'poker'      => ['Bayside Hold\'em', 'cards', 'No-limit Texas hold\'em against real players. Pull up a chair, buy in, play.', 24],
     'crash'      => ['Tide Crash', 'arcade', 'The wave keeps rising until it breaks. Cash out before it does.', 30],
     'plinko'     => ['Pearl Drop', 'arcade', 'Deluxe plinko: golden pegs double your pearl, up to 20 pearls a drop, 8–16 rows.', 29],
     'mines'      => ['Reef Mines', 'arcade', 'Twenty-five tiles, hidden urchins. Find pearls, cash out.', 32],
@@ -1951,6 +2049,14 @@ function pusher_play(): array {
         'message' => $n ? ($n >= 25 ? 'AVALANCHE! ' : '') . $n . ' coin' . ($n > 1 ? 's' : '') . ' spilled · +' . coins($payout) . ' GC' : 'Nothing fell this time.'];
 }
 
+/* ═════════════════════════ POKER ENGINE: no-limit Texas hold'em ═════════════════════════
+ * Pure functions over a table state array (see REALTIME.md → "Poker engine API").
+ * ws.php hosts the tables and owns persistence; nothing in here touches the database or the session.
+ */
+// [[REGION poker-engine]]
+function pk_placeholder(): void {}
+// [[/REGION poker-engine]]
+
 /* ═════════════════════════ FREE COINS ═════════════════════════ */
 
 function daily_status(array $p): array {
@@ -2308,6 +2414,43 @@ function entities(): array {
                 'nonce' => ['type' => 'int'], 'status' => ['type' => 'enum', 'options' => ['active', 'revealed']],
             ],
         ],
+        'poker_tables' => [
+            'label' => 'Poker tables', 'ops' => 'crud', 'title' => 'name', 'sort' => 'sort_order', 'dir' => 'asc',
+            'hint' => 'ws.php re-reads this list every 30 s. Blind changes apply at the next hand; disabling a table cashes everyone out.',
+            'list' => ['id', 'name', 'seats', 'small_blind', 'big_blind', 'min_buyin', 'max_buyin', 'bots', 'enabled', 'sort_order'],
+            'search' => ['name'], 'filters' => ['enabled'],
+            'fields' => [
+                'name' => ['type' => 'text', 'required' => true, 'max' => 40],
+                'seats' => ['type' => 'int', 'min' => 2, 'max' => 9, 'default' => 6, 'required' => true],
+                'small_blind' => ['type' => 'int', 'min' => 1, 'default' => 10, 'required' => true],
+                'big_blind' => ['type' => 'int', 'min' => 1, 'default' => 20, 'required' => true],
+                'min_buyin' => ['type' => 'int', 'min' => 1, 'default' => 800, 'required' => true, 'hint' => 'Usually 40 big blinds'],
+                'max_buyin' => ['type' => 'int', 'min' => 1, 'default' => 4000, 'required' => true, 'hint' => 'Usually 200 big blinds'],
+                'bots' => ['type' => 'int', 'min' => 0, 'max' => 8, 'default' => 0, 'hint' => 'House players that keep the table alive. Always labelled as such.'],
+                'enabled' => ['type' => 'bool', 'default' => 1],
+                'sort_order' => ['type' => 'int', 'default' => 0],
+            ],
+        ],
+        'poker_seats' => [
+            'label' => 'Poker seats', 'ops' => 'rd', 'hint' => 'Chips currently at a table. ws.php refunds every row here when it restarts.',
+            'list' => ['id', 'table_id', 'player_id', 'seat', 'stack', 'updated_at'],
+            'search' => [], 'filters' => [],
+            'fields' => [
+                'table_id' => ['type' => 'fk', 'ref' => 'poker_tables', 'label_col' => 'name'],
+                'player_id' => ['type' => 'fk', 'ref' => 'players', 'label_col' => 'username'],
+                'seat' => ['type' => 'int'], 'stack' => ['type' => 'int'],
+            ],
+        ],
+        'poker_hands' => [
+            'label' => 'Poker hands', 'ops' => 'r', 'hint' => 'Full history of every hand, with the deck commitment.',
+            'list' => ['id', 'table_id', 'hand_no', 'board', 'pot', 'started_at', 'ended_at'],
+            'search' => ['deck_hash', 'board'], 'filters' => [],
+            'fields' => [
+                'table_id' => ['type' => 'fk', 'ref' => 'poker_tables', 'label_col' => 'name'],
+                'hand_no' => ['type' => 'int'], 'deck_hash' => ['type' => 'text'], 'deck_salt' => ['type' => 'text'],
+                'board' => ['type' => 'text'], 'pot' => ['type' => 'int'], 'record' => ['type' => 'json'],
+            ],
+        ],
         'settings' => [
             'label' => 'Site settings', 'ops' => 'crud', 'title' => 'key', 'sort' => 'key', 'dir' => 'asc',
             'list' => ['id', 'key', 'value', 'note', 'updated_at'],
@@ -2663,6 +2806,9 @@ function error_page(int $code, string $title, string $msg): never {
 
 /* ═════════════════════════ LAYOUT ═════════════════════════ */
 
+/** ?embed=1: the page is a machine screen inside the 3D floor. No header, footer, rules or rail. */
+function is_embed(): bool { return (($_GET['embed'] ?? '') === '1'); }
+
 function layout(string $title, string $body, string $mode = 'public'): void {
     send_security_headers();
     header('Content-Type: text/html; charset=utf-8');
@@ -2686,9 +2832,9 @@ function layout(string $title, string $body, string $mode = 'public'): void {
 <title><?= h($title) ?> · <?= h($site) ?></title>
 <link rel="icon" href="<?= h($favicon) ?>">
 <script nonce="<?= h($nonce) ?>">try{var t=localStorage.getItem('gt_theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;var d=localStorage.getItem('gt_density');if(d==='compact')document.documentElement.dataset.density=d;}catch(e){}</script>
-<style><?= app_css() ?></style>
+<link rel="stylesheet" href="?action=asset&amp;f=css&amp;v=<?= h(css_version()) ?>">
 </head>
-<body class="pg-<?= h($act === '' ? 'lobby' : preg_replace('/[^a-z0-9]/', '', $act)) ?>">
+<body class="pg-<?= h($act === '' ? 'lobby' : preg_replace('/[^a-z0-9]/', '', $act)) ?><?= is_embed() ? ' embed' : '' ?>">
 <a class="skip" href="#main">Skip to content</a>
 <?php if ($mode === 'public' && setting('announcement') !== ''): ?>
 <div class="announce" role="status"><?= h(setting('announcement')) ?></div>
@@ -2702,6 +2848,7 @@ function layout(string $title, string $body, string $mode = 'public'): void {
   <nav class="nav" aria-label="Main">
     <?= $nav('', 'Lobby') ?>
     <?php foreach (GAME_CATEGORIES as $ck => [$cl]): $inCat = isset(GAME_REGISTRY[$act]) && GAME_REGISTRY[$act][1] === $ck; ?><a href="<?= h(url()) ?>#cat-<?= h($ck) ?>"<?= $inCat ? ' aria-current="page"' : '' ?>><?= h(['slots' => 'Slots', 'reels' => 'Keno', 'tables' => 'Tables', 'cards' => 'Cards', 'arcade' => 'Arcade', 'worlds' => '3D'][$ck] ?? $ck) ?></a><?php endforeach; ?>
+    <?php if (isetting('floor_enabled', 1)): ?><?= $nav('floor', 'The Floor') ?><?php endif; ?>
     <?= $nav('leaderboard', 'Leaders') ?>
   </nav>
   <div class="me">
@@ -2808,6 +2955,18 @@ function page_lobby(): void {
 
 <?php if ($p): echo bonus_strip($p); endif; ?>
 
+<?php if (isetting('floor_enabled', 1)): ?>
+<a class="featured floor-card reveal d4" href="<?= h(url('floor')) ?>">
+  <div>
+    <p class="eyebrow">New · walk the casino</p>
+    <h2>The Floor</h2>
+    <p>A first-person 3D casino. Walk the slot hall, the pit and the card room, sit down at any machine or table, and see everyone else who's playing.</p>
+    <ul><li>Every game on the floor</li><li>Live players as avatars</li><li>Multiplayer hold'em</li><li>Works on phones</li></ul>
+    <span class="btn gold lg">Step inside</span>
+  </div>
+  <div class="featured-art floor-art" aria-hidden="true"><?= floor_art() ?></div>
+</a>
+<?php endif; ?>
 <?php $pdGame = array_values(array_filter($games, fn($x) => $x['slug'] === 'plinko'))[0] ?? null; if ($pdGame): ?>
 <a class="featured reveal d4" href="<?= h(url('plinko')) ?>">
   <div>
@@ -2830,7 +2989,11 @@ function page_lobby(): void {
     <div class="game-art" aria-hidden="true"><?= $art[$g['slug']] ?? game_icon($g['slug']) ?></div>
     <h3 class="display md"><?= h($g['name']) ?></h3>
     <p><?= h($g['blurb']) ?></p>
+    <?php if ($g['slug'] === 'poker'): $lo = row('SELECT small_blind, big_blind FROM poker_tables WHERE enabled = 1 ORDER BY big_blind LIMIT 1'); ?>
+    <p class="limits"><?= coin_svg(14) ?> blinds from <?= $lo ? coins((int)$lo['small_blind']) . '/' . coins((int)$lo['big_blind']) : '10/20' ?> · live tables</p>
+    <?php else: ?>
     <p class="limits"><?= coin_svg(14) ?> <?= coins((int)$g['min_bet']) ?>–<?= coins((int)$g['max_bet']) ?> GC</p>
+    <?php endif; ?>
     <span class="play">Play &rarr;</span>
   </a>
   <?php endforeach; ?>
@@ -3300,6 +3463,7 @@ function page_rules(): void {
  * panel HTML and the script just swaps it in and animates.
  */
 const GAME_RULES = [
+    'poker' => ['No-limit Texas hold\'em, real players at the table (house players fill empty seats and are labelled). Blinds and buy-in range are set per table.', 'Buy in from your Gold Coins. Your stack lives at the table until you stand up, then it goes straight back to your balance.', 'Fold, check, call, raise or shove. Minimum raise is the size of the last raise. Side pots are handled like a live room and odd chips go to the first seat left of the button.', 'The clock gives you ' . 20 . ' seconds an action; two timeouts and you sit out. Leave any time; if you\'re in a hand, you\'re folded and paid when it ends.', 'Every deal is committed to before a card moves: the table shows a SHA-256 of the shuffled deck, and reveals the deck and salt after the hand. Open any hand history to verify it.'],
     'roulette3d' => ['Tap a chip, tap the board, hit Spin. Same single-zero payouts as the 2D table (35:1 straight up).', 'The wheel you watch is the real result: the server picks the pocket, then the ball is steered into it.', 'Right-click or long-press a spot to pull chips back.'],
     'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay true odds with zero house edge.', 'Every number has Place (6/8 pay 7:6, 5/9 pay 7:5, 4/10 pay 9:5), Buy (true odds, 5% on wins) and Lay (bet the 7 beats it). Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.'],
     'pusher' => ['Each coin you drop costs your coin value. Coins that spill over the front edge are yours.', 'Tap the machine or use the slider to aim. Aiming is just for fun: how many coins fall is decided the moment you drop.', 'About 46% of drops spill something, and rare avalanches pay 25× or 100×. Return to player is 95%.'],
@@ -4105,6 +4269,7 @@ function game_icon(string $slug): string {
         'plinko' => '<svg viewBox="0 0 40 40"><g fill="#e8b64c"><circle cx="20" cy="8" r="2.5"/><circle cx="14" cy="16" r="2.5"/><circle cx="26" cy="16" r="2.5"/><circle cx="8" cy="24" r="2.5"/><circle cx="20" cy="24" r="2.5"/><circle cx="32" cy="24" r="2.5"/></g><circle cx="17" cy="33" r="4.5" fill="#fff"/></svg>',
         'mines' => '<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="11" fill="#f3e9ff" stroke="#c9b8e8" stroke-width="2"/><circle cx="16" cy="16" r="3" fill="#fff"/></svg>',
         'dice' => die_svg(6), 'craps' => die_svg(6) , 'roulette3d' => mini_wheel(),
+        'poker' => '<span class="ico-card">A♠</span><span class="ico-card red">A♥</span>',
         'pusher' => '<svg viewBox="0 0 40 40"><g fill="#e8b64c" stroke="#b07d12"><ellipse cx="14" cy="28" rx="9" ry="4"/><ellipse cx="24" cy="24" rx="9" ry="4"/><ellipse cx="18" cy="18" rx="9" ry="4"/></g></svg>',
         default => isset(VS_ART[$slug]) ? '<svg viewBox="0 0 64 64">' . VS_ART[$slug]['W']['svg'] . '</svg>' : '',
     };
@@ -4139,6 +4304,119 @@ function page_game(string $slug): void {
 <?= games_rail($slug) ?>
 <?php layout($g['name'], ob_get_clean());
 }
+
+/* ═════════════════════════ THE FLOOR + POKER PAGES ═════════════════════════ */
+
+/** Lobby card art for the floor: a little isometric casino. */
+function floor_art(): string {
+    return '<svg viewBox="0 0 200 140" class="art-wide" aria-hidden="true"><defs><linearGradient id="fa-g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#ffd98a"/><stop offset="1" stop-color="#b07d12"/></linearGradient></defs>'
+        . '<path d="M10 90 L100 40 L190 90 L100 140 Z" fill="#1d1a2b" stroke="#e8b64c" stroke-width="1.5"/>'
+        . '<path d="M40 88 L100 56 L160 88 L100 120 Z" fill="#3b1f1a" opacity=".9"/>'
+        . '<g fill="url(#fa-g)"><rect x="56" y="62" width="10" height="16" rx="1"/><rect x="70" y="56" width="10" height="16" rx="1"/><rect x="84" y="50" width="10" height="16" rx="1"/></g>'
+        . '<ellipse cx="128" cy="92" rx="22" ry="11" fill="#0e4a43" stroke="#ffd98a" stroke-width="1.5"/>'
+        . '<ellipse cx="84" cy="104" rx="16" ry="8" fill="#5a1d1d" stroke="#ffd98a" stroke-width="1.5"/>'
+        . '<circle cx="128" cy="92" r="3" fill="#ffd98a"/><circle cx="84" cy="104" r="2.5" fill="#fff"/>'
+        . '<g fill="#ffd98a"><circle cx="150" cy="60" r="2"/><circle cx="60" cy="40" r="1.6"/><circle cx="100" cy="28" r="2.2"/></g></svg>';
+}
+
+/** What the floor and poker modules need from the server. Rendered as JSON in the page. */
+function rt_page_config(): array {
+    $p = current_player();
+    $games = [];
+    foreach (q('SELECT slug, name, min_bet, max_bet FROM games WHERE enabled = 1 ORDER BY sort_order, id')->fetchAll() as $g) {
+        if (!isset(GAME_REGISTRY[$g['slug']])) { continue; }
+        $games[$g['slug']] = ['name' => $g['name'], 'cat' => GAME_REGISTRY[$g['slug']][1], 'min' => (int)$g['min_bet'], 'max' => (int)$g['max_bet']];
+    }
+    $tables = q('SELECT id, name, seats, small_blind AS sb, big_blind AS bb, min_buyin AS min_buy, max_buyin AS max_buy, bots FROM poker_tables WHERE enabled = 1 ORDER BY sort_order, id')->fetchAll();
+    foreach ($tables as &$t) { foreach ($t as $k => $v) { if ($k !== 'name') { $t[$k] = (int)$v; } } } unset($t);
+    return [
+        'ws' => rt_ws_url(), 'ticket' => url('rt_ticket'),
+        'me' => $p ? ['uid' => 'p' . (int)$p['id'], 'name' => $p['username'], 'balance' => (int)$p['balance'], 'brk' => on_break($p) !== null] : null,
+        'games' => $games, 'tables' => $tables,
+        'glb' => is_file(DATA_DIR . '/floor.glb') ? '?action=asset&f=glb&v=' . substr(md5((string)filemtime(DATA_DIR . '/floor.glb')), 0, 8) : null,
+        'site' => setting('site_name', 'Gold Tide'), 'act_secs' => isetting('poker_action_seconds', 20),
+        'register' => url('register'), 'login' => url('login'), 'lobby' => url(),
+    ];
+}
+
+// [[REGION floor-page]]
+function page_floor(): void {
+    if (!isetting('floor_enabled', 1)) { error_page(404, 'The floor is closed', 'The 3D casino floor is turned off right now.'); }
+    $cfg = rt_page_config();
+    ob_start(); ?>
+<section class="floor-shell" data-floor>
+  <script type="application/json" id="floor-cfg"><?= json_encode($cfg, JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_SLASHES) ?></script>
+  <div class="floor-css3d" aria-hidden="true"></div>
+  <canvas class="floor-gl" aria-label="The casino floor"></canvas>
+  <div class="floor-hud" hidden></div>
+  <div class="floor-loading"><span></span>Opening the doors…</div>
+  <noscript><p class="panel">The floor needs JavaScript and WebGL. Every game still plays from the <a href="<?= h(url()) ?>">lobby</a>.</p></noscript>
+</section>
+<script type="module" nonce="<?= h(csp_nonce()) ?>" src="?action=asset&amp;f=floor&amp;v=<?= h(floor_version()) ?>"></script>
+<?php layout('The Floor', ob_get_clean());
+}
+// [[/REGION floor-page]]
+
+// [[REGION poker-page]]
+function page_poker(): void {
+    $g = game_header('poker');
+    $p = current_player();
+    $cfg = rt_page_config();
+    $tid = (int)($_GET['t'] ?? 0);
+    ob_start(); ?>
+<section class="table-wrap g-page g-poker">
+  <header class="table-head reveal d1">
+    <p class="eyebrow"><a href="<?= h(url()) ?>#cat-cards"><?= h(GAME_CATEGORIES['cards'][0]) ?></a></p>
+    <h1 class="display lg"><?= h($g['name']) ?></h1>
+    <p class="muted"><?= h($g['blurb']) ?></p>
+  </header>
+  <div class="game-stage reveal d2" data-panel="poker">
+    <?php if ($p): ?>
+    <div class="poker-room" data-poker-room data-table="<?= $tid ?>">
+      <script type="application/json" id="poker-cfg"><?= json_encode($cfg, JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_SLASHES) ?></script>
+      <div class="poker-loading"><span></span>Connecting to the card room…</div>
+      <noscript><p class="panel">Live poker needs JavaScript.</p></noscript>
+    </div>
+    <script type="module" nonce="<?= h(csp_nonce()) ?>" src="?action=asset&amp;f=poker&amp;v=<?= h(poker_version()) ?>"></script>
+    <?php else: ?><div class="gate"><div class="gate-art"><?= game_icon('poker') ?></div><p class="lead">Free account, <?= coins(isetting('starting_coins', 10000)) ?> Gold Coins, no card needed.</p><a class="btn gold lg" href="<?= h(url('register')) ?>">Sign up free to play</a> <a class="btn ghost lg" href="<?= h(url('login')) ?>">Log in</a></div><?php endif; ?>
+  </div>
+  <aside class="panel reveal d3 house-rules">
+    <h2 class="display md">How to play</h2>
+    <ul class="ticks"><?php foreach (GAME_RULES['poker'] as $line): ?><li><?= h($line) ?></li><?php endforeach; ?></ul>
+  </aside>
+</section>
+<?= games_rail('poker') ?>
+<?php layout($g['name'], ob_get_clean());
+}
+
+/** ?action=poker_hand&id=N: a hand history with the deck-commitment check. */
+function page_poker_hand(): void {
+    $id = (int)($_GET['id'] ?? 0);
+    $hand = $id ? row('SELECT h.*, t.name AS table_name FROM poker_hands h JOIN poker_tables t ON t.id = h.table_id WHERE h.id = ?', [$id]) : null;
+    if (!$hand) { error_page(404, 'No such hand', 'That hand history isn\'t here.'); }
+    $rec = json_decode((string)$hand['record'], true) ?: [];
+    $deck = $rec['deck'] ?? [];
+    $check = $deck && $hand['deck_salt'] !== '' ? hash('sha256', implode(' ', $deck) . '|' . $hand['deck_salt']) === $hand['deck_hash'] : null;
+    ob_start(); ?>
+<section class="panel wide reveal d1 poker-history">
+  <p class="eyebrow"><a href="<?= h(url('poker', ['t' => (int)$hand['table_id']])) ?>"><?= h($hand['table_name']) ?></a></p>
+  <h1 class="display lg">Hand #<?= (int)$hand['hand_no'] ?></h1>
+  <p class="muted">Started <?= h($hand['started_at']) ?> UTC<?= $hand['ended_at'] ? ', ended ' . h($hand['ended_at']) . ' UTC' : '' ?>. Pot <?= coins((int)$hand['pot']) ?> GC.</p>
+  <div class="ph-check <?= $check === null ? 'pending' : ($check ? 'ok' : 'bad') ?>">
+    <strong><?= $check === null ? 'Deck not revealed yet' : ($check ? 'Deck commitment verified' : 'Deck commitment FAILED') ?></strong>
+    <p class="fine">deck_hash = SHA-256(deck in deal order + "|" + salt)</p>
+    <p class="fine mono">hash: <?= h($hand['deck_hash']) ?></p>
+    <?php if ($hand['deck_salt'] !== ''): ?><p class="fine mono">salt: <?= h($hand['deck_salt']) ?></p><?php endif; ?>
+    <?php if ($deck): ?><p class="fine mono">deck: <?= h(implode(' ', $deck)) ?></p><?php endif; ?>
+  </div>
+  <script type="application/json" id="hand-record"><?= json_encode($rec, JSON_HEX_TAG | JSON_HEX_AMP) ?></script>
+  <div class="ph-body" data-poker-hand></div>
+  <details><summary>Raw record</summary><pre class="mono"><?= h(json_encode($rec, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) ?></pre></details>
+</section>
+<script type="module" nonce="<?= h(csp_nonce()) ?>" src="?action=asset&amp;f=poker&amp;v=<?= h(poker_version()) ?>"></script>
+<?php layout('Hand #' . (int)$hand['hand_no'], ob_get_clean());
+}
+// [[/REGION poker-page]]
 
 /* ═════════════════════════ ADMIN PAGES ═════════════════════════ */
 
@@ -5166,12 +5444,46 @@ export async function slotCabinet(el) {
 
 JS;
 }
+/* ═════════════════════════ THE FLOOR: first-person 3D casino (ES module) ═════════════════════════ */
+// [[REGION floor-js]]
+function floor_js(): string {
+    return <<<'JS'
+/* Gold Tide: The Floor. Placeholder until the floor module lands. */
+const shell = document.querySelector('[data-floor]');
+if (shell) { const l = shell.querySelector('.floor-loading'); if (l) l.textContent = 'The floor is being built. Check back soon.'; }
+JS;
+}
+// [[/REGION floor-js]]
+
+/* ═════════════════════════ POKER CLIENT (ES module, shared by the poker page and the floor HUD) ═════════════════════════ */
+// [[REGION poker-js]]
+function poker_js(): string {
+    return <<<'JS'
+/* Gold Tide: poker client. Placeholder until the poker client lands. */
+const room = document.querySelector('[data-poker-room]');
+if (room) { const l = room.querySelector('.poker-loading'); if (l) l.textContent = 'The card room is being built. Check back soon.'; }
+JS;
+}
+// [[/REGION poker-js]]
+
 function g3d_version(): string { static $v = null; return $v ??= substr(md5(g3d_js()), 0, 10); }
+function css_version(): string { static $v = null; return $v ??= substr(md5(app_css()), 0, 10); }
+function floor_version(): string { static $v = null; return $v ??= substr(md5(floor_js()), 0, 10); }
+function poker_version(): string { static $v = null; return $v ??= substr(md5(poker_js()), 0, 10); }
 function serve_asset(string $f): never {
     header('X-Content-Type-Options: nosniff');
     header('Content-Type: text/javascript; charset=utf-8');
     header('Cache-Control: ' . (isset($_GET['v']) ? 'public, max-age=31536000, immutable' : 'no-cache'));
     header('Vary: Accept-Encoding');
+    if ($f === 'css') { header('Content-Type: text/css; charset=utf-8'); echo app_css(); exit; }
+    if ($f === 'floor') { echo floor_js(); exit; }
+    if ($f === 'poker') { echo poker_js(); exit; }
+    if ($f === 'glb') {
+        // optional hand-made floor (e.g. exported from Blender) dropped in data/floor.glb replaces the procedural room
+        $file = DATA_DIR . '/floor.glb';
+        if (!is_file($file)) { http_response_code(404); echo '// no floor.glb'; exit; }
+        header('Content-Type: model/gltf-binary'); header('Content-Length: ' . filesize($file)); readfile($file); exit;
+    }
     if ($f === 'three') {
         $gz = three_gz();
         if (str_contains($_SERVER['HTTP_ACCEPT_ENCODING'] ?? '', 'gzip') && !ini_get('zlib.output_compression')) {
@@ -5210,6 +5522,7 @@ function route(): void {
         'play_roulette' => fn() => play('roulette_spin', 'roulette'),
         'play' => fn() => play_game(),
         'fair' => fn() => fair_rotate(),
+        'rt_ticket' => fn() => do_rt_ticket(),
         'claim_daily' => fn() => play('claim_daily', ''),
         'claim_refill' => fn() => play('claim_refill', ''),
         'redeem' => fn() => play('redeem_promo', ''),
@@ -5232,6 +5545,9 @@ function route(): void {
         'login' => fn() => page_login(),
         'register' => fn() => page_register(),
         'rules' => fn() => page_rules(),
+        'floor' => fn() => page_floor(),
+        'poker' => fn() => page_poker(),
+        'poker_hand' => fn() => page_poker_hand(),
         'api_me' => function () {
             $p = current_player();
             ok($p ? ['username' => $p['username'], 'balance' => (int)$p['balance'], 'daily' => daily_status($p), 'refill' => refill_status($p), 'on_break' => on_break($p)] : null);
@@ -6094,6 +6410,34 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
   .vs-reels{gap:3px}.vs-window{padding:4px}
 }
 
+/* ═════ embed mode: a game page shown on a machine screen inside the floor ═════ */
+.embed .top,.embed .foot,.embed .rail,.embed .house-rules,.embed .table-head,.embed .announce,.embed .skip{display:none!important}
+.embed main{padding:10px;max-width:none}
+.embed .table-wrap{grid-template-columns:minmax(0,1fr)}
+.embed .game-stage{border-radius:14px;padding:12px}
+.embed .g3d{max-height:none}
+/* ═════ the floor shell ═════ */
+/* [[REGION floor-css]] */
+.pg-floor main{padding:0;max-width:none}
+.pg-floor .foot{display:none}
+.pg-floor .top{position:fixed;left:0;right:0;top:0;background:rgba(6,8,16,.72);backdrop-filter:blur(10px)}
+.floor-shell{position:fixed;inset:0;background:#05070d;overflow:hidden;touch-action:none}
+.floor-css3d,.floor-gl{position:absolute;inset:0;width:100%;height:100%}
+.floor-css3d{overflow:hidden;pointer-events:none}
+.floor-gl{display:block;touch-action:none}
+.floor-loading{position:absolute;inset:0;display:grid;place-content:center;justify-items:center;gap:12px;color:#cbd8e6;font-weight:600;text-align:center;padding:20px}
+.floor-loading span{width:38px;height:38px;border-radius:50%;border:4px solid rgba(255,255,255,.15);border-top-color:#ffd98a;animation:spin3d 1s linear infinite}
+.floor-card .floor-art svg{width:min(100%,320px);height:auto}
+/* [[/REGION floor-css]] */
+/* ═════ poker room ═════ */
+/* [[REGION poker-css]] */
+.poker-room{position:relative;min-height:320px}
+.poker-loading{display:grid;place-content:center;justify-items:center;gap:12px;color:var(--muted);font-weight:600;min-height:280px}
+.poker-loading span{width:38px;height:38px;border-radius:50%;border:4px solid rgba(255,255,255,.15);border-top-color:#ffd98a;animation:spin3d 1s linear infinite}
+.ph-check{padding:14px 16px;border-radius:14px;border:1px solid var(--line);margin:14px 0}
+.ph-check.ok{border-color:#4fe0a0;background:rgba(27,138,90,.15)}.ph-check.bad{border-color:#ff7d6b;background:rgba(214,40,63,.15)}
+.mono{font-family:var(--f-mono);word-break:break-all}
+/* [[/REGION poker-css]] */
 /* ═════ 3D games ═════ */
 .g-3d{grid-template-columns:minmax(0,1fr)}
 .g3d-wrap{position:relative;display:grid;gap:10px;margin-bottom:12px}
@@ -6336,8 +6680,10 @@ function countUp(el, from, to) {
   };
   requestAnimationFrame(step);
 }
+const EMBED = document.body.classList.contains('embed');
 function setBalance(n) {
   $$('[data-balance]').forEach(el => { countUp(el, +el.dataset.balance || 0, n); el.dataset.balance = n; });
+  if (EMBED && window.parent !== window) { try { window.parent.postMessage({ t: 'gt_balance', balance: n }, location.origin); } catch (e) {} }
   const pill = $('.balance');
   if (pill) { pill.classList.remove('bump'); void pill.offsetWidth; pill.classList.add('bump'); }
 }
