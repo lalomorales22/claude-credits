@@ -2,21 +2,20 @@
 <?php
 /**
  * tests/ws_test.php: end-to-end tests for ws.php against REALTIME.md (Running it, Tickets, Wire protocol, The floor,
- * Persistence, Security rules) using the stub poker engine (tests/pk_stub.php). No framework: one line per check,
- * a summary, exit 1 on any failure. It runs from a temporary copy of goldtide/ with its own SQLite file, so the
- * real data/ is never touched, and it starts and stops its own ws.php on a free port in 8300-8399.
+ * Persistence, Security rules) with the real poker engine from index.php. No framework: one line per check, a
+ * summary, exit 1 on any failure. It runs from a temporary copy of goldtide/ with its own SQLite file (under
+ * TMPDIR / the system temp dir), so the real data/ is never touched, and it starts and stops its own ws.php on a
+ * free port in 8300-8399. The poker part plays two hands heads-up on table 1 (bots off, 2 s clock) and checks the
+ * ledger after every path that moves coins. tests/poker_e2e_test.php covers the longer multi-hand scenarios.
  *
  *     php goldtide/tests/ws_test.php
  */
 declare(strict_types=1);
 error_reporting(E_ALL);
 
+require __DIR__ . '/ws_client.php';
 $root = dirname(__DIR__);
-$tmp = rtrim(sys_get_temp_dir(), '/') . '/gt_ws_test_' . getmypid();
-if (!is_dir("$tmp/tests") && !mkdir("$tmp/tests", 0700, true)) { fwrite(STDERR, "cannot create $tmp\n"); exit(1); }
-foreach (['index.php', 'ws.php', 'tests/pk_stub.php'] as $f) {
-    if (!copy("$root/$f", "$tmp/$f")) { fwrite(STDERR, "cannot copy $f\n"); exit(1); }
-}
+$tmp = scratch_copy($root, 'ws_test');
 define('GT_NO_ROUTE', 1);
 require "$tmp/index.php";          // headless: db(), q(), tx(), rt_ticket_make() on the scratch database
 ini_set('display_errors', 'stderr');
@@ -34,202 +33,6 @@ function check(bool $ok, string $name, string $detail = ''): bool {
 }
 function section(string $s): void { echo "\n== $s\n"; }
 function short(mixed $v): string { return substr((string)json_encode($v), 0, 160); }
-
-function free_port(): int {
-    for ($p = 8300; $p <= 8399; $p++) {
-        $s = @stream_socket_server("tcp://127.0.0.1:$p", $errno, $errstr);
-        if ($s) { fclose($s); return $p; }
-    }
-    throw new RuntimeException('no free port in 8300-8399');
-}
-
-/** Plain HTTP exchange with the socket server (for /health and non-upgrade requests). Returns [status line, headers, body]. */
-function raw_http(int $port, string $request): array {
-    $s = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 3);
-    if (!$s) { return ['', [], '']; }
-    stream_set_timeout($s, 3);
-    fwrite($s, $request);
-    $resp = '';
-    while (!feof($s)) { $chunk = fread($s, 8192); if ($chunk === false || $chunk === '') { $info = stream_get_meta_data($s); if ($info['timed_out']) { break; } if ($chunk === '') { usleep(5000); } continue; } $resp .= $chunk; }
-    fclose($s);
-    $p = strpos($resp, "\r\n\r\n");
-    if ($p === false) { return [$resp, [], '']; }
-    $lines = explode("\r\n", substr($resp, 0, $p));
-    $status = array_shift($lines);
-    $h = [];
-    foreach ($lines as $l) { $q = strpos($l, ':'); if ($q !== false) { $h[strtolower(trim(substr($l, 0, $q)))] = trim(substr($l, $q + 1)); } }
-    return [$status, $h, substr($resp, $p + 4)];
-}
-
-function health(int $port): ?array {
-    [$status, , $body] = raw_http($port, "GET /health HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n");
-    return str_starts_with($status, 'HTTP/1.1 200') ? (json_decode($body, true) ?: null) : null;
-}
-
-/** Start another ws.php against the same scratch database and wait (≤ 5 s) for it to exit. [exit code (null = still running, killed), output]. */
-function second_server(string $tmp, int $port): array {
-    $pr = proc_open([PHP_BINARY, "$tmp/ws.php", '--port', (string)$port, '--bind', '127.0.0.1'], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pp, $tmp, ['GT_PK_STUB' => '1'] + getenv());
-    if (!is_resource($pr)) { return [null, 'proc_open failed']; }
-    fclose($pp[0]);
-    stream_set_blocking($pp[1], false); stream_set_blocking($pp[2], false);
-    $out = ''; $code = null; $t0 = microtime(true);
-    while (microtime(true) - $t0 < 5) {
-        $out .= (string)stream_get_contents($pp[1]) . (string)stream_get_contents($pp[2]);
-        $st = proc_get_status($pr);
-        if (!$st['running']) { $code = $st['exitcode']; break; }
-        usleep(50000);
-    }
-    if ($code === null) { proc_terminate($pr, SIGKILL); }
-    $out .= (string)stream_get_contents($pp[1]) . (string)stream_get_contents($pp[2]);
-    fclose($pp[1]); fclose($pp[2]); proc_close($pr);
-    return [$code, $out];
-}
-
-function ticket_for(int $pid, string $name, array $extra = []): string {
-    return rt_ticket_make(['uid' => 'p' . $pid, 'pid' => $pid, 'name' => $name] + $extra);
-}
-function guest_ticket(): string {
-    $g = bin2hex(random_bytes(4));
-    return rt_ticket_make(['uid' => 'g' . $g, 'pid' => 0, 'name' => 'Guest ' . substr($g, 0, 4)]);
-}
-
-/* ───────────────────────── a small WebSocket client (RFC 6455, masked client frames) ───────────────────────── */
-
-final class WsClient {
-    public $s = null;
-    public string $status = '';
-    public array $headers = [];
-    public string $buf = '';
-    public array $inbox = [];      // decoded messages not consumed yet
-    public array $seen = [];       // every decoded message, for scans
-    public array $pings = [], $pongs = [];
-    public ?int $closeCode = null;
-    public bool $eof = false;
-    public bool $autoPong = true;
-    public string $label = '';
-
-    public static function open(int $port, ?string $origin = 'http://localhost:8100', ?string $key = null, string $label = ''): self {
-        $c = new self();
-        $c->label = $label;
-        $c->s = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 3);
-        if (!$c->s) { throw new RuntimeException("connect failed: $errstr"); }
-        stream_set_timeout($c->s, 3);
-        $key ??= base64_encode(random_bytes(16));
-        $h = "GET / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n";
-        if ($origin !== null) { $h .= "Origin: $origin\r\n"; }
-        fwrite($c->s, $h . "\r\n");
-        $head = '';
-        $deadline = microtime(true) + 3;
-        while (!str_contains($head, "\r\n\r\n") && microtime(true) < $deadline) {
-            $chunk = fread($c->s, 4096);
-            if ($chunk === false || ($chunk === '' && feof($c->s))) { break; }
-            if ($chunk === '') { usleep(5000); continue; }
-            $head .= $chunk;
-        }
-        $p = strpos($head, "\r\n\r\n");
-        if ($p === false) { $c->status = trim($head); $c->eof = true; return $c; }
-        $c->buf = substr($head, $p + 4);
-        $lines = explode("\r\n", substr($head, 0, $p));
-        $c->status = (string)array_shift($lines);
-        foreach ($lines as $l) { $q = strpos($l, ':'); if ($q !== false) { $c->headers[strtolower(trim(substr($l, 0, $q)))] = trim(substr($l, $q + 1)); } }
-        stream_set_blocking($c->s, false);
-        if (!$c->ok()) { $c->eof = true; }
-        self::$all[] = $c;
-        return $c;
-    }
-
-    public function ok(): bool { return str_starts_with($this->status, 'HTTP/1.1 101'); }
-
-    public function frame(string $payload, int $op = 1, bool $mask = true, bool $fin = true): string {
-        $len = strlen($payload);
-        $h = chr(($fin ? 0x80 : 0) | $op);
-        $m = $mask ? 0x80 : 0;
-        if ($len < 126) { $h .= chr($m | $len); } elseif ($len < 65536) { $h .= chr($m | 126) . pack('n', $len); } else { $h .= chr($m | 127) . pack('J', $len); }
-        if (!$mask) { return $h . $payload; }
-        $key = random_bytes(4);
-        return $h . $key . ($payload ^ substr(str_repeat($key, intdiv($len, 4) + 1), 0, $len));
-    }
-
-    public function sendRaw(string $bytes): void { if ($this->s) { @fwrite($this->s, $bytes); } }
-    public function send(array $msg): void { $this->sendRaw($this->frame((string)json_encode($msg))); }
-
-    /** @var self[] every open client: pumping any one of them services all of them (pongs keep the others alive) */
-    public static array $all = [];
-
-    /** Read for up to $secs, decoding frames for every open client; stops early when $until() is true. */
-    public function pump(float $secs, ?callable $until = null): void {
-        $deadline = microtime(true) + $secs;
-        while (true) {
-            if ($until && $until()) { return; }
-            if ($this->eof) { return; }
-            $left = $deadline - microtime(true);
-            if ($left <= 0) { return; }
-            $r = []; $by = [];
-            foreach (self::$all as $c) { if (!$c->eof && $c->s) { $r[] = $c->s; $by[get_resource_id($c->s)] = $c; } }
-            if (!$r) { return; }
-            $w = null; $e = null;
-            if (@stream_select($r, $w, $e, 0, (int)min(200000, $left * 1e6)) > 0) {
-                foreach ($r as $s) {
-                    $c = $by[get_resource_id($s)];
-                    $d = fread($s, 65536);
-                    if ($d === false || ($d === '' && feof($s))) { $c->eof = true; continue; }
-                    $c->buf .= $d;
-                    $c->parse();
-                }
-            }
-        }
-    }
-
-    private function parse(): void {
-        while (strlen($this->buf) >= 2) {
-            $b0 = ord($this->buf[0]); $b1 = ord($this->buf[1]);
-            $op = $b0 & 0x0f; $len = $b1 & 0x7f; $off = 2;
-            if ($len === 126) { if (strlen($this->buf) < 4) { return; } $len = unpack('n', $this->buf, 2)[1]; $off = 4; }
-            elseif ($len === 127) { if (strlen($this->buf) < 10) { return; } $len = unpack('J', $this->buf, 2)[1]; $off = 10; }
-            if ($b1 & 0x80) { $off += 4; }
-            if (strlen($this->buf) < $off + $len) { return; }
-            $payload = substr($this->buf, $off, $len);
-            $this->buf = (string)substr($this->buf, $off + $len);
-            switch ($op) {
-                case 1: $m = json_decode($payload, true); if (is_array($m)) { $this->inbox[] = $m; $this->seen[] = $m; } break;
-                case 8: $this->closeCode = $len >= 2 ? unpack('n', $payload)[1] : 1005; break;
-                case 9: $this->pings[] = $payload; if ($this->autoPong) { $this->sendRaw($this->frame($payload, 10)); } break;
-                case 10: $this->pongs[] = $payload; break;
-            }
-        }
-    }
-
-    /** The next message of type $t (optionally matching $pred) within $secs; other messages stay queued in order. */
-    public function waitFor(string $t, float $secs = 3.0, ?callable $pred = null): ?array {
-        $deadline = microtime(true) + $secs;
-        while (true) {
-            foreach ($this->inbox as $i => $m) {
-                if (($m['t'] ?? '') === $t && (!$pred || $pred($m))) { unset($this->inbox[$i]); $this->inbox = array_values($this->inbox); return $m; }
-            }
-            $left = $deadline - microtime(true);
-            if ($left <= 0 || $this->eof) { return null; }
-            $n = count($this->inbox);
-            $this->pump(min($left, 0.25), fn() => count($this->inbox) > $n || $this->closeCode !== null);
-        }
-    }
-
-    /** Close code from the server (or -1 for a bare EOF), null when still open after $secs. */
-    public function waitClose(float $secs = 3.0): ?int {
-        $this->pump($secs, fn() => $this->closeCode !== null || $this->eof);
-        return $this->closeCode ?? ($this->eof ? -1 : null);
-    }
-
-    public function hello(string $ticket, string $room = 'floor'): ?array {
-        $this->send(['t' => 'hello', 'ticket' => $ticket, 'room' => $room]);
-        return $this->waitFor('welcome');
-    }
-
-    public function close(): void {
-        if ($this->s) { @fclose($this->s); }
-        $this->eof = true;
-        self::$all = array_values(array_filter(self::$all, fn($c) => $c !== $this));
-    }
-}
 
 /* ───────────────────────── fixtures ───────────────────────── */
 
@@ -250,17 +53,13 @@ $seatRow = fn(int $pid) => row('SELECT * FROM poker_seats WHERE player_id = ?', 
 
 section('start-up');
 $port = free_port();
-$logPath = "$tmp/server.log";
-$log = fopen($logPath, 'wb');
-$cmd = [PHP_BINARY, "$tmp/ws.php", '--port', (string)$port, '--bind', '127.0.0.1', '--idle', '3', '--away', '2', '--tick', '20', '--verbose'];
-$proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => $log, 2 => $log], $pipes, $tmp, ['GT_PK_STUB' => '1'] + getenv());
-if (!is_resource($proc)) { fwrite(STDERR, "cannot start ws.php\n"); exit(1); }
-$h = null;
-for ($i = 0; $i < 100 && !$h; $i++) { usleep(100000); $h = health($port); }
+[$proc, $logPath] = start_server($tmp, $port, ['--idle', '3', '--away', '6', '--tick', '20', '--verbose']);
+$h = wait_health($port);
 check((bool)$h && $h['ok'] === true, "ws.php is up on 127.0.0.1:$port and answers GET /health", (string)file_get_contents($logPath));
 if (!$h) { proc_terminate($proc); exit(1); }
 check(count($h['tables'] ?? []) === 3 && isset($h['tables'][0]['id'], $h['tables'][0]['seated'], $h['tables'][0]['hand_no']), '/health lists the 3 seeded tables with id/seated/hand_no', short($h));
-check(str_contains((string)file_get_contents($logPath), 'STUB active'), 'the stub engine announces itself loudly in the log');
+$boot = (string)file_get_contents($logPath);
+check(!str_contains($boot, 'STUB') && !str_contains($boot, 'no poker engine') && str_contains($boot, 'tables 3'), 'the real engine from index.php is hosting (no stub, no floor-only warning)', substr($boot, 0, 300));
 check($balance($S) === 600 && !$seatRow($S), 'start-up refunded the stale poker_seats row (100 + 500 = 600) and deleted it', 'balance ' . $balance($S));
 $led = row("SELECT * FROM ledger WHERE player_id = ? ORDER BY id DESC LIMIT 1", [$S]);
 check($led && $led['kind'] === 'payout' && $led['game'] === 'poker' && (int)$led['amount'] === 500 && str_starts_with($led['detail'], 'table reset'), 'the refund is a poker payout in the ledger', short($led));
@@ -431,6 +230,24 @@ check($r && (int)$r['table_id'] === 1 && (int)$r['seat'] === 0 && (int)$r['stack
 $led = row('SELECT * FROM ledger WHERE player_id = ? ORDER BY id DESC LIMIT 1', [$A]);
 check($led && $led['kind'] === 'wager' && $led['game'] === 'poker' && (int)$led['amount'] === -1000 && str_starts_with($led['detail'], 'buy-in'), 'buy-in is a poker wager in the ledger', short($led));
 check($sa !== null && $sa['table']['me'] === 0 && $sa['table']['players'][0]['uid'] === 'p' . $A, 'A sees itself in seat 0', short($sa['table'] ?? null));
+check($sa['table']['players'][0]['owes'] === true && $sa['table']['players'][0]['post'] === false, 'a new seat owes a big blind (owes:true, post:false in the view)', short($sa['table']['players'][0] ?? null));
+$a->send(['t' => 'pk_post', 'on' => true]);
+$st = $a->waitFor('pk_state', 2, fn($m) => !empty($m['table']['players'][0]['post']));
+check($st !== null, 'pk_post {on:true} is relayed to pk_post(): the seat now asks to post (players[].post true in the next pk_state)', short($st['table']['players'][0] ?? null));
+$a->send(['t' => 'pk_post', 'on' => true]);   // a repeat is a no-op
+check($a->waitFor('pk_state', 0.3) === null, 'a repeat of the current post flag sends no new state');
+$a->send(['t' => 'pk_post', 'on' => false]);
+$st = $a->waitFor('pk_state', 2, fn($m) => empty($m['table']['players'][0]['post']));
+check($st !== null, 'pk_post {on:false} withdraws it');
+$a->send(['t' => 'pk_addon', 'amount' => 500]);
+$bal = $a->waitFor('bal');
+check($bal !== null && $bal['balance'] === 8500 && $balance($A) === 8500 && (int)$seatRow($A)['stack'] === 1500, 'pk_addon between hands: 500 more on the table, the seat row follows (1500), bal 8500', short([$bal, $seatRow($A)]));
+$led = row('SELECT * FROM ledger WHERE player_id = ? ORDER BY id DESC LIMIT 1', [$A]);
+check($led && $led['kind'] === 'wager' && (int)$led['amount'] === -500 && str_starts_with($led['detail'], 'add-on'), 'the add-on is a poker wager in the ledger', short($led));
+$ledgerN = (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$A]);
+$a->send(['t' => 'pk_addon', 'amount' => 3000]);   // 1500 + 3000 > max_buy 4000
+$e = $a->waitFor('pk_err');
+check($e !== null && str_contains($e['msg'], 'maximum') && $balance($A) === 8500 && (int)$seatRow($A)['stack'] === 1500 && (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$A]) === $ledgerN, 'an add-on over the table maximum is refused by the engine before anything is written', short([$e, $balance($A)]));
 
 // a second ws.php against the same database (double launch, restart overlap) must exit before it "recovers" A's live seat
 $ledgerN = (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$A]);
@@ -438,7 +255,7 @@ $ledgerN = (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$A]);
 check($code2 !== null && $code2 !== 0 && str_contains($out2, 'already owns'), 'a second ws.php on another port refuses to start: the database already has a server', short([$code2, substr($out2, -200)]));
 [$code3] = second_server($tmp, $port);                // the same port
 check($code3 !== null && $code3 !== 0, 'a second ws.php on the same port exits non-zero', short($code3));
-check($balance($A) === 9000 && (int)($seatRow($A)['stack'] ?? 0) === 1000 && (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$A]) === $ledgerN, 'neither touched the ledger: A still has 9000 GC in the bank and 1000 GC on the table, no phantom "table reset" refund', short([$balance($A), $seatRow($A)]));
+check($balance($A) === 8500 && (int)($seatRow($A)['stack'] ?? 0) === 1500 && (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$A]) === $ledgerN, 'neither touched the ledger: A still has 8500 GC in the bank and 1500 GC on the table, no phantom "table reset" refund', short([$balance($A), $seatRow($A)]));
 check(health($port) !== null, 'the live server is unaffected');
 $a->send(['t' => 'pk_join', 'table' => 1, 'seat' => 2, 'buyin' => 1000]);
 $e = $a->waitFor('pk_err');
@@ -502,8 +319,9 @@ while (microtime(true) < $deadline && !$ended) {
         foreach ($cl->inbox as $i => $m) {
             if ($m['t'] === 'pk_events') { foreach ($m['events'] as $e) { if ($e['t'] === 'hand_end') { $ended = $e; } } unset($cl->inbox[$i]); continue; }
             if ($m['t'] !== 'pk_state') { continue; }
-            unset($cl->inbox[$i]);
             $tbl = $m['table'];
+            if ((int)$tbl['hand_no'] !== 1) { continue; }   // hand 2 deals on the tick after hand_end and can already be in the inbox: left queued for the hand-2 loop
+            unset($cl->inbox[$i]);
             foreach ($tbl['players'] as $p) { if ($p['uid'] === 'p' . $pid && $p['cards']) { $cards[$k] = $p['cards']; } }
             if (!empty($tbl['legal']) && $tbl['phase'] !== 'settle') {
                 $cl->send(['t' => 'pk_act', 'act' => $tbl['legal']['check'] ? 'check' : 'call', 'amt' => 0, 'hand' => $tbl['hand_no'], 'seq' => $tbl['seq']]);
@@ -519,7 +337,7 @@ check(count($cards) === 2, 'both players saw their own hole cards', short($cards
 $leak = 0; $checked = 0;
 foreach ([['A', $a, 'p' . $B, 'B'], ['B', $b, 'p' . $A, 'A'], ['guest', $g, null, null]] as [$who, $cl, $otherUid, $otherKey]) {
     foreach ($cl->seen as $m) {
-        if ($m['t'] !== 'pk_state' || ($m['table']['id'] ?? 0) !== 1) { continue; }
+        if ($m['t'] !== 'pk_state' || ($m['table']['id'] ?? 0) !== 1 || (int)($m['table']['hand_no'] ?? 0) !== 1) { continue; }   // hand 1 only: another hand's board may hold these cards
         $json = (string)json_encode($m);
         foreach ($m['table']['players'] as $p) {
             $mine = $who !== 'guest' && $p['uid'] === ($who === 'A' ? 'p' . $A : 'p' . $B);
@@ -544,11 +362,12 @@ $pa = row('SELECT rounds_played, total_wagered, total_won FROM players WHERE id 
 $pb = row('SELECT rounds_played, total_wagered, total_won FROM players WHERE id = ?', [$B]);
 check((int)$pa['rounds_played'] === 1 && (int)$pb['rounds_played'] === 1, 'record_round counted one round for each real player', short([$pa, $pb]));
 check((int)$pa['total_wagered'] + (int)$pb['total_wagered'] === (int)$hand['pot'] && (int)$pa['total_won'] + (int)$pb['total_won'] === (int)$hand['pot'] && (int)$hand['pot'] > 0, 'wagered and won across the table both add up to the pot', short([$pa, $pb, $hand['pot']]));
-check($stacks['p' . $A] + $stacks['p' . $B] === 2000, 'chips are conserved: 1000 + 1000 in, same out', short($stacks));
+check($stacks['p' . $A] + $stacks['p' . $B] === 2500, 'chips are conserved: 1500 + 1000 in, same out', short($stacks));
 
-// hand 2 ends without a showdown: the first player to act folds. The winner never showed, so nobody else may see the winning hole cards
-$a->inbox = []; $b->inbox = [];
-$started2 = false; $folded = null; $ended2 = null; $mine2 = []; $deadline = microtime(true) + 12;
+// hand 2 ends without a showdown: the first player to act folds. The winner never showed, so nobody else may see the winning hole cards.
+// A asks to leave during the settle pause (the hand is decided but not over): the engine defers it, ws.php pays it at hand_end.
+// (hand 2 deals on the tick after hand 1's hand_end, so its first states may already be in the inboxes: nothing is discarded here)
+$started2 = false; $folded = null; $ended2 = null; $mine2 = []; $leaveAt = null; $leavingSeen = false; $deadline = microtime(true) + 14;
 while (microtime(true) < $deadline && !$ended2) {
     foreach ($players as $k => [$cl, $pid]) {
         $cl->pump(0.05);
@@ -564,14 +383,20 @@ while (microtime(true) < $deadline && !$ended2) {
             $started2 = true;
             foreach ($tbl['players'] as $p) { if ($p['uid'] === 'p' . $pid && $p['cards']) { $mine2[$k] = $p['cards']; } }
             if (!empty($tbl['legal']) && $folded === null) { $folded = $k; $cl->send(['t' => 'pk_act', 'act' => 'fold', 'amt' => 0, 'hand' => 2, 'seq' => $tbl['seq']]); }
+            if ($k === 'A' && $tbl['phase'] === 'settle' && $leaveAt === null) { $leaveAt = microtime(true); $a->send(['t' => 'pk_leave']); }
+            if ($k === 'A' && $tbl['phase'] === 'settle' && !empty($tbl['players'][0]['leaving'])) { $leavingSeen = true; }
         }
         $cl->inbox = array_values($cl->inbox);
     }
 }
-$stacks = ['p' . $A => (int)($seatRow($A)['stack'] ?? -1), 'p' . $B => (int)($seatRow($B)['stack'] ?? -1)];
-$a->send(['t' => 'pk_leave']);   // now, before the next hand deals A in again; the checks below read what has already arrived
 check($ended2 !== null && $folded !== null, 'hand 2: the first player to act folded and the hand ended uncontested', short([$folded, $ended2]));
-check($stacks['p' . $A] + $stacks['p' . $B] === 2000, 'chips are still conserved after the uncontested pot', short($stacks));
+$hand2 = row('SELECT * FROM poker_hands WHERE table_id = 1 AND hand_no = 2');
+$rec2 = $hand2 ? json_decode((string)$hand2['record'], true) : null;
+$end2 = [];
+foreach ($rec2['players'] ?? [] as $p) { $end2[$p['uid']] = (int)$p['end_stack']; }
+check(count($end2) === 2 && $end2['p' . $A] + $end2['p' . $B] === 2500, 'chips are still conserved after the uncontested pot (record end stacks)', short($end2));
+$v2 = pk_verify_record($rec2 ?? []);
+check($v2 === ['hash_ok' => true, 'deal_ok' => true], 'pk_verify_record() passes on the stored record', short($v2));
 $winner = $folded === 'A' ? 'B' : 'A';
 $winUid = 'p' . ($winner === 'A' ? $A : $B);
 $winCards = $mine2[$winner] ?? [];
@@ -592,20 +417,70 @@ foreach ([['A', $a], ['B', $b], ['guest', $g]] as [$who, $cl]) {
 check($settled > 0 && $leak2 === 0, "the winner never showed: no view of the loser or the watcher carried the winning hole cards, in players[] or winners[] ($settled settled views scanned)", "leaks: $leak2");
 check($ownSeen, 'the winner still sees their own cards in winners[]');
 
-$bal = $a->waitFor('bal', 6);
-check($bal !== null && $bal['balance'] === 9000 + $stacks['p' . $A] && $balance($A) === $bal['balance'] && !$seatRow($A), 'pk_leave cashes out: stack back to the balance, seat row gone', short([$bal, $balance($A)]));
+check($leaveAt !== null && $leavingSeen, 'pk_leave during settle: the engine defers it (players[].leaving true in the next pk_state, no fold recorded)', short([$leaveAt, $leavingSeen]));
+check(array_values((array)($ended2['leavers'] ?? [])) === [$end2['p' . $A] ?? -1], 'hand_end lists A in leavers[] with exactly the record\'s end stack', short($ended2['leavers'] ?? null));
+$bal = $a->waitFor('bal', 3);
+check($bal !== null && $bal['balance'] === 8500 + $end2['p' . $A] && $balance($A) === $bal['balance'] && !$seatRow($A), 'A is paid at hand_end: balance = 8500 + the record\'s end stack, seat row gone, bal on the wire', short([$bal, $balance($A), $end2]));
 $led = row("SELECT * FROM ledger WHERE player_id = ? AND kind = 'payout' ORDER BY id DESC LIMIT 1", [$A]);
-check($led && $led['game'] === 'poker' && str_starts_with($led['detail'], 'cash-out'), 'cash-out is a poker payout in the ledger', short($led));
+check($led && $led['game'] === 'poker' && str_starts_with($led['detail'], 'cash-out') && (int)$led['amount'] === $end2['p' . $A], 'the cash-out is one poker payout in the ledger for that amount', short($led));
+check((int)val("SELECT COUNT(*) FROM ledger WHERE player_id = ? AND kind = 'payout'", [$A]) === 1, 'and it is the only payout A ever received (paid exactly once)');
+check((int)($seatRow($B)['stack'] ?? -1) === $end2['p' . $B], 'B\'s poker_seats row carries the settled stack', short([$seatRow($B), $end2]));
 $stackB = (int)$seatRow($B)['stack'];
-$b->close();   // vanish without a word: the away window (2 s in this run) must cash B out
+$b->close();   // vanish without a word while the table is idle: the away window (6 s in this run) must cash B out
 $t0 = microtime(true);
-while (microtime(true) - $t0 < 6 && $seatRow($B)) { $a->pump(0.1); }
-check(!$seatRow($B) && $balance($B) === 500 + $stackB, 'a disconnected player is cashed out after the away window', short([$balance($B), $stackB]));
+while (microtime(true) - $t0 < 10 && $seatRow($B)) { $a->pump(0.1); }
+check(!$seatRow($B) && $balance($B) === 500 + $stackB && microtime(true) - $t0 >= 5, 'a disconnected player at an idle table is cashed out after the away window (not before)', short([$balance($B), $stackB, round(microtime(true) - $t0, 1)]));
 check(str_contains((string)file_get_contents($logPath), 'away p' . $B), 'the log records the away period');
+$led = row("SELECT * FROM ledger WHERE player_id = ? AND kind = 'payout' ORDER BY id DESC LIMIT 1", [$B]);
+check($led && (int)$led['amount'] === $stackB && str_contains($led['detail'], '(away)') && (int)val("SELECT COUNT(*) FROM ledger WHERE player_id = ? AND kind = 'payout'", [$B]) === 1, 'as one poker payout "(away)" for the seat row\'s stack', short($led));
 $g->inbox = [];   // drop the states buffered while the hand ran
 $g->send(['t' => 'pk_watch', 'table' => 1]);
 $st = $g->waitFor('pk_state', 3, fn($m) => $m['table']['players'] === []);
 check($st !== null && $st['table']['phase'] === 'idle', 'the table is empty again', short($st['table'] ?? null));
+
+// a player who vanishes during a hand: pk_away(true) at once, paid exactly once at hand_end (table 3, two fresh players)
+$E = $mk('wstest_e', 60000); $F = $mk('wstest_f', 60000);
+$ce = WsClient::open($port, 'http://localhost:8100', null, 'E'); $ce->hello(ticket_for($E, 'wstest_e'), 'poker');
+$cf = WsClient::open($port, 'http://localhost:8100', null, 'F'); $cf->hello(ticket_for($F, 'wstest_f'), 'poker');
+$ce->send(['t' => 'pk_join', 'table' => 3, 'seat' => 0, 'buyin' => 20000]); $ce->waitFor('bal');
+$cf->send(['t' => 'pk_join', 'table' => 3, 'seat' => 1, 'buyin' => 20000]); $cf->waitFor('bal');
+check($stackOf = (int)($seatRow($E)['stack'] ?? 0) === 20000 && (int)($seatRow($F)['stack'] ?? 0) === 20000, 'E and F sit at table 3 with 20000 each');
+$dropped = null; $ended3 = null; $awayEv = false; $awayState = false; $fFolded = false; $deadline = microtime(true) + 15;
+while (microtime(true) < $deadline && !$ended3) {
+    foreach (['E' => $ce, 'F' => $cf] as $k => $cl) {
+        if ($cl->eof) { continue; }
+        $cl->pump(0.05);
+        foreach ($cl->inbox as $i => $m) {
+            unset($cl->inbox[$i]);
+            if ($m['t'] === 'pk_events') { foreach ($m['events'] as $ev) { if ($ev['t'] === 'hand_end') { $ended3 = $ev; } if ($ev['t'] === 'away' && (int)$ev['seat'] === 1 && !empty($ev['on'])) { $awayEv = true; } } continue; }
+            if ($m['t'] !== 'pk_state' || (int)$m['table']['id'] !== 3) { continue; }
+            $tbl = $m['table'];
+            if (!empty($tbl['players'][1]['away'])) { $awayState = true; }
+            if (!empty($tbl['legal'])) {   // F folds as soon as it may; E checks or calls
+                $act = $k === 'F' ? 'fold' : ($tbl['legal']['check'] ? 'check' : 'call');
+                if ($k === 'F') { $fFolded = true; }
+                $cl->send(['t' => 'pk_act', 'act' => $act, 'amt' => 0, 'hand' => $tbl['hand_no'], 'seq' => $tbl['seq']]);
+            }
+            if ($k === 'F' && $tbl['phase'] === 'settle' && $dropped === null) { $dropped = microtime(true); $cf->close(); }   // gone during the settle pause
+        }
+        $cl->inbox = array_values($cl->inbox);
+    }
+}
+check($fFolded && $dropped !== null && $ended3 !== null, 'F folded, the hand settled, F vanished during the settle pause and the hand ended', short([$fFolded, $dropped, $ended3 !== null]));
+check($awayEv && $awayState, "E received the 'away' event for F's seat and sees away:true in pk_state");
+$rec3 = json_decode((string)(row('SELECT record FROM poker_hands WHERE table_id = 3 ORDER BY id DESC LIMIT 1')['record'] ?? ''), true);
+$end3 = []; foreach ($rec3['players'] ?? [] as $p) { $end3[$p['uid']] = (int)$p['end_stack']; }
+$t0 = microtime(true);
+while (microtime(true) - $t0 < 2 && $seatRow($F)) { $ce->pump(0.1); }
+check(!$seatRow($F) && $balance($F) === 40000 + ($end3['p' . $F] ?? -1), 'F was cashed out at hand_end with the record\'s end stack, seat row gone', short([$balance($F), $end3, $seatRow($F)]));
+$led = row("SELECT * FROM ledger WHERE player_id = ? AND kind = 'payout' ORDER BY id DESC LIMIT 1", [$F]);
+$n = (int)val("SELECT COUNT(*) FROM ledger WHERE player_id = ? AND kind = 'payout'", [$F]);
+check($led && $n === 1 && str_starts_with($led['detail'], 'cash-out') && (int)$led['amount'] === ($end3['p' . $F] ?? -1), 'exactly one poker payout for F: ' . ($led ? $led['detail'] : '-') . (str_contains((string)($led['detail'] ?? ''), 'disconnected') ? ' (the hand_end branch, before the away window)' : ''), short([$led, $n]));
+check((int)($seatRow($E)['stack'] ?? -1) === ($end3['p' . $E] ?? -2), 'E\'s seat row carries the settled stack');
+$ce->send(['t' => 'pk_leave']);
+$bal = $ce->waitFor('bal');
+check($bal !== null && !$seatRow($E) && $balance($E) === 40000 + $end3['p' . $E] && (int)val("SELECT COUNT(*) FROM ledger WHERE player_id = ? AND kind = 'payout'", [$E]) === 1, 'E leaves the idle table: paid at once, once', short([$bal, $balance($E)]));
+$ce->close();
 
 /* ───────────────────────── timers ───────────────────────── */
 
@@ -620,25 +495,26 @@ check($a->closeCode === null && $g->closeCode === null, 'clients that answer pin
 /* ───────────────────────── shutdown ───────────────────────── */
 
 section('shutdown');
+$balBefore = $balance($A);
 $c = WsClient::open($port); $c->hello(ticket_for($A, 'wstest_a'));
 $c->send(['t' => 'pk_join', 'table' => 2, 'seat' => 3, 'buyin' => 5000]);
 $c->waitFor('bal');
-check($seatRow($A) && (int)$seatRow($A)['stack'] === 5000, 'a player is seated at table 2 when SIGTERM arrives');
+check($seatRow($A) && (int)$seatRow($A)['stack'] === 5000 && $balance($A) === $balBefore - 5000, 'a player is seated at table 2 when SIGTERM arrives');
 proc_terminate($proc, SIGTERM);
 $code = $c->waitClose(3);
 check($code === 1001, 'clients get close 1001 on shutdown', (string)$code);
 $t0 = microtime(true); $status = proc_get_status($proc);
 while ($status['running'] && microtime(true) - $t0 < 5) { usleep(100000); $status = proc_get_status($proc); }
 check(!$status['running'] && $status['exitcode'] === 0, 'ws.php exits 0 on SIGTERM', short($status));
-check(!$seatRow($A) && $balance($A) === 9000 + $stacks['p' . $A], 'shutdown refunded the seated player', short([$balance($A)]));
+check(!$seatRow($A) && $balance($A) === $balBefore, 'shutdown refunded the seated player what the seat row said (5000)', short([$balance($A), $balBefore]));
+$led = row("SELECT * FROM ledger WHERE player_id = ? ORDER BY id DESC LIMIT 1", [$A]);
+check($led && $led['kind'] === 'payout' && (int)$led['amount'] === 5000 && str_starts_with($led['detail'], 'table reset'), 'as one "table reset" payout in the ledger', short($led));
 check(str_contains((string)file_get_contents($logPath), 'bye'), 'the log ends with bye');
 check(!row('SELECT 1 FROM poker_seats'), 'poker_seats is empty after shutdown');
 
 /* ───────────────────────── summary ───────────────────────── */
 
-fclose($log);
 proc_close($proc);
-$rm = function (string $d) use (&$rm): void { foreach (scandir($d) ?: [] as $f) { if ($f === '.' || $f === '..') { continue; } is_dir("$d/$f") ? $rm("$d/$f") : @unlink("$d/$f"); } @rmdir($d); };
-if ($fail) { echo "\nserver log kept at $logPath\n"; } else { $rm($tmp); }
+if ($fail) { echo "\nserver log kept at $logPath\n"; } else { rm_tree($tmp); }
 echo "\n$pass passed, $fail failed" . ($fail ? ":\n  - " . implode("\n  - ", $failures) : '') . "\n";
 exit($fail ? 1 : 0);

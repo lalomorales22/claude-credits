@@ -2654,7 +2654,8 @@ function pk_view(array $t, ?string $uid): array {
         $potTotal += $p['bet'];
     }
     $winners = [];
-    foreach ($t['winners'] as $w) { $w['cards'] = ($t['players'][$w['seat']]['show'] ?? false) ? $w['cards'] : []; $winners[] = $w; }
+    // winners[].cards follow the same rule as players[].cards: the viewer's own seat and shown seats only (an uncontested pot is won without showing)
+    foreach ($t['winners'] as $w) { $w['cards'] = $w['seat'] === $me || ($t['players'][$w['seat']]['show'] ?? false) ? ($t['players'][$w['seat']]['cards'] ?? $w['cards']) : []; $winners[] = $w; }
     $now = $t['clock'];
     return ['id' => $t['id'], 'name' => $t['name'], 'seats' => $t['seats'], 'sb' => $t['sb'], 'bb' => $t['bb'], 'min_buy' => $t['min_buy'], 'max_buy' => $t['max_buy'],
         'act_secs' => $t['act_secs'], 'hand_no' => $t['hand_no'], 'phase' => $t['phase'], 'button' => $t['button'], 'sb_seat' => $t['sb_seat'], 'bb_seat' => $t['bb_seat'],

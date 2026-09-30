@@ -4,21 +4,45 @@
  * GOLD TIDE realtime server: the floor, chat and every live poker table over one WebSocket.
  *
  *     php ws.php [--port 8081] [--bind 0.0.0.0] [--tick 50] [--idle 40] [--away 90] [--max 500] [--verbose]
+ *     php ws.php --help
  *
- * One process, one stream_select() loop, no threads, no dependencies. It includes index.php headlessly
- * (GT_NO_ROUTE) so it shares the database, tx()/move_coins(), settings, tickets and the poker engine.
- * The contract with the engine and the browser clients is REALTIME.md; keep the three in step.
+ * One process, one stream_select() loop, no threads, no dependencies. Run it next to index.php (it includes it
+ * headlessly with GT_NO_ROUTE, so it shares the database, tx()/move_coins(), settings, tickets and the poker
+ * engine, the pk_* functions), as the same user the web server writes data/ as, one copy per database. Settings
+ * (rt_origins, poker_action_seconds) are read once at start-up: restart after changing them. Logs go to stdout
+ * and data/ws.log; GET /health on the socket port is a plain HTTP monitor. The contract with the engine and the
+ * browser clients is REALTIME.md; keep the three in step.
  *
- * Money rules: every Gold Coin that enters or leaves a poker table goes through move_coins() inside tx(),
- * mirrored by a poker_seats row (buy-in, add-on, end-of-hand stack, cash-out). On start-up and on SIGTERM
- * every seat row still in the database is refunded, so a crash can at worst void the interrupted hand.
- * Only the one process that owns the database may do that: run() takes an exclusive flock on data/ws.lock
- * and binds the listening socket BEFORE it touches a single row, so a second copy (double launch, restart
- * overlap, two servers on one database) exits without refunding seats the live server still holds.
- * Bots (pid 0) never touch the ledger. Nothing here calls fail()/redirect()/json_out(): those exit.
+ * How it drives the engine: pk_tick($t, now) on every loop tick and pk_view() after it (one pk_events and one
+ * pk_state per viewer per changed table per tick). pk_sit / pk_leave / pk_sitout / pk_away / pk_post only queue
+ * their events for the next pk_tick, so the table is marked dirty right after them and a fresh pk_state goes out
+ * the same tick. pk_act is guarded by the hand/seq echo; every DomainException the engine throws goes back to that
+ * client as pk_err with the state untouched. A disconnected player is pk_away(true) (dealt out, no blinds) and
+ * pk_away(false) again on a reconnect inside the away window.
  *
- * Environment (tests shorten the timers): GT_WS_IDLE, GT_WS_AWAY (seconds), GT_PK_STUB=1 loads
- * tests/pk_stub.php in place of a missing engine. A missing engine without the stub = floor only.
+ * What it persists, and when:
+ *   poker_seats  one row per real seated player: written with the buy-in (same tx() as the 'wager'), += add-on,
+ *                set to the end-of-hand stack at hand_end, deleted in the same tx() as the cash-out payout. So
+ *                between hands the row is the stack in front of the player; during a hand it is the stack the
+ *                hand started with.
+ *   poker_hands  one row per finished hand with pk_hand_record() as JSON. Written when pk_tick returns hand_end,
+ *                in ONE tx() in this order: the hand row, UPDATE poker_seats.stack from the record's end stacks,
+ *                pay every leavers[seat] (move_coins +stack 'payout' + DELETE the row), DELETE the rows of busted
+ *                real players, record_round(pid, start − end + won, won) per real player. Then busted bots rebuy
+ *                (pk_addon) and players who disconnected during the hand are cashed out; the engine only deals the
+ *                next hand on the following tick, so all of that lands before it.
+ *   ledger       via move_coins() inside tx() only: 'wager' (buy-in, add-on), 'payout' ("cash-out …" for a leave,
+ *                a mid-hand leave paid at hand_end, a disconnected player, a closed table; "table reset" for the
+ *                start-up / shutdown refunds).
+ * Refund rule, an interrupted hand is void: on start-up and on SIGINT/SIGTERM every poker_seats row still there
+ * is paid back at what the row says (the start-of-hand stack), never at a live mid-hand stack. Only the process
+ * that owns the database may do that: run() takes an exclusive flock on data/ws.lock and binds the listening
+ * socket BEFORE it touches a single row, so a second copy (double launch, restart overlap, two servers on one
+ * database) exits without refunding seats the live server still holds. Every path pays exactly once because a
+ * payout and the DELETE of the seat row always share one tx(). Bots (pid 0) never touch the ledger. Nothing here
+ * calls fail()/redirect()/json_out(): those exit.
+ *
+ * Environment (tests shorten the timers): GT_WS_IDLE, GT_WS_AWAY (seconds).
  */
 declare(strict_types=1);
 
@@ -32,11 +56,7 @@ set_exception_handler(function (Throwable $e): void {
     exit(1);
 });
 
-if (!function_exists('pk_new_table') && getenv('GT_PK_STUB')) {
-    require __DIR__ . '/tests/pk_stub.php';
-    define('GT_PK_STUB_ACTIVE', true);
-}
-define('GT_POKER', function_exists('pk_new_table'));
+define('GT_POKER', function_exists('pk_new_table'));   // an index.php without the engine hosts the floor only
 
 /** One line to stdout and to data/ws.log (rotated to ws.log.1 above 5 MB). */
 function ws_log(string $msg): void {
@@ -121,7 +141,7 @@ final class GTServer {
     private array $byUid = [];     // uid => [client id => true]
     private array $nonces = [];    // ticket nonce => accepted at
     private array $tables = [];    // table id => hosting record, see pkHost()
-    private array $seatOf = [];    // uid => ['tid' => , 'seat' => ] for real players
+    private array $seatOf = [];    // uid => ['tid', 'seat', 'pid'] for real players; a mid-hand leaver keeps its entry until hand_end pays it
     private int $nextId = 1;
     private float $now;
     private float $lastSnap = 0, $lastHouse = 0, $lastReload = 0, $lastOnline = 0, $lastTables = 0;
@@ -137,7 +157,6 @@ final class GTServer {
 
     public function run(): void {
         db();
-        if (defined('GT_PK_STUB_ACTIVE')) { ws_log('WARNING: poker engine STUB active (tests/pk_stub.php). Never run this in production.'); }
         if (!GT_POKER) { ws_log('WARNING: no poker engine (pk_* functions missing): hosting the floor only, poker messages get pk_err.'); }
         // Ownership first, ledger last: the lock keeps a second copy off this database and the bound socket proves
         // this process is the server. Failing either step exits here with nothing written; the live server's seats stand.
@@ -481,6 +500,7 @@ final class GTServer {
                 case 'pk_addon': $this->pkAddon($c, $msg); break;
                 case 'pk_leave': $this->pkLeave($c); break;
                 case 'pk_sitout': $this->pkSitout($c, $msg); break;
+                case 'pk_post': $this->pkPost($c, $msg); break;
                 case 'pk_act': $this->pkAct($c, $msg); break;
                 default: $this->v("ignored '$t' from #{$c->id}");   // unknown types are ignored (forward compatible)
             }
@@ -617,19 +637,19 @@ final class GTServer {
     private function pkNeed(): void { if (!GT_POKER) { throw new DomainException('Poker is closed right now.'); } }
 
     /**
-     * Hosting record per table. The engine state is 't' (only pk_* functions touch it, except the cosmetic 'away'
-     * flag); everything else is ws.php bookkeeping:
+     * Hosting record per table. The engine state is 't' (only pk_* functions touch it, plus the between-hands
+     * reconfiguration in pkApplyRow); everything else is ws.php bookkeeping:
      *   watch   connection ids watching (seated players' connections are added at send time)
      *   events  engine events since the last pk_state, flushed once per tick
-     *   away    uid => ['since', 'sat_out'] for disconnected players inside the grace window
-     *   hand    seat => [uid, pid, name, bot, start] snapshot at hand_start, won: seat => chips won (for record_round)
+     *   away    uid => ['since' => float] for disconnected players inside the grace window
      *   pending a changed poker_tables row waiting for the table to go idle; closing = disabled, emptying out
+     * act_secs is passed in explicitly (read once at start-up) so the engine never touches the database.
      */
     private function pkHost(array $row): void {
         $tid = (int)$row['id'];
-        $t = pk_new_table($row);
+        $t = pk_new_table($row + ['act_secs' => isetting('poker_action_seconds', 20)]);
         $this->tables[$tid] = ['row' => $row, 't' => $t, 'watch' => [], 'dirty' => true, 'events' => [], 'away' => [],
-                               'hand' => [], 'won' => [], 'closing' => false, 'pending' => null];
+                               'closing' => false, 'pending' => null];
         $this->pkBots($tid, (int)$row['bots']);
         $this->tablesDirty = true;
         ws_log("table $tid '{$row['name']}' open: {$t['seats']} seats, blinds {$t['sb']}/{$t['bb']}, buy-in {$t['min_buy']}-{$t['max_buy']}, bots {$row['bots']}");
@@ -758,7 +778,7 @@ final class GTServer {
         $this->pkFlush();
     }
 
-    /** Engine events: queue them for the viewers and act on the ones with side effects. */
+    /** Engine events: queue them for the viewers and act on the ones with side effects (hand_end persists the hand). */
     private function pkEvents(int $tid, array $events): void {
         $T = &$this->tables[$tid];
         $T['dirty'] = true;
@@ -767,16 +787,8 @@ final class GTServer {
             $T['events'][] = $ev;
             switch ($ev['t']) {
                 case 'hand_start':
-                    // stack + total = chips the player brought into the hand (blinds are already posted here)
-                    $T['hand'] = []; $T['won'] = [];
-                    foreach ($T['t']['players'] as $seat => $p) {
-                        if (!empty($p['in'])) { $T['hand'][$seat] = ['uid' => $p['uid'], 'pid' => (int)$p['pid'], 'name' => $p['name'], 'bot' => !empty($p['bot']), 'start' => (int)$p['stack'] + (int)$p['total']]; }
-                    }
                     $this->tablesDirty = true;
-                    $this->v("table $tid hand #{$ev['hand']} start, " . count($T['hand']) . ' players, deck ' . substr((string)($ev['deck_hash'] ?? ''), 0, 12));
-                    break;
-                case 'win':
-                    $T['won'][(int)$ev['seat']] = ($T['won'][(int)$ev['seat']] ?? 0) + (int)$ev['amount'];
+                    $this->v("table $tid hand #{$ev['hand']} start, button seat {$ev['button']}, deck " . substr((string)($ev['deck_hash'] ?? ''), 0, 12));
                     break;
                 case 'hand_end':
                     $this->pkHandEnd($tid, $ev);
@@ -789,7 +801,11 @@ final class GTServer {
         }
     }
 
-    /** Last connection of a seated player went away: auto sit-out, cash out after the grace window (or at once when it is 0). */
+    /**
+     * Last connection of a seated player went away: pk_away(true) deals them out of future hands with no blinds (the
+     * hand they are in still runs its clock on them). They are cashed out at the end of the hand they were dealt into
+     * (pkHandEnd), otherwise after the grace window (pkTick), or at once when --away is 0.
+     */
     private function pkAway(string $uid): void {
         $s = $this->seatOf[$uid];
         $tid = $s['tid'];
@@ -798,24 +814,21 @@ final class GTServer {
         $p = $T['t']['players'][$s['seat']] ?? null;
         if (!$p || $p['uid'] !== $uid) { unset($this->seatOf[$uid]); return; }
         if ($this->opt['away'] <= 0) { $this->pkStand($tid, $uid, 'disconnected'); return; }
-        $T['away'][$uid] = ['since' => $this->now, 'sat_out' => !empty($p['sitout'])];
-        $T['t']['players'][$s['seat']]['away'] = true;
-        if (empty($p['sitout'])) { try { pk_sitout($T['t'], $s['seat'], true); } catch (Throwable $e) { ws_log("table $tid: sitout failed: " . $e->getMessage()); } }
+        $T['away'][$uid] = ['since' => $this->now];
+        try { pk_away($T['t'], $s['seat'], true); } catch (Throwable $e) { ws_log("table $tid: pk_away failed: " . $e->getMessage()); }
         $T['dirty'] = true;
         ws_log("away $uid table $tid seat {$s['seat']} ({$this->opt['away']} s grace)");
     }
 
-    /** A connection for a uid that holds a seat (reconnect inside the grace window, or a second tab): re-attach and refresh. */
+    /** A connection for a uid that holds a seat (reconnect inside the grace window, or a second tab): pk_away(false) and refresh. */
     private function pkReattach(GTClient $c): void {
         $s = $this->seatOf[$c->uid] ?? null;
         if (!$s || !isset($this->tables[$s['tid']])) { return; }
         $T = &$this->tables[$s['tid']];
         if (isset($T['away'][$c->uid])) {
-            $a = $T['away'][$c->uid];
             unset($T['away'][$c->uid]);
             if (isset($T['t']['players'][$s['seat']])) {
-                $T['t']['players'][$s['seat']]['away'] = false;
-                if (!$a['sat_out']) { try { pk_sitout($T['t'], $s['seat'], false); } catch (Throwable $e) { ws_log("table {$s['tid']}: sit back in failed: " . $e->getMessage()); } }
+                try { pk_away($T['t'], $s['seat'], false); } catch (Throwable $e) { ws_log("table {$s['tid']}: pk_away(false) failed: " . $e->getMessage()); }
             }
             $T['dirty'] = true;
             ws_log("back {$c->uid} table {$s['tid']} seat {$s['seat']}");
@@ -910,9 +923,10 @@ final class GTServer {
     }
 
     /**
-     * Buy in. Everything is checked against the live table first, then ONE tx() moves the coins and writes the seat
-     * row (move_coins throws inside the tx when the balance is short; the UNIQUE player_id row stops double seating
-     * across processes). Only then does the engine seat the player; if it refuses, the buy-in is reversed.
+     * Buy in. Everything is checked against the live table first (the engine's own rules on a copy of the state, so a
+     * refusal costs no ledger row), then ONE tx() moves the coins and writes the seat row (move_coins throws inside the
+     * tx when the balance is short; the UNIQUE player_id row stops double seating across processes). Only then does the
+     * engine seat the player for real; should that still fail, the buy-in is reversed in a second tx().
      */
     private function pkJoin(GTClient $c, array $m): void {
         $this->pkNeed();
@@ -927,6 +941,7 @@ final class GTServer {
         if ($seat < 0 || $seat >= (int)$t['seats']) { throw new DomainException('No such seat.'); }
         if (isset($t['players'][$seat])) { throw new DomainException('That seat is taken.'); }
         if ($buyin < (int)$t['min_buy'] || $buyin > (int)$t['max_buy']) { throw new DomainException('Buy-in must be between ' . coins((int)$t['min_buy']) . ' and ' . coins((int)$t['max_buy']) . ' GC.'); }
+        pk_sit($t, $seat, $c->uid, $c->pid, $c->name, $buyin, false);   // dry run on the copy: DomainException → pk_err, nothing written
         $bal = (int)tx(function () use ($c, $tid, $seat, $buyin, $t) {
             $b = move_coins($c->pid, -$buyin, 'wager', 'poker', "buy-in {$t['name']} #$tid");
             try { q('INSERT INTO poker_seats (table_id, player_id, seat, stack) VALUES (?,?,?,?)', [$tid, $c->pid, $seat, $buyin]); }
@@ -942,24 +957,22 @@ final class GTServer {
             ws_log("table $tid: pk_sit refused {$c->uid}: " . $e->getMessage());
             throw $e instanceof DomainException ? $e : new DomainException('Could not seat you. Your coins were returned.');
         }
-        $this->seatOf[$c->uid] = ['tid' => $tid, 'seat' => $seat];
+        $this->seatOf[$c->uid] = ['tid' => $tid, 'seat' => $seat, 'pid' => $c->pid];
         $this->tables[$tid]['dirty'] = true;
         $this->tablesDirty = true;
         $this->send($c, ['t' => 'bal', 'balance' => $bal]);
         ws_log("sit {$c->uid} '{$c->name}' table $tid seat $seat buy-in $buyin, balance $bal");
     }
 
-    /** Top up between hands, up to max_buy in front. Same shape as the buy-in: one tx(), then the engine, else reverse. */
+    /** Top up between hands, up to max_buy in front. Same shape as the buy-in: the engine's rules on a copy, one tx(), then the engine for real, else reverse. */
     private function pkAddon(GTClient $c, array $m): void {
         $this->pkNeed();
         [$tid, $seat] = $this->pkSeated($c);
         $t = &$this->tables[$tid]['t'];
-        $p = $t['players'][$seat];
         $amt = (int)self::num($m['amount'] ?? 0);
         if ($amt <= 0) { throw new DomainException('Add-on amount must be positive.'); }
-        if (!empty($p['leaving'])) { throw new DomainException("You're leaving this table."); }
-        if (!empty($p['in']) && $t['phase'] !== 'idle') { throw new DomainException('Add on between hands.'); }
-        if ((int)$p['stack'] + $amt > (int)$t['max_buy']) { throw new DomainException('You can have at most ' . coins((int)$t['max_buy']) . ' GC at this table.'); }
+        if (!empty($t['players'][$seat]['leaving'])) { throw new DomainException("You're leaving this table."); }
+        $probe = $t; pk_addon($probe, $seat, $amt); unset($probe);   // the engine decides (a seat dealt into the running hand waits for hand_end)
         $bal = (int)tx(function () use ($c, $tid, $amt, $t) {
             $b = move_coins($c->pid, -$amt, 'wager', 'poker', "add-on {$t['name']} #$tid");
             q("UPDATE poker_seats SET stack = stack + ?, updated_at = datetime('now') WHERE player_id = ?", [$amt, $c->pid]);
@@ -995,6 +1008,17 @@ final class GTServer {
         $this->tables[$tid]['dirty'] = true;
     }
 
+    /** Post a live big blind to be dealt into the next hand instead of waiting for the big blind (matters while the seat owes one). Same no-op / limiter rules as pk_sitout. */
+    private function pkPost(GTClient $c, array $m): void {
+        $this->pkNeed();
+        [$tid, $seat] = $this->pkSeated($c);
+        $on = array_key_exists('on', $m) ? !empty($m['on']) : true;
+        if (!empty($this->tables[$tid]['t']['players'][$seat]['post']) === $on) { return; }
+        if (!$this->allow($c, 'post', 2)) { throw new DomainException('Slow down.'); }
+        pk_post($this->tables[$tid]['t'], $seat, $on);
+        $this->tables[$tid]['dirty'] = true;
+    }
+
     /** An action: the hand / seq echo must match the live state (stale UI or double click → pk_err, no-op), then pk_act() rules. */
     private function pkAct(GTClient $c, array $m): void {
         $this->pkNeed();
@@ -1011,7 +1035,11 @@ final class GTServer {
         $this->v("act {$c->uid} table $tid seat $seat $act " . (int)self::num($m['amt'] ?? 0));
     }
 
-    /** Stand a real player up: paid now when the engine returns the stack, at hand_end (leavers) when it returns -1. */
+    /**
+     * Stand a real player up. pk_leave() returns the stack when the seat is not in a live hand: paid now (one tx() with
+     * the row delete). It returns -1 for a seat dealt into the running hand (folded now, or left as is during 'settle'):
+     * the seat, its poker_seats row and its seatOf entry stay until hand_end pays it from the event's leavers[].
+     */
     private function pkStand(int $tid, string $uid, string $why): void {
         $s = $this->seatOf[$uid] ?? null;
         if (!$s || $s['tid'] !== $tid || !isset($this->tables[$tid])) { unset($this->seatOf[$uid]); return; }
@@ -1019,6 +1047,7 @@ final class GTServer {
         unset($T['away'][$uid]);
         $p = $T['t']['players'][$s['seat']] ?? null;
         if (!$p || $p['uid'] !== $uid) { unset($this->seatOf[$uid]); return; }
+        if (!empty($p['leaving'])) { if ($why === 'cash-out') { throw new DomainException("You're leaving after this hand."); } return; }
         try { $r = (int)pk_leave($T['t'], $s['seat']); }
         catch (DomainException $e) { if ($why === 'cash-out') { throw $e; } ws_log("table $tid: pk_leave refused $uid: " . $e->getMessage()); return; }
         catch (Throwable $e) { ws_log("table $tid: pk_leave failed for $uid: " . $e->getMessage()); return; }
@@ -1026,9 +1055,7 @@ final class GTServer {
         $this->tablesDirty = true;
         if ($r < 0) { ws_log("leaving $uid table $tid seat {$s['seat']} after this hand ($why)"); return; }
         unset($this->seatOf[$uid]);
-        // paid now although the hand's books are still open (left during settle): hand_end must not pay or bust them again
-        if (isset($T['hand'][$s['seat']]) && $T['hand'][$s['seat']]['uid'] === $uid) { $T['hand'][$s['seat']]['gone'] = $r; }
-        $bal = $this->pkCashOut((int)$p['pid'], $r, "cash-out {$T['t']['name']} #$tid" . ($why !== 'cash-out' ? " ($why)" : ''));
+        $bal = $this->pkCashOut($s['pid'], $r, "cash-out {$T['t']['name']} #$tid" . ($why !== 'cash-out' ? " ($why)" : ''));
         $this->sendUid($uid, ['t' => 'bal', 'balance' => $bal]);
         ws_log("stand $uid table $tid seat {$s['seat']} +$r GC ($why), balance $bal");
     }
@@ -1043,102 +1070,114 @@ final class GTServer {
     }
 
     /**
-     * hand_end: ONE tx() writes poker_hands (full pk_hand_record), every real player's settled stack, record_round()
-     * per real player (wagered = start + won − end, won = chips awarded), pays mid-hand leavers and clears busted seats.
-     * Bots that busted rebuy to a random stack. Should the tx fail, leavers are still paid one by one and the failure logged.
+     * hand_end (pk_tick moved settle → idle; the next hand only deals on the next tick). ONE tx(), in this order:
+     * the poker_hands row (full pk_hand_record()), then per real player in the record: a leaver (leavers[seat] from
+     * the event, equal to the record's end stack) is paid with move_coins(+stack, 'payout') and its seat row deleted;
+     * a busted player (end stack 0, removed by the engine) has its row deleted; everyone else gets poker_seats.stack =
+     * end stack; and record_round(pid, start − end + won, won) for each of them. After the tx: players who
+     * disconnected during the hand are cashed out (the seat is idle now, so pk_leave returns the stack), and busted
+     * house players rebuy. Should the tx fail (nothing written), the leavers are still paid one by one, each in its own
+     * tx() with its row delete, and the failure is logged.
      */
     private function pkHandEnd(int $tid, array $ev): void {
         $T = &$this->tables[$tid];
         $t = &$T['t'];
-        try { $rec = pk_hand_record($t); } catch (Throwable $e) { ws_log("table $tid: pk_hand_record failed: " . $e->getMessage()); $rec = []; }
-        if (!is_array($rec)) { $rec = []; }
-        $leavers = is_array($ev['leavers'] ?? null) ? $ev['leavers'] : [];
-        $hand = $T['hand']; $won = $T['won'];
-        $T['hand'] = []; $T['won'] = [];
-        // leavers the snapshot does not know (sat down and left inside this hand): resolve their uid through the seat map
-        foreach ($leavers as $seat => $stack) {
-            if (isset($hand[$seat])) { continue; }
-            foreach ($this->seatOf as $uid => $s) {
-                if ($s['tid'] === $tid && $s['seat'] === (int)$seat && str_starts_with($uid, 'p')) { $hand[$seat] = ['uid' => $uid, 'pid' => (int)substr($uid, 1), 'name' => $uid, 'bot' => false, 'start' => (int)$stack]; }
-            }
+        $rec = null;
+        try { $rec = pk_hand_record($t); } catch (Throwable $e) { ws_log("table $tid: pk_hand_record failed: " . $e->getMessage()); }
+        if (!is_array($rec)) { $rec = null; }
+        $handNo = (int)($rec['hand_no'] ?? $t['hand_no']);
+        $leavers = is_array($ev['leavers'] ?? null) ? $ev['leavers'] : [];   // seat => stack, bots included (they get nothing)
+        $real = [];                                                          // seat => [uid, pid]: this table's real players, mid-hand leavers included
+        foreach ($this->seatOf as $uid => $s) { if ($s['tid'] === $tid) { $real[$s['seat']] = ['uid' => $uid, 'pid' => (int)$s['pid']]; } }
+        $players = [];                                                       // the record's real players by seat
+        foreach ((array)($rec['players'] ?? []) as $p) {
+            if (!is_array($p) || !empty($p['bot']) || !isset($p['seat'])) { continue; }
+            $seat = (int)$p['seat'];
+            if (!isset($real[$seat]) || $real[$seat]['uid'] !== ($p['uid'] ?? null)) { ws_log("table $tid: hand #$handNo seat $seat ({$p['uid']}) has no seat map entry, not settled"); continue; }
+            $players[$seat] = $p;
         }
-        $pot = 0;
-        foreach ((array)($rec['pots'] ?? []) as $p) { $pot += (int)($p['amount'] ?? 0); }
-        if (!$pot) { $pot = (int)array_sum($won); }
         $stamp = fn($v) => is_int($v) || is_float($v) ? gmdate('Y-m-d H:i:s', (int)$v) : (is_string($v) && $v !== '' ? $v : now());
         $paid = []; $busted = [];
-        $write = function () use ($tid, $t, $rec, $ev, $leavers, $hand, $won, $pot, $stamp, &$paid, &$busted) {
-            q('INSERT INTO poker_hands (table_id, hand_no, deck_hash, deck_salt, board, pot, record, started_at, ended_at) VALUES (?,?,?,?,?,?,?,?,?)', [
-                $tid, (int)($rec['hand_no'] ?? $t['hand_no']), (string)($rec['deck_hash'] ?? $t['deck_hash']), (string)($ev['deck_salt'] ?? $rec['deck_salt'] ?? ''),
-                implode(' ', (array)($rec['board'] ?? $t['board'] ?? [])), $pot, (string)json_encode($rec, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE),
-                $stamp($rec['started_at'] ?? $t['started_at'] ?? null), $stamp($rec['ended_at'] ?? null)]);
-            foreach ($hand as $seat => $h) {
-                if ($h['bot'] || $h['pid'] <= 0 || isset($paid[$h['uid']]) || isset($busted[$h['uid']])) { continue; }
-                $w = (int)($won[$seat] ?? 0);
-                $cur = $t['players'][$seat] ?? null;
-                if (isset($h['gone'])) {                                  // already cashed out during settle: only the stats remain
-                    record_round($h['pid'], max(0, (int)$h['start'] + $w - (int)$h['gone']), $w);
-                    continue;
+        $write = function () use ($tid, $t, $rec, $ev, $handNo, $leavers, $real, $players, $stamp, &$paid, &$busted) {
+            if ($rec) {
+                q('INSERT INTO poker_hands (table_id, hand_no, deck_hash, deck_salt, board, pot, record, started_at, ended_at) VALUES (?,?,?,?,?,?,?,?,?)', [
+                    $tid, $handNo, (string)($rec['deck_hash'] ?? ''), (string)($rec['deck_salt'] ?? $ev['deck_salt'] ?? ''),
+                    implode(' ', (array)($rec['board'] ?? [])), (int)($rec['pot'] ?? 0), (string)json_encode($rec, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE),
+                    $stamp($rec['started_at'] ?? null), $stamp($rec['ended_at'] ?? null)]);
+            }
+            foreach ($players as $seat => $p) {
+                ['uid' => $uid, 'pid' => $pid] = $real[$seat];
+                $start = (int)($p['start_stack'] ?? 0); $end = (int)($p['end_stack'] ?? 0); $won = (int)($p['won'] ?? 0);
+                if (array_key_exists($seat, $leavers)) {                       // left during the hand: paid what the engine handed back
+                    $stack = max(0, (int)$leavers[$seat]);
+                    if ($stack !== $end) { ws_log("table $tid: hand #$handNo leaver $uid: leavers[] says $stack, the record $end"); }
+                    $b = $stack > 0 ? move_coins($pid, $stack, 'payout', 'poker', "cash-out {$t['name']} #$tid") : bal($pid);
+                    q('DELETE FROM poker_seats WHERE player_id = ?', [$pid]);
+                    $paid[$uid] = ['bal' => $b, 'stack' => $stack];
+                } elseif ($end <= 0 || !isset($t['players'][$seat])) {          // busted: the engine removed the seat, nothing to return
+                    q('DELETE FROM poker_seats WHERE player_id = ?', [$pid]);
+                    $busted[$uid] = (string)($p['name'] ?? $uid);
+                } else {                                                       // still seated: the row follows the settled stack
+                    q("UPDATE poker_seats SET stack = ?, updated_at = datetime('now') WHERE player_id = ?", [$end, $pid]);
                 }
-                if ($cur && $cur['uid'] === $h['uid']) {                 // still seated: persist the settled stack
-                    $end = (int)$cur['stack'];
-                    q("UPDATE poker_seats SET stack = ?, updated_at = datetime('now') WHERE player_id = ?", [$end, $h['pid']]);
-                } elseif (array_key_exists($seat, $leavers)) {            // left during the hand: the engine handed back the stack
-                    $end = max(0, (int)$leavers[$seat]);
-                    $b = $end > 0 ? move_coins($h['pid'], $end, 'payout', 'poker', "cash-out {$t['name']} #$tid") : bal($h['pid']);
-                    q('DELETE FROM poker_seats WHERE player_id = ?', [$h['pid']]);
-                    $paid[$h['uid']] = ['bal' => $b, 'stack' => $end];
-                } else {                                                  // busted: nothing to return, the seat row goes
-                    $end = 0;
-                    q('DELETE FROM poker_seats WHERE player_id = ?', [$h['pid']]);
-                    $busted[$h['uid']] = $h['name'];
-                }
-                record_round($h['pid'], max(0, (int)$h['start'] + $w - $end), $w);
+                record_round($pid, max(0, $start - $end + $won), $won);
+            }
+            foreach ($leavers as $seat => $stack) {                            // a real leaver the record does not list (cannot happen: only dealt-in seats defer): still paid, once
+                if (!isset($real[(int)$seat]) || isset($players[(int)$seat])) { continue; }
+                ['uid' => $uid, 'pid' => $pid] = $real[(int)$seat];
+                ws_log("table $tid: hand #$handNo leaver $uid is not in the record, paying leavers[] $stack");
+                $b = (int)$stack > 0 ? move_coins($pid, (int)$stack, 'payout', 'poker', "cash-out {$t['name']} #$tid") : bal($pid);
+                q('DELETE FROM poker_seats WHERE player_id = ?', [$pid]);
+                $paid[$uid] = ['bal' => $b, 'stack' => (int)$stack];
             }
         };
         try { tx($write); }
         catch (Throwable $e) {
-            ws_log("table $tid: hand_end persistence FAILED (hand #{$t['hand_no']}): " . $e->getMessage());
+            ws_log("table $tid: hand_end persistence FAILED (hand #$handNo): " . $e->getMessage());
             $paid = []; $busted = [];
-            foreach ($hand as $seat => $h) {
-                if ($h['bot'] || !array_key_exists($seat, $leavers)) { continue; }
-                try { $paid[$h['uid']] = ['bal' => $this->pkCashOut($h['pid'], max(0, (int)$leavers[$seat]), "cash-out {$t['name']} #$tid"), 'stack' => (int)$leavers[$seat]]; }
-                catch (Throwable $e2) { ws_log("table $tid: cash-out FAILED for {$h['uid']} ({$leavers[$seat]} GC): " . $e2->getMessage()); }
+            foreach ($leavers as $seat => $stack) {
+                if (!isset($real[(int)$seat])) { continue; }
+                ['uid' => $uid, 'pid' => $pid] = $real[(int)$seat];
+                try { $paid[$uid] = ['bal' => $this->pkCashOut($pid, max(0, (int)$stack), "cash-out {$t['name']} #$tid"), 'stack' => (int)$stack]; }
+                catch (Throwable $e2) { ws_log("table $tid: cash-out FAILED for $uid ($stack GC): " . $e2->getMessage()); }
+            }
+            foreach ($players as $seat => $p) {   // busted players are gone from the table whatever the database says: forget the seat
+                if ((int)($p['end_stack'] ?? 0) <= 0 && !isset($t['players'][$seat]) && !array_key_exists($seat, $leavers)) { $busted[$real[$seat]['uid']] = (string)($p['name'] ?? ''); }
             }
         }
         foreach ($paid as $uid => $x) {
             unset($this->seatOf[$uid], $T['away'][$uid]);
             $this->sendUid($uid, ['t' => 'bal', 'balance' => $x['bal']]);
-            ws_log("stand $uid table $tid +{$x['stack']} GC (after hand), balance {$x['bal']}");
+            ws_log("stand $uid table $tid +{$x['stack']} GC (after hand #$handNo), balance {$x['bal']}");
         }
         foreach ($busted as $uid => $name) {
             unset($this->seatOf[$uid], $T['away'][$uid]);
             $this->sendUid($uid, ['t' => 'pk_err', 'msg' => "You're out of chips at {$t['name']}. Buy in again any time."]);
-            ws_log("busted $uid '$name' table $tid");
+            ws_log("busted $uid '$name' table $tid hand #$handNo");
         }
-        // house players never leave the table short of chips
+        // disconnected during the hand they were dealt into: cashed out now that the seat is idle (a settled stack, paid once)
+        foreach (array_keys($T['away']) as $uid) {
+            $seat = $this->seatOf[$uid]['seat'] ?? null;
+            if ($seat !== null && isset($players[$seat])) { $this->pkStand($tid, $uid, 'disconnected'); }
+        }
+        // house players never leave the table short of chips: a busted bot keeps its seat at 0 and rebuys here
         foreach ($t['players'] as $seat => $p) {
             if (empty($p['bot']) || (int)$p['stack'] > 0) { continue; }
             $amt = $this->pkBotStack($t);
-            try { pk_addon($t, $seat, $amt); }
-            catch (Throwable) {
-                try { pk_leave($t, $seat); pk_sit($t, $seat, $p['uid'], 0, $p['name'], $amt, true); }
-                catch (Throwable $e) { ws_log("table $tid: bot rebuy failed: " . $e->getMessage()); }
-            }
-            $this->v("table $tid bot {$p['name']} rebuys $amt");
-        }
-        foreach ($hand as $seat => $h) {   // bots the engine stood up come straight back
-            if (!$h['bot'] || isset($t['players'][$seat])) { continue; }
-            try { pk_sit($t, $seat, $h['uid'], 0, $h['name'], $this->pkBotStack($t), true); }
-            catch (Throwable $e) { ws_log("table $tid: bot re-seat failed: " . $e->getMessage()); }
+            try { pk_addon($t, $seat, $amt); $this->v("table $tid bot {$p['name']} rebuys $amt"); }
+            catch (Throwable $e) { ws_log("table $tid: bot rebuy failed: " . $e->getMessage()); }
         }
         $T['dirty'] = true;
-        $this->v("table $tid hand #{$t['hand_no']} saved, pot $pot, " . count($paid) . ' paid out, ' . count($busted) . ' busted');
+        $this->v("table $tid hand #$handNo saved, pot " . (int)($rec['pot'] ?? 0) . ', ' . count($players) . ' real players, ' . count($paid) . ' paid out, ' . count($busted) . ' busted');
     }
 
     /* ───────────────────────── safety: refunds and shutdown ───────────────────────── */
 
-    /** Every poker_seats row back to its player. Start-up (crash recovery) and shutdown both end here. */
+    /**
+     * Every poker_seats row back to its player at what the ROW says: between hands that is the stack in front of them,
+     * during a hand the stack the hand started with (an interrupted hand is void). Start-up (crash recovery) and
+     * shutdown both end here; each row is one tx() of payout + delete, so a row is never paid twice.
+     */
     private function refundAllSeats(string $why): void {
         try { $rows = q('SELECT s.table_id, s.player_id, s.seat, s.stack, p.username FROM poker_seats s JOIN players p ON p.id = s.player_id')->fetchAll(); }
         catch (Throwable $e) { ws_log('seat refund query failed: ' . $e->getMessage()); return; }

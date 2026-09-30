@@ -305,7 +305,8 @@ yes(!$t['players'][0]['show'], 'no show'); eq($t['players'][0]['stack'], 1030, '
 eq(evts($ev, 'return')[0]['amt'], 40, '40 uncalled returned before the win');
 eq(count(evts($ev, 'showdown')), 0, 'no showdown event');
 $v = pk_view($t, 'u1'); eq($v['players'][0]['cards'], 2, 'others still see card backs'); eq($v['winners'][0]['cards'], [], 'winner cards hidden');
-$v = pk_view($t, 'u0'); eq(count($v['players'][0]['cards']), 2, 'winner sees own cards');
+$v = pk_view($t, 'u0'); eq(count($v['players'][0]['cards']), 2, 'winner sees own cards'); eq($v['winners'][0]['cards'], $t['players'][0]['cards'], 'and sees them in winners[] too (REALTIME.md: null for everyone but the winner)');
+$v = pk_view($t, null); eq($v['winners'][0]['cards'], [], 'a spectator does not');
 
 section('betting: uncalled after a fold that partly matched');
 [$t, $ev] = deal([1000, 60, 1000], 0);

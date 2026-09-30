@@ -19,7 +19,8 @@ PHP_CLI_SERVER_WORKERS=8 php -S 0.0.0.0:8000 index.php   # the site
 php ws.php                                                # the realtime server, port 8081 by default
 php ws.php --port 9000 --bind 127.0.0.1                   # options
 php ws.php --help                                         # --port --bind --tick (ms) --idle (s) --away (s) --max (clients) --verbose
-php tests/ws_test.php                                     # end-to-end tests: start their own ws.php on 8300-8399 against a scratch database
+php tests/ws_test.php                                     # end-to-end tests: start their own ws.php on 8300-8399 against a scratch copy (~40 s)
+php tests/poker_e2e_test.php                              # a scripted 2-player + 2-bot session against the real engine on 8900-8949 (~2.5 min)
 ```
 
 `ws.php` includes `index.php` with `GT_NO_ROUTE` defined, so it shares the database, `tx()`, `move_coins()`, settings and the poker engine. It never touches the PHP session.
@@ -27,8 +28,8 @@ php tests/ws_test.php                                     # end-to-end tests: st
 - `GET /health` on the socket port (a plain HTTP request without `Upgrade`) answers `{ "ok": true, "online": n, "tables": [{ "id", "seated", "hand_no" }] }` for monitoring.
 - Logs go to stdout and to `data/ws.log` (rotated to `ws.log.1` above 5 MB); `--verbose` adds one line per connection event, action and hand.
 - The timers can be shortened with `--idle` / `--away` or the environment variables `GT_WS_IDLE` / `GT_WS_AWAY` (the tests do). Settings such as `rt_origins` and `poker_action_seconds` are read once at start-up: restart `ws.php` after changing them.
-- Without an engine (no `pk_*` functions in `index.php`) the server hosts the floor only and answers every `pk_*` message with `pk_err`. `GT_PK_STUB=1` loads `tests/pk_stub.php`, a fake engine for the test-suite only; the server logs a loud warning when it is active.
-- SIGINT / SIGTERM close every socket with 1001, refund every `poker_seats` row and exit 0.
+- The engine is the `pk_*` block of `index.php`; `ws.php` passes `act_secs` (the `poker_action_seconds` setting, read once at start-up) into `pk_new_table()` so the engine never touches the database. Without an engine (no `pk_*` functions) the server hosts the floor only and answers every `pk_*` message with `pk_err`. There is no stub engine any more: the tests run the real one.
+- SIGINT / SIGTERM close every socket with 1001, refund every `poker_seats` row at what the row says (see Persistence: an interrupted hand is void) and exit 0.
 - One `ws.php` per database: it holds an exclusive lock on `data/ws.lock` for as long as it runs. A second copy (double launch, restart overlap, two servers pointed at one database) logs `Another ws.php already owns …` and exits 1 before it has touched the ledger.
 
 Client auto-discovery of the socket URL, in order:
@@ -71,7 +72,7 @@ Close codes: a message over 8 KB closes the connection with 1009, a binary frame
 | `pk_addon` | `amount` | top up between hands, up to `max_buyin` total stack |
 | `pk_leave` | | cash out, coins return to balance (after the current hand if in one: the player is folded/marked leaving and paid when the hand ends) |
 | `pk_sitout` | `on` (bool) | a repeat of the current state is a no-op; more than 2 real toggles a second → `pk_err` (each one costs every viewer a `pk_events` + `pk_state`) |
-| `pk_post` | `on` (bool) | post a big blind to be dealt into the next hand instead of waiting for the big blind; only matters while the seat `owes` one |
+| `pk_post` | `on` (bool, default true) | post a big blind to be dealt into the next hand instead of waiting for the big blind; only matters while the seat `owes` one. Relayed to `pk_post()`; a repeat of the current flag is a no-op, more than 2 real toggles a second → `pk_err` |
 | `pk_act` | `act` (`fold`,`check`,`call`,`raise`,`allin`), `amt` (raise TO total, only for `raise`), `hand`, `seq` | `hand` and `seq` must match the current hand number and action sequence, else `pk_err` and no-op (protects against double clicks and stale UIs) |
 | `ping` | | server replies `pong` |
 
@@ -90,7 +91,7 @@ Close codes: a message over 8 KB closes the connection with 1009, a binary frame
 | `err` | `msg` |
 | `pong` | |
 | `pk_tables` | `tables` (same summaries as in `welcome`), sent when occupancy changes |
-| `pk_state` | `table`: the `pk_view()` output for this viewer, sent on watch/join and after every event batch (authoritative, replaces client state) |
+| `pk_state` | `table`: the `pk_view()` output for this viewer, sent on watch/join and after every event batch (authoritative, replaces client state). `players` is keyed by seat: JSON carries it as an array when seats `0..n-1` are exactly the occupied ones and as an object (`{"1": …, "3": …}`) otherwise, so clients index it by seat number either way and never assume a dense list |
 | `pk_events` | `table` (id), `events`: list of engine events since the last state, for animation. Always followed by a `pk_state` in the same tick |
 | `pk_err` | `msg` |
 
@@ -130,7 +131,7 @@ Tests: `php goldtide/tests/poker_test.php` (no framework, exit 0 = green, ~5 s):
   'seq' => 0,                         // increments on every accepted action; clients echo it in pk_act
   'actions' => [],                    // [['street' => 'preflop', 'seat' => 0, 'act' => 'raise', 'amt' => 60, 'at' => 1712345678.1], ...]
   'winners' => [],                    // at settle: [['seat' => 2, 'amount' => 300, 'hand' => 'Two Pair, Kings and Nines', 'cards' => ['Kh','9d']]]
-                                      // (engine state; pk_view() blanks 'cards' for a seat that did not show, see below)
+                                      // (engine state; pk_view() blanks 'cards' for a seat that did not show, except in that seat's own view, see below)
   'started_at' => null, 'next_at' => null, 'bot_at' => null,
   'log' => [],                        // last 30 human-readable lines
   // private bookkeeping, never serialised by pk_view(): sb_seat, bb_seat, dpos (next deck position), hand_chips (chips dealt in, for the
@@ -264,7 +265,7 @@ pk_assert_invariants(array $t): void
 
 `['t' => 'hand_start', 'hand' => n, 'button' => seat, 'deck_hash' => ..]`, `['t' => 'post', 'seat', 'amt', 'kind' => 'sb'|'bb'|'post']` (`post` = a live big blind posted to be dealt in), `['t' => 'deal']`, `['t' => 'action', 'seat', 'act', 'amt' (bet after the action), 'put' (chips added), 'seq']`, `['t' => 'street', 'phase' => 'flop', 'cards' => [..]]`, `['t' => 'return', 'seat', 'amt']` (uncalled chips back), `['t' => 'showdown', 'shows' => [seat => cards]]`, `['t' => 'win', 'seat', 'amount', 'hand', 'pot' => index]`, `['t' => 'hand_end', 'deck_salt', 'deck', 'leavers' => [seat => stack], 'busted' => [seat => ['uid', 'bot']]]`, `['t' => 'timeout', 'seat']`, `['t' => 'sitout', 'seat', 'on']`, `['t' => 'away', 'seat', 'on']`, `['t' => 'sit', 'seat']`, `['t' => 'stand', 'seat']`.
 
-Events from `pk_sit`, `pk_leave`, `pk_sitout` and `pk_away` are queued and come out of the next `pk_tick()`; `ws.php` should still broadcast a fresh `pk_state` right after those calls.
+Events from `pk_sit`, `pk_leave`, `pk_sitout`, `pk_post` and `pk_away` are queued and come out of the next `pk_tick()`; `ws.php` marks the table dirty right after those calls, so the fresh `pk_state` goes out in the same tick as the events. `ws.php` calls `pk_tick($t, microtime(true))` on every loop tick and `pk_view()` after it, wraps every engine call from a client message in `try/catch DomainException → pk_err` (the state is untouched on a refusal), checks the `hand`/`seq` echo of `pk_act` against `$t['hand_no']` / `$t['seq']` before calling the engine, and passes `call` / `check` through exactly as the client sent them (the engine rejects a `call` when nothing is owed).
 
 ### Deck commitment (why players can trust the deal)
 
@@ -274,11 +275,14 @@ Before any card is dealt the server publishes `deck_hash = sha256(deck_in_deal_o
 
 - `poker_tables`: configuration, editable in the back office. Loaded at startup and re-read every 30 s: a new enabled table is hosted, a disabled or deleted one cashes everyone out (after the current hand) and disappears, name / blind / buy-in / seat / bot changes apply when the table is next idle.
 - House players want company: at a table where nobody real is seated or watching (`pk_watch`) the bots sit out between hands, so an empty room burns no CPU and writes no bot-only hand histories; they sit back in as soon as someone sits down or watches.
-- `poker_seats`: one row per real seated player (unique on player_id). Written when a player sits (in the same `tx()` as the buy-in `move_coins(pid, -buyin, 'wager', 'poker', ...)`), updated with the end-of-hand stack after every hand, deleted on cash-out (`move_coins(pid, +stack, 'payout', 'poker', ...)`).
-- On startup `ws.php` refunds every row still in `poker_seats` to the players' balances ("table reset") and deletes the rows, so a crash can never eat chips: the worst case is that the interrupted hand is void. Only the process that owns the database does this: `ws.php` first takes the exclusive lock on `data/ws.lock` and binds its listening socket, and touches the ledger only after both succeeded. A second `ws.php` started by mistake therefore exits without paying out seats the live server still holds (which would otherwise be paid a second time when those players cash out).
-- `poker_hands`: one row per completed hand with the full `pk_hand_record()`. `record_round(pid, wagered, won)` is called per real player per hand so the leaderboards count poker.
-- Bots have `pid = 0`, `uid = "b:<table>:<n>"`, names from a fixed list, and are labelled as house players in every view (`bot: true`). They rebuy to a random stack within the buy-in range after busting.
-- A real player who disconnects is marked `away` (auto sit-out); if still away after 90 s, or at the end of the hand they were in, the server cashes them out.
+- `poker_seats`: one row per real seated player (unique on player_id). Written when a player sits (in the same `tx()` as the buy-in `move_coins(pid, -buyin, 'wager', 'poker', ...)`), `+= amount` with an add-on (same tx as its wager), set to the end-of-hand stack at `hand_end`, deleted in the same `tx()` as the cash-out `move_coins(pid, +stack, 'payout', 'poker', ...)`. So between hands the row is the stack in front of the player; during a hand it is the stack the hand started with. The engine's own rules are checked on a copy of the state before the tx (a refused buy-in or add-on writes nothing).
+- `hand_end` (the event `pk_tick()` returns when settle → idle; the engine never deals the next hand in the same tick) is persisted in ONE `tx()`, in this order: the `poker_hands` row (full `pk_hand_record()`), then per real player in the record: a mid-hand leaver (`leavers[seat]`, equal to the record's `end_stack`) is paid `move_coins(+stack, 'payout', 'poker', 'cash-out …')` and its seat row deleted; a busted player (end stack 0, already removed by the engine) has its row deleted and gets a `pk_err` notice; everyone else gets `poker_seats.stack = end_stack`; and `record_round(pid, start_stack − end_stack + won, won)` for each of them (so the leaderboards count poker: `rounds_played` +1 per hand dealt into). After the tx, players who disconnected during that hand are cashed out (the seat is idle now, so `pk_leave()` returns the stack: one more payout + delete tx) and busted bots rebuy with `pk_addon($t, $seat, random stack in the buy-in range rounded to the big blind)`. Should the hand_end tx fail, nothing of it is written; the leavers are still paid one by one (each with its row delete) and the failure is logged.
+- `pk_leave` for a seat dealt into the running hand returns −1: the engine folds the player (or, during `settle`, only marks them leaving) and `ws.php` leaves the seat, its row and its bookkeeping in place until `hand_end` pays it from `leavers[]`. A second `pk_leave` meanwhile answers `pk_err`. A seat not in a live hand (idle, or sat down while a hand ran) is paid at once.
+- Refund rule, an interrupted hand is void: on startup and on SIGINT/SIGTERM `ws.php` pays every row still in `poker_seats` back at what the row says ("table reset" payout) and deletes it, never at a live mid-hand stack. So a crash (or `kill -9`) costs the players nothing but the hand in flight, which is never recorded. Only the process that owns the database does this: `ws.php` first takes the exclusive lock on `data/ws.lock` and binds its listening socket, and touches the ledger only after both succeeded. A second `ws.php` started by mistake therefore exits without paying out seats the live server still holds (which would otherwise be paid a second time when those players cash out).
+- Every path pays exactly once, because a payout and the DELETE of the seat row always share one `tx()`: cash-out now (idle seat), cash-out at `hand_end` (mid-hand leaver), the away window, the end of the hand a disconnected player was dealt into, a table disabled in the back office (each seat once, by the same two rules), busted (row deleted, nothing to pay), and the startup / shutdown refund of whatever rows are left.
+- `poker_hands`: one row per completed hand with the full `pk_hand_record()` (the tests run `pk_verify_record()` on every stored row).
+- Bots have `pid = 0`, `uid = "b:<table>:<n>"`, names from a fixed list, and are labelled as house players in every view (`bot: true`). They rebuy to a random stack within the buy-in range after busting and never touch the ledger.
+- Disconnects: when the last connection of a seated player drops, `ws.php` calls `pk_away($t, seat, true)`: the player is dealt out of the following hands and posts no blinds; the hand they are in still runs its clock on them (timeouts fold them, an all-in player can still win). A reconnect (fresh ticket, same uid) inside the away window (90 s, `--away`) calls `pk_away(false)` and sends a `pk_state` right after `welcome`, no `pk_join` needed. The player is cashed out at the end of the hand they were dealt into, otherwise when the window expires (at once with `--away 0`).
 
 ## Security rules that apply everywhere
 
@@ -311,7 +315,7 @@ const lobby = M.mountPokerLobby(host, { rt, cfg, onOpen });   // → { destroy()
 // One table. mode 'page' draws the felt; mode 'hud' is the compact bottom bar the floor uses
 // (the floor renders the felt/cards/chips in 3D from onState(view)). Never auto-leaves a seat.
 const tbl = M.mountPokerTable(host, { rt, tableId, cfg, mode, seatHint, onState(view), onEvents(list), onLeave() });
-tbl.sit(seat, buyin); tbl.leave(); tbl.act('raise', amountTo); tbl.sitout(true); tbl.addon(amount); tbl.view; tbl.destroy();
+tbl.sit(seat, buyin); tbl.leave(); tbl.act('raise', amountTo); tbl.sitout(true); tbl.post(true); tbl.addon(amount); tbl.view; tbl.destroy();
 
 // Hand history replay + client-side deck-commitment check for ?action=poker_hand.
 M.renderHandHistory(host, record);
