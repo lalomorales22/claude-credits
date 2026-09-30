@@ -361,7 +361,7 @@ eq($t['phase'], 'turn', 'seat 2 is all-in but seats 0 and 1 can still bet each o
 checkdown($t); eq($t['phase'], 'settle', 'checked down to the river');
 eq(array_column($t['pots'], 'amount'), [152, 32], 'main 44×3 + 20 folded, side 16×2');
 eq(array_column($t['pots'], 'winners'), [[0, 1, 2], [0, 1]], 'three-way and two-way ties');
-eq(stacks($t), [0 => 1008, 1 => 1006, 2 => 50, 3 => 980], 'odd chips (2) to the first winner left of the button');
+eq(stacks($t), [0 => 1007, 1 => 1007, 2 => 50, 3 => 980], 'odd chips (2) one each to the first two winners clockwise from the button');
 [$t, $ev] = deal([1000, 1000, 1000, 1000], 3);
 rig($t, [0 => ['2c', '3d'], 1 => ['4c', '5d'], 2 => ['6c', '7d'], 3 => ['8c', '9d']], ['Ah', 'Kh', 'Qh', 'Jh', 'Th']);
 checkdown($t);
@@ -371,6 +371,12 @@ rig($t, [0 => ['2c', '3d'], 1 => ['4c', '5d'], 2 => ['6c', '7d']], ['Ah', 'Kh', 
 act($t, 0, 'call'); act($t, 1, 'fold'); act($t, 2, 'check'); checkdown($t);
 eq(array_column($t['pots'], 'amount'), [25], 'pot 25');
 eq(stacks($t), [0 => 1002, 1 => 995, 2 => 1003], 'odd chip to seat 2, first winner clockwise from button 0');
+[$t, $ev] = deal([1000, 1000, 1000, 1000], 3, ['sb' => 5, 'bb' => 10]);   // sb 0, bb 1, utg 2, button 3
+rig($t, [0 => ['2c', '3d'], 1 => ['4c', '5d'], 2 => ['6c', '7d'], 3 => ['8c', '9d']], ['Ah', 'Kh', 'Qh', 'Jh', 'Th']);
+act($t, 2, 'call'); act($t, 3, 'call'); act($t, 0, 'fold'); act($t, 1, 'check'); checkdown($t);
+eq(array_column($t['pots'], 'amount'), [35], 'pot 35, three winners');
+eq(stacks($t), [0 => 995, 1 => 1002, 2 => 1002, 3 => 1001], '35 three ways is 12 / 12 / 11: one odd chip each to the first seats clockwise from the button, never both to one seat');
+eq(array_sum(stacks($t)), 4000, 'conserved');
 
 /* ───────── 4. timers, sit-out, leaving, busting, add-ons ───────── */
 section('timeouts and sit-out');
@@ -455,7 +461,11 @@ yes(isset($t['players'][0]) && $t['players'][0]['stack'] === 0, 'bot stays seate
 yes(pk_ready($t, $t['clock']), 'two live players remain');
 pk_tick($t, $t['clock'] + 0.1); eq($t['button'], 1, 'button moved past the busted seat'); yes(!$t['players'][0]['dealt'], 'busted bot dealt out');
 pk_addon($t, 0, 500); eq($t['players'][0]['stack'], 500, 'rebuy via add-on');
-checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1); yes($t['players'][0]['dealt'], 'back in after the rebuy');
+yes($t['players'][0]['owes'], 'the big blind passed the busted seat while it was out: it owes one');
+checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['players'][0]['dealt']], [2, false], 'a house player posts to play, but nobody enters between the button and the big blind');
+checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat']], [1, 2, 0], 'back in as the big blind after the rebuy'); yes($t['players'][0]['dealt'] && !$t['players'][0]['owes'], 'debt settled');
 
 section('button movement and blinds with gaps');
 $t = tbl(6);
@@ -470,14 +480,154 @@ pk_sit($t3, 1, 'b', 2, 'B', 1000); eq(pk_ready($t3, 0.0), true, 'two players are
 pk_away($t3, 1, true); eq(pk_ready($t3, 0.0), false, 'away counts as sitting out');
 throws(fn() => pk_new_table(['seats' => 6, 'small_blind' => 20, 'big_blind' => 10, 'min_buyin' => 1, 'max_buyin' => 2]), 'bad blinds rejected', InvalidArgumentException::class);
 
+section('missed blinds: sitting out through the big blind is not free');
+[$t, $ev] = deal([1000, 1000, 1000], 0);   // hand 1: button 0, sb 1, bb 2, so seat 0 is due the big blind on hand 2
+yes(!$t['players'][0]['owes'] && !$t['players'][1]['owes'] && !$t['players'][2]['owes'], 'a fresh table starts with no debts');
+checkdown($t); pk_tick($t, $t['next_at']);
+pk_sitout($t, 0, true); pk_tick($t, $t['clock'] + 0.1);   // the dodge: sit out exactly when the big blind arrives
+eq([$t['hand_no'], $t['button'], $t['sb_seat'], $t['bb_seat']], [2, 1, 1, 2], 'hand 2 is heads-up with button 1');
+yes($t['players'][0]['owes'], 'the seat that sat out through its big blind owes one'); yes(!$t['players'][1]['owes'] && !$t['players'][2]['owes'], 'the others owe nothing');
+pk_sitout($t, 0, false); pk_post($t, 0);   // and straight back, even asking to post
+checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['hand_no'], $t['button'], $t['sb_seat'], $t['bb_seat']], [3, 2, 2, 1], 'hand 3: still heads-up');
+yes(!$t['players'][0]['dealt'] && $t['players'][0]['owes'], 'seat 0 is not dealt in as the small blind (that was the dodge), post or no post');
+$ev = []; checkdown($t); pk_tick($t, $t['next_at']); $ev = pk_tick($t, $t['clock'] + 0.1);
+eq([$t['hand_no'], $t['button'], $t['sb_seat'], $t['bb_seat']], [4, 1, 2, 0], 'hand 4: dealt back in as the big blind');
+yes($t['players'][0]['dealt'] && !$t['players'][0]['owes'] && !$t['players'][0]['post'], 'debt settled by the blind, the post request consumed');
+eq(evts($ev, 'post'), [['t' => 'post', 'seat' => 2, 'amt' => 10, 'kind' => 'sb'], ['t' => 'post', 'seat' => 0, 'amt' => 20, 'kind' => 'bb']], 'ordinary blinds, no extra post');
+$v = pk_view($t, 'u0'); eq([$v['players'][0]['owes'], $v['players'][0]['post']], [false, false], 'owes and post are in the view');
+// the scripted dodge from the review, 30 hands: sit out whenever the moving button would make seat 0 the big blind, sit back in right after
+[$t, $ev] = deal([1000, 1000, 1000], 0); $dealt0 = 0; $bb0 = 0; $prevDealt = true; $reentries = 0; $badReentry = 0;
+for ($h = 0; $h < 30; $h++) {
+    checkdown($t); pk_tick($t, $t['next_at']);
+    $nb = pk_next_seat(3, $t['button'], [0, 1, 2]); pk_sitout($t, 0, pk_deal_order(3, $nb, [0, 1, 2])[1] === 0);
+    pk_tick($t, $t['clock'] + 0.1); pk_assert_invariants($t);
+    $d = $t['players'][0]['dealt'];
+    if ($d) { $dealt0++; if ($t['bb_seat'] === 0) { $bb0++; } if (!$prevDealt) { $reentries++; if ($t['bb_seat'] !== 0) { $badReentry++; } } }
+    $prevDealt = $d;
+}
+yes($reentries >= 5, "seat 0 sat out and came back $reentries times");
+eq($badReentry, 0, 'every return to the game was as the big blind');
+yes($bb0 >= intdiv($dealt0, 3), "seat 0 posted $bb0 big blinds over the $dealt0 hands it was dealt into (one per orbit, as everyone else)");
+eq(array_sum(stacks($t)) + array_sum(array_column($t['players'], 'bet')) + $t['pot'], 3000, 'conserved (a hand is live: blinds are in front of the seats)');
+
+section('missed blinds: posting to play, house players, new seats, seat-hopping, restart');
+$setup = function (bool $bot): array {   // hand 1 with seat 3 sitting out on button 2: the big blind passes it
+    $t = tbl(4); foreach ([0, 1, 2, 3] as $s) { pk_sit($t, $s, "u$s", $s + 1, "P$s", 1000, $bot && $s === 3); }
+    aim($t, 2); pk_sitout($t, 3, true); pk_start_hand($t, 1000.0); $t['events'] = [];
+    return $t;
+};
+$t = $setup(false);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat']], [2, 0, 1], 'hand 1'); yes($t['players'][3]['owes'], 'seat 3 owes'); yes(!$t['players'][0]['owes'], 'the small blind does not');
+pk_sitout($t, 3, false); pk_post($t, 3); checkdown($t); pk_tick($t, $t['next_at']); $ev = pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat']], [0, 1, 2], 'hand 2');
+yes($t['players'][3]['dealt'] && !$t['players'][3]['owes'] && !$t['players'][3]['post'], 'the poster is dealt in from behind the big blind');
+eq([$t['players'][3]['bet'], $t['players'][3]['last']], [20, 'post'], 'a live big blind in front of it');
+eq(evts($ev, 'post')[2], ['t' => 'post', 'seat' => 3, 'amt' => 20, 'kind' => 'post'], 'post event with kind post');
+eq(end($t['actions'])['act'], 'post', 'recorded as an action');
+eq($t['to_act'], 3, 'first to act left of the big blind is the poster');
+eq(pk_legal($t, 3), ['fold' => true, 'check' => true, 'call' => 0, 'raise' => ['min' => 40, 'max' => 1000], 'allin' => 1000], 'with the option, like a blind');
+act($t, 3, 'check'); act($t, 0, 'call'); act($t, 1, 'call'); eq($t['to_act'], 2, 'big blind option last'); act($t, 2, 'check');
+eq([$t['phase'], $t['pot']], ['flop', 80], 'four big blinds in the pot'); pk_assert_invariants($t);
+$t = $setup(true); pk_sitout($t, 3, false); checkdown($t); pk_tick($t, $t['next_at']); $ev = pk_tick($t, $t['clock'] + 0.1);
+yes($t['players'][3]['dealt'] && $t['players'][3]['last'] === 'post', 'a house player posts to play without being asked');
+$t = $setup(false); pk_sitout($t, 3, false); checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+yes(!$t['players'][3]['dealt'] && $t['players'][3]['owes'], 'without a post request the seat waits for the big blind');
+eq(pk_view($t, 'u3')['players'][3]['owes'], true, 'and the view says so');
+checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat']], [1, 2, 3], 'which comes to it on the next hand'); yes($t['players'][3]['dealt'] && !$t['players'][3]['owes'], 'dealt in, debt settled');
+// new seats
+[$t, $ev] = deal([1000, 1000, 1000], 0, ['seats' => 6]);   // hand 1: button 0, sb 1, bb 2
+pk_sit($t, 3, 'u3', 4, 'P3', 1000); pk_sit($t, 5, 'u5', 6, 'P5', 1000);
+yes($t['players'][3]['owes'] && $t['players'][5]['owes'], 'new seats owe a big blind');
+checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat']], [1, 2, 3], 'hand 2: the new seat the big blind reaches is dealt in as the big blind');
+yes(!$t['players'][5]['dealt'] && $t['players'][5]['owes'], 'the other new seat waits for its big blind');
+checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat']], [2, 3, 5], 'hand 3: and gets it');
+// seat-hopping: leave when the big blind is due and sit back down at a free seat behind the blinds
+[$t, $ev] = deal([1000, 1000, 1000, 1000, 1000], 0, ['seats' => 6]);   // hand 1: button 0, sb 1, bb 2; seat 3 is due the big blind on hand 2
+eq(pk_leave($t, 3), -1, 'seat 3 leaves during hand 1');
+checkdown($t); pk_tick($t, $t['next_at']);
+pk_sit($t, 5, 'u3', 4, 'P3', 1000);   // the same player, fresh seat behind the blinds
+pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat']], [1, 2, 4], 'hand 2: seat 4 is the big blind');
+yes(!$t['players'][5]['dealt'] && $t['players'][5]['owes'], 'the hopper is not dealt in for free');
+checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat']], [2, 4, 5], 'hand 3: dealt in as the big blind');
+// several seats out at once: with a moving button nobody can say which of them "the big blind passed", so a hand out always costs one
+[$t, $ev] = deal([1000, 1000, 1000, 1000], 0);   // button 0, sb 1, bb 2, seat 3 behind the blinds
+checkdown($t); pk_tick($t, $t['next_at']); pk_sitout($t, 0, true); pk_sitout($t, 3, true); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['bb_seat']], [1, 2], 'heads-up'); yes($t['players'][0]['owes'] && $t['players'][3]['owes'], 'both seats that sat out owe');
+pk_sitout($t, 0, false); pk_sitout($t, 3, false); checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat'], $t['players'][0]['dealt'], $t['players'][3]['dealt']], [2, 2, 1, false, false], 'both are between the button and the big blind: neither enters');
+checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat'], $t['players'][0]['dealt']], [1, 2, 3, false], 'seat 3 takes the big blind, seat 0 still waits');
+checkdown($t); pk_tick($t, $t['next_at']); pk_tick($t, $t['clock'] + 0.1);
+eq([$t['button'], $t['sb_seat'], $t['bb_seat']], [2, 3, 0], 'then seat 0 takes it'); yes(!$t['players'][0]['owes'] && !$t['players'][3]['owes'], 'debts settled');
+// (re)starting: with fewer than two seats free of debt everyone is dealt in and the debts are waived
+[$t, $ev] = deal([1000, 1000, 1000], 0, ['seats' => 4]);
+checkdown($t); pk_tick($t, $t['next_at']); pk_sitout($t, 1, true); pk_sitout($t, 2, true); pk_sit($t, 3, 'u3', 4, 'P3', 1000);
+yes(pk_ready($t, $t['clock']), 'ready: two seats can play'); pk_tick($t, $t['clock'] + 0.1);
+yes($t['players'][3]['dealt'] && !$t['players'][3]['owes'] && $t['players'][0]['dealt'], 'only one seat free of debt: the game restarts heads-up with the new seat, debt waived');
+pk_assert_invariants($t);
+throws(function () use ($t) { $c = $t; unset($c['players'][1]); pk_post($c, 1); }, 'pk_post on an empty seat');
+
+section('leaving during settle does not fold a finished hand');
+[$t, $ev] = deal([1000, 1000], 0);   // button 0 = sb, bb 1
+act($t, 0, 'fold'); eq($t['phase'], 'settle', 'folded to the big blind');
+$seq = $t['seq']; $acts = count($t['actions']); $rec = pk_hand_record($t);
+eq(pk_leave($t, 1), -1, 'the winner leaves during the settle pause');
+eq([$t['seq'], count($t['actions']), $t['players'][1]['in'], $t['players'][1]['last'], $t['players'][1]['leaving']], [$seq, $acts, true, 'bb', true], 'no phantom fold: seq, actions, in and last untouched, marked leaving');
+$ev = pk_tick($t, $t['clock']); eq(evts($ev, 'action'), [], 'no action event during settle');
+eq(pk_hand_record($t), $rec, 'record unchanged');
+$ev = pk_tick($t, $t['next_at']); eq(evts($ev, 'hand_end')[0]['leavers'], [1 => 1010], 'paid at hand end'); yes(!isset($t['players'][1]), 'and gone');
+[$t, $ev] = deal([1000, 1000, 1000], 0);   // a showdown player
+checkdown($t); eq($t['phase'], 'settle', 'showdown');
+$w = $t['winners'][0]['seat']; $seq = $t['seq']; $acts = count($t['actions']);
+eq(pk_leave($t, $w), -1, 'the showdown winner leaves');
+yes($t['players'][$w]['in'] && $t['players'][$w]['show'], 'still in and shown'); eq([$t['seq'], count($t['actions'])], [$seq, $acts], 'nothing recorded');
+$ev = pk_tick($t, $t['clock']); eq(evts($ev, 'action'), [], 'no action event');
+yes(!in_array('settle', array_column($t['actions'], 'street'), true), 'no action on a street called settle');
+$v = pk_view($t, 'nobody'); yes($v['players'][$w]['in'] && $v['players'][$w]['show'] && is_array($v['players'][$w]['cards']), 'viewers still see the winning hand face up');
+$stack = $t['players'][$w]['stack']; $ev = pk_tick($t, $t['next_at']); eq(evts($ev, 'hand_end')[0]['leavers'], [$w => $stack], 'paid the full stack including the win');
+pk_assert_invariants($t);
+
+section('hand records: malformed and hostile input');
+[$t, $ev] = deal([1000, 1000, 1000], 0); checkdown($t); $rec = pk_hand_record($t);
+eq(pk_verify_record($rec), ['hash_ok' => true, 'deal_ok' => true], 'a real record verifies');
+$bad = fn(array $r) => pk_verify_record($r) === ['hash_ok' => false, 'deal_ok' => false];
+$m = $rec; $m['table']['seats'] = PHP_INT_MAX; $t0 = microtime(true); yes($bad($m), 'absurd seat count rejected'); yes(microtime(true) - $t0 < 0.5, 'and without looping over it');
+$m = $rec; $m['table']['seats'] = 10; yes($bad($m), 'seats above 9 rejected');
+$m = $rec; $m['table']['seats'] = '6'; yes($bad($m), 'seats must be an integer');
+$m = $rec; $m['button'] = 6; yes($bad($m), 'button out of range');
+$m = $rec; $m['button'] = -1; yes($bad($m), 'negative button');
+yes($bad(['deck' => 'abc', 'deck_salt' => ['x'], 'deck_hash' => ['y'], 'table' => ['seats' => 6], 'button' => 0, 'players' => [], 'board' => []]), 'strings and arrays swapped: no warnings, both false');
+yes($bad([]), 'empty record');
+$m = $rec; $m['deck'] = array_fill(0, 52, ['As']); yes($bad($m), 'deck of arrays');
+$m = $rec; $m['deck'][0] = 'Xx'; yes($bad($m), 'a non-card in the deck');
+$m = $rec; $m['deck'][0] = $m['deck'][1]; yes($bad($m), 'a duplicate in the deck');
+$m = $rec; $m['deck_salt'] = null; yes($bad($m), 'missing salt');
+$m = $rec; $m['players'] = array_map(fn($i) => ['seat' => $i, 'cards' => ['As', 'Ks']], range(0, 40)); $m['table']['seats'] = 9; yes($bad($m), 'more players than seats');
+$m = $rec; $m['players'][0]['seat'] = $m['players'][1]['seat']; yes($bad($m), 'two players on one seat');
+$m = $rec; $m['players'][0]['seat'] = 6; yes($bad($m), 'player seat out of range');
+$m = $rec; $m['players'][0]['cards'] = ['As']; yes($bad($m), 'one hole card');
+$m = $rec; $m['players'][0]['cards'] = [['As'], 'Ks']; yes($bad($m), 'a hole card that is not a string');
+$m = $rec; $m['players'][0] = 'nope'; yes($bad($m), 'a player that is not an array');
+$m = $rec; $m['board'] = ['As', 'Ks']; yes($bad($m), 'two-card board');
+$m = $rec; $m['board'] = 'AsKsQs'; yes($bad($m), 'board that is not an array');
+$m = $rec; $m['deck_hash'] = strrev($rec['deck_hash']); eq(pk_verify_record($m), ['hash_ok' => false, 'deal_ok' => true], 'a well-formed record with a wrong hash still gets its deal checked');
+$m = $rec; $m['players'] = [$m['players'][0]]; eq(pk_verify_record($m), ['hash_ok' => true, 'deal_ok' => false], 'fewer than two players: no deal to check');
+
 /* ───────── 5. fuzz ───────── */
 section('fuzz: 5,000 hands, invariants after every action');
 // idle may reach any phase: a hand can run out inside pk_start_hand when the blinds are all-in
 $TRANS = ['idle' => ['preflop', 'flop', 'turn', 'river', 'settle'], 'preflop' => ['flop', 'turn', 'river', 'settle'], 'flop' => ['turn', 'river', 'settle'], 'turn' => ['river', 'settle'], 'river' => ['settle'], 'settle' => ['idle']];
 $hands = 0; $actions = 0; $probes = 0; $leaks = 0; $bad = 0; $now = 5000.0; $tables = 0; $verified = 0; $tampered = 0; $timeouts = 0; $leaves = 0; $sits = 0;
+$entries = 0; $posts = 0; $waivers = 0; $prevDealt = [];   // missed-blind rule: how seats got (back) into the game
 $uidN = 100;
 $t = null; $lastSeq = 0; $lastPhase = 'idle';
-$newTable = function () use (&$t, &$uidN, &$tables, &$lastSeq, &$lastPhase) {
+$newTable = function () use (&$t, &$uidN, &$tables, &$lastSeq, &$lastPhase, &$prevDealt) {
     $seats = random_int(2, 6);
     $t = tbl($seats, 10, 20, 1, 1000000, 20);
     $n = random_int(2, $seats);
@@ -486,7 +636,7 @@ $newTable = function () use (&$t, &$uidN, &$tables, &$lastSeq, &$lastPhase) {
         $stack = [15, 25, 60, 200, 500, 1000, 3000][random_int(0, 6)];   // some short stacks: short blinds and tiny shoves
         pk_sit($t, $s, 'u' . ($uidN++), $uidN, 'P' . $s, $stack, random_int(0, 1) === 1);
     }
-    $tables++; $lastSeq = 0; $lastPhase = 'idle';
+    $tables++; $lastSeq = 0; $lastPhase = 'idle'; $prevDealt = [];
 };
 $check = function (array $t, string $where) use (&$lastSeq, &$lastPhase, &$bad, $TRANS) {
     try { pk_assert_invariants($t); } catch (RuntimeException $e) { $bad++; if ($bad <= 5) { yes(false, "$where: " . $e->getMessage()); dump($where, $t); } }
@@ -561,6 +711,7 @@ while ($hands < 5000 && $guard++ < 2000000) {
             $tampered++;
         }
         $chipsBefore = array_sum(stacks($t));
+        $prevDealt = array_keys(array_filter($t['players'], fn($p) => $p['dealt']));
         $now = $t['next_at'];
         $ev = pk_tick($t, $now);
         $he = evts($ev, 'hand_end')[0] ?? null;
@@ -581,12 +732,28 @@ while ($hands < 5000 && $guard++ < 2000000) {
         if ($free && count(array_filter($t['players'], fn($p) => pk_dealable($p))) < 2) { pk_sit($t, $free[array_rand($free)], 'u' . ($uidN++), $uidN, 'R', random_int(20, 3000), random_int(0, 1) === 1); $sits++; }
         if (count(array_filter($t['players'], fn($p) => pk_dealable($p))) < 2) { $newTable(); }
     }
+    foreach ($t['players'] as $s => $p) { if ($p['owes'] && !$p['bot'] && random_int(1, 3) === 1) { pk_post($t, $s, random_int(1, 4) !== 1); } }   // most ask to post, some change their mind
+    $waiver = count(array_filter($t['players'], fn($p) => pk_dealable($p) && !$p['owes'])) < 2;   // (re)start: everyone in, debts waived
+    $hn = $t['hand_no'];
     $now += 0.2;
     $ev = pk_tick($t, $now);
     $check($t, 'idle tick');
+    if ($t['hand_no'] !== $hn) {   // a hand started: nobody gets (back) in except as the big blind, by posting, or on a restart
+        if ($waiver) { $waivers++; }
+        foreach ($t['players'] as $s => $p) {
+            if (!$p['dealt'] || in_array($s, $prevDealt, true)) { continue; }
+            $entries++;
+            if ($p['last'] === 'post') { $posts++; }
+            if (!$waiver && $s !== $t['bb_seat'] && $p['last'] !== 'post') { $bad++; if ($bad <= 5) { yes(false, "seat $s was dealt in for free (button {$t['button']}, bb {$t['bb_seat']}, last " . json_encode($p['last']) . ')'); dump('free entry', $t); } }
+            if ($p['last'] === 'post' && ($s === $t['sb_seat'] || $s === $t['bb_seat'])) { $bad++; if ($bad <= 5) { yes(false, "seat $s posted while being a blind"); } }
+        }
+        foreach (evts($ev, 'post') as $e) { if ($e['kind'] === 'post' && $t['players'][$e['seat']]['sstack'] >= $t['bb'] && $e['amt'] !== $t['bb']) { $bad++; if ($bad <= 5) { yes(false, 'a post that is not a big blind'); } } }
+    }
 }
 echo "  $hands hands on $tables tables: $actions actions, $probes legality probes, $timeouts timeouts, $leaves mid-hand leaves, $sits mid-hand sits, $tampered tampered records\n";
+echo "  missed-blind rule: $entries (re)entries, $posts by posting, $waivers restart hands\n";
 eq($hands, 5000, 'played 5,000 hands');
+yes($entries > 200 && $posts > 5 && $waivers > 20, "the missed-blind paths were all exercised ($entries entries, $posts posts, $waivers waivers)");
 eq($bad, 0, 'no invariant violations');
 eq($leaks, 0, 'pk_view never leaked a hidden card');
 eq($verified, 5000, 'every hand record verified'); yes($tampered > 100, "tampered records rejected ($tampered)");
