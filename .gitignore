@@ -6,3 +6,6 @@ coordinator/hive_key.txt
 .DS_Store
 coordinator/setup_token.txt
 wireguard/
+
+# agent worktrees (Claude Code workflows)
+.claude/worktrees/
