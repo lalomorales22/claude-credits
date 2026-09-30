@@ -603,22 +603,17 @@ function slots_spin(): array {
 }
 
 /* ── Harbor Blackjack ──
- * 6-deck shoe, fresh per hand. Dealer peeks for blackjack, stands on all 17s.
- * Blackjack pays 3:2, double on any first two cards. No splits (yet).
+ * Six-deck shoe, fresh every hand. Dealer peeks for blackjack with an Ace or ten up: a dealer natural ends the hand
+ * before any action and pushes only a player natural. Dealer stands on all 17s. Blackjack pays 3:2, double on any two
+ * cards (also after a split), split a matching pair once (split aces get one card each; a two-card 21 after a split is
+ * 21, not blackjack), late surrender on the first two cards for half the bet. Fractions (3:2 on an odd bet, half of an
+ * odd bet) round to the nearest coin, half up: a 25 GC blackjack pays 38, surrendering 25 returns 13.
+ * House edge with total-dependent basic strategy: BJ_EDGE_TEXT, measured by tests/audit_tables_test.php, which plays
+ * 600,000 hands through bj_new()/bj_step()/bj_resolve() below, the same code that runs the table.
  */
-function bj_shoe(): array {
-    $cards = [];
-    for ($d = 0; $d < 6; $d++) {
-        foreach (['S', 'H', 'D', 'C'] as $s) {
-            foreach (['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'] as $r) { $cards[] = $r . $s; }
-        }
-    }
-    for ($i = count($cards) - 1; $i > 0; $i--) {
-        $j = random_int(0, $i);
-        [$cards[$i], $cards[$j]] = [$cards[$j], $cards[$i]];
-    }
-    return $cards;
-}
+const BJ_EDGE_TEXT = 'Return to player with basic strategy: 99.6% of all coins wagered (house edge 0.4% of the initial bet).';
+
+function bj_shoe(): array { return shoe(6); }
 
 function bj_value(array $cards): array {
     $total = 0; $aces = 0;
@@ -632,53 +627,152 @@ function bj_value(array $cards): array {
     return [$total, $aces > 0];
 }
 function bj_natural(array $cards): bool { return count($cards) === 2 && bj_value($cards)[0] === 21; }
+/** Face value for the split rule: every ten-value card matches every other, an ace is 11. */
+function bj_card_value(string $c): int { $r = substr($c, 0, -1); return $r === 'A' ? 11 : (in_array($r, ['10', 'J', 'Q', 'K'], true) ? 10 : (int)$r); }
 
 function bj_active(int $pid): ?array { return row("SELECT * FROM bj_hands WHERE player_id = ? AND status = 'active'", [$pid]); }
 
-/** What the browser is allowed to see: never the shoe, never the hole card mid-hand. */
-function bj_public(?array $hand): ?array {
-    if (!$hand) { return null; }
-    $st = json_decode($hand['state'], true) ?: [];
-    $live = $hand['status'] === 'active';
-    $dealer = $st['dealer'] ?? [];
-    $shown = $live ? array_slice($dealer, 0, 1) : $dealer;
-    return [
-        'id' => (int)$hand['id'], 'bet' => (int)$hand['bet'], 'status' => $hand['status'],
-        'outcome' => $hand['outcome'], 'payout' => (int)$hand['payout'],
-        'player' => $st['player'] ?? [], 'player_total' => bj_value($st['player'] ?? [])[0],
-        'dealer' => $shown, 'dealer_hidden' => $live ? max(0, count($dealer) - 1) : 0,
-        'dealer_total' => bj_value($shown)[0],
-        'can_double' => $live && count($st['player'] ?? []) === 2,
-    ];
+/*
+ * Hand state (JSON in bj_hands.state): shoe (top card = end of the array), dealer, hands => [{cards, bet, doubled, done,
+ * surrendered?, outcome?, payout?}], active (index of the hand deciding), split, over, payout. bj_new/bj_step/bj_resolve are pure:
+ * they only touch the state, so the simulation in the test suite runs the exact table code. Coins move in blackjack_act().
+ */
+function bj_new(int $bet, array $shoe): array {
+    $st = ['shoe' => $shoe, 'dealer' => [], 'hands' => [['cards' => [], 'bet' => $bet, 'doubled' => false, 'done' => false]], 'active' => 0, 'split' => false, 'over' => false];
+    $st['hands'][0]['cards'][] = array_pop($st['shoe']); $st['dealer'][] = array_pop($st['shoe']);
+    $st['hands'][0]['cards'][] = array_pop($st['shoe']); $st['dealer'][] = array_pop($st['shoe']);
+    // the peek: a dealer natural (only possible behind an Ace or ten) or a player natural settles before any action
+    if (bj_natural($st['dealer']) || bj_natural($st['hands'][0]['cards'])) { $st['hands'][0]['done'] = true; bj_resolve($st); }
+    return $st;
+}
+/** Decode a stored hand. Hands dealt before splits existed kept a single 'player' array; lift them into the same shape. */
+function bj_state(array $hand): array {
+    $st = json_decode((string)$hand['state'], true) ?: [];
+    if (!isset($st['hands'])) {
+        $over = $hand['status'] !== 'active';
+        $st['hands'] = [['cards' => $st['player'] ?? [], 'bet' => (int)$hand['bet'], 'doubled' => !empty($st['doubled']), 'done' => $over,
+            'outcome' => $hand['outcome'], 'payout' => (int)$hand['payout']]];
+        $st += ['dealer' => [], 'shoe' => [], 'active' => 0, 'split' => false, 'over' => $over, 'payout' => (int)$hand['payout']];
+        unset($st['player'], $st['doubled']);
+    }
+    return $st;
+}
+/** Which moves the deciding hand may make. Split aces and doubled hands are marked done at once, so they are never asked. */
+function bj_legal(array $st): array {
+    if ($st['over']) { return ['hit' => false, 'stand' => false, 'double' => false, 'split' => false, 'surrender' => false]; }
+    $c = $st['hands'][$st['active']]['cards'];
+    $two = count($c) === 2;
+    return ['hit' => true, 'stand' => true, 'double' => $two,
+        'split' => $two && !$st['split'] && bj_card_value($c[0]) === bj_card_value($c[1]),
+        'surrender' => $two && !$st['split']];   // late surrender: first two cards only, and the peek has already happened
+}
+/** Apply one move to the deciding hand, then hand the turn to the next open hand or resolve the round. */
+function bj_step(array $st, string $move): array {
+    if (empty(bj_legal($st)[$move])) {
+        throw new DomainException(match ($move) {
+            'hit', 'stand' => 'No hand in play. Place a bet and deal.',
+            'double' => 'You can only double on the first two cards of a hand.',
+            'split' => 'You can only split a matching pair, and only once.',
+            'surrender' => 'Surrender is only offered on your first two cards.',
+            default => 'Unknown move.',
+        });
+    }
+    $h = &$st['hands'][$st['active']];
+    if ($move === 'hit') { $h['cards'][] = array_pop($st['shoe']); if (bj_value($h['cards'])[0] >= 21) { $h['done'] = true; } }
+    elseif ($move === 'stand') { $h['done'] = true; }
+    elseif ($move === 'double') { $h['doubled'] = true; $h['bet'] *= 2; $h['cards'][] = array_pop($st['shoe']); $h['done'] = true; }
+    elseif ($move === 'surrender') { $h['surrendered'] = true; $h['done'] = true; }
+    else {
+        // split: the second card opens a new hand for the same bet, each hand gets one card; aces get nothing more
+        $st['split'] = true;
+        $st['hands'][] = ['cards' => [array_pop($h['cards'])], 'bet' => $h['bet'], 'doubled' => false, 'done' => false];
+        $h['cards'][] = array_pop($st['shoe']);
+        $st['hands'][1]['cards'][] = array_pop($st['shoe']);
+        foreach ([0, 1] as $k) {
+            if (bj_card_value($st['hands'][$k]['cards'][0]) === 11 || bj_value($st['hands'][$k]['cards'])[0] === 21) { $st['hands'][$k]['done'] = true; }
+        }
+    }
+    unset($h);
+    $next = null;
+    foreach ($st['hands'] as $k => $hh) { if (!$hh['done']) { $next = $k; break; } }
+    if ($next === null) { bj_resolve($st); } else { $st['active'] = $next; }
+    return $st;
+}
+/**
+ * Dealer plays (only if a hand is still standing), then every hand is paid. Returns include the stake:
+ * blackjack bet + 3:2 rounded half up, win 2×, push 1×, surrender half the bet rounded half up, bust/lose 0.
+ */
+function bj_resolve(array &$st): void {
+    $dNat = bj_natural($st['dealer']);
+    $standing = false;   // the dealer only plays out against a hand the draw can still decide: not busted, surrendered or a natural
+    foreach ($st['hands'] as $h) {
+        $nat = !$st['split'] && bj_natural($h['cards']);
+        if (empty($h['surrendered']) && !$nat && bj_value($h['cards'])[0] <= 21) { $standing = true; }
+    }
+    if ($standing && !$dNat) { while (bj_value($st['dealer'])[0] < 17) { $st['dealer'][] = array_pop($st['shoe']); } }
+    $dt = bj_value($st['dealer'])[0];
+    $total = 0;
+    foreach ($st['hands'] as &$h) {
+        $bet = (int)$h['bet']; $pt = bj_value($h['cards'])[0];
+        $pNat = !$st['split'] && bj_natural($h['cards']);   // a two-card 21 after a split is just 21
+        if (!empty($h['surrendered'])) { $o = 'surrender'; $pay = intdiv($bet + 1, 2); }
+        elseif ($pt > 21) { $o = 'bust'; $pay = 0; }
+        elseif ($pNat && $dNat) { $o = 'push'; $pay = $bet; }
+        elseif ($pNat) { $o = 'blackjack'; $pay = $bet + intdiv($bet * 3 + 1, 2); }
+        elseif ($dNat) { $o = 'dealer_blackjack'; $pay = 0; }
+        elseif ($dt > 21) { $o = 'dealer_bust'; $pay = $bet * 2; }
+        elseif ($pt > $dt) { $o = 'win'; $pay = $bet * 2; }
+        elseif ($pt === $dt) { $o = 'push'; $pay = $bet; }
+        else { $o = 'lose'; $pay = 0; }
+        $h['outcome'] = $o; $h['payout'] = $pay; $total += $pay;
+    }
+    unset($h);
+    $st['over'] = true; $st['payout'] = $total; $st['active'] = null;
 }
 
 const BJ_OUTCOME_TEXT = [
     'blackjack' => 'Blackjack! Pays 3:2.', 'win' => 'You win.', 'dealer_bust' => 'Dealer busts. You win.',
-    'push' => 'Push. Bet returned.', 'lose' => 'Dealer wins.', 'bust' => 'Bust.',
+    'push' => 'Push. Bet returned.', 'lose' => 'Dealer wins.', 'bust' => 'Bust.', 'surrender' => 'Surrendered. Half the bet comes back.',
     'dealer_blackjack' => 'Dealer has blackjack.', 'void' => 'Hand voided by staff. Bet returned.',
 ];
-
-/** Finish the hand, pay out, persist. Called inside tx(). */
-function bj_settle(array $hand, array $st): array {
-    [$pt] = bj_value($st['player']);
-    $bet = (int)$hand['bet'];
-    $pNat = bj_natural($st['player']) && empty($st['doubled']);
-    $dNat = bj_natural($st['dealer']);
-
-    if ($pt > 21) { $outcome = 'bust'; $pay = 0; }
-    elseif ($pNat && $dNat) { $outcome = 'push'; $pay = $bet; }
-    elseif ($pNat) { $outcome = 'blackjack'; $pay = $bet + intdiv($bet * 3, 2); }
-    elseif ($dNat) { $outcome = 'dealer_blackjack'; $pay = 0; }
-    else {
-        while (bj_value($st['dealer'])[0] < 17) { $st['dealer'][] = array_pop($st['shoe']); }
-        $dt = bj_value($st['dealer'])[0];
-        if ($dt > 21) { $outcome = 'dealer_bust'; $pay = $bet * 2; }
-        elseif ($pt > $dt) { $outcome = 'win'; $pay = $bet * 2; }
-        elseif ($pt === $dt) { $outcome = 'push'; $pay = $bet; }
-        else { $outcome = 'lose'; $pay = 0; }
+/** The result strip: the legal moves while a hand is open, one verdict per hand once it is over. */
+function bj_message(array $st): string {
+    if (!$st['over']) {
+        $can = array_keys(array_filter(bj_legal($st)));
+        $last = array_pop($can);
+        return (count($st['hands']) > 1 ? 'Hand ' . ($st['active'] + 1) . ': ' : '') . ucfirst(implode(', ', $can)) . ' or ' . $last . '?';
     }
+    if (count($st['hands']) === 1) { return BJ_OUTCOME_TEXT[$st['hands'][0]['outcome'] ?? ''] ?? 'Hand over.'; }
+    $parts = [];
+    foreach ($st['hands'] as $k => $h) { $parts[] = 'Hand ' . ($k + 1) . ': ' . rtrim(BJ_OUTCOME_TEXT[$h['outcome'] ?? ''] ?? 'over', '.'); }
+    return implode(' · ', $parts) . '.';
+}
 
-    $pid = (int)$hand['player_id'];
+/** What the browser is allowed to see: never the shoe, never the hole card mid-hand. */
+function bj_public(?array $hand): ?array {
+    if (!$hand) { return null; }
+    $st = bj_state($hand);
+    $live = $hand['status'] === 'active';
+    $shown = $live ? array_slice($st['dealer'], 0, 1) : $st['dealer'];
+    $hands = [];
+    foreach ($st['hands'] as $h) {
+        $hands[] = ['cards' => $h['cards'], 'total' => bj_value($h['cards'])[0], 'bet' => (int)$h['bet'], 'done' => (bool)$h['done'],
+            'outcome' => $h['outcome'] ?? null, 'payout' => isset($h['payout']) ? (int)$h['payout'] : null];
+    }
+    return [
+        'id' => (int)$hand['id'], 'bet' => (int)$hand['bet'], 'status' => $hand['status'],
+        'outcome' => $hand['outcome'], 'payout' => (int)$hand['payout'],
+        'hands' => $hands, 'active' => $live ? $st['active'] : null, 'can' => $live ? bj_legal($st) : [],
+        'dealer' => $shown, 'dealer_hidden' => $live ? max(0, count($st['dealer']) - 1) : 0,
+        'dealer_total' => bj_value($shown)[0],
+        'message' => $hand['status'] === 'void' ? BJ_OUTCOME_TEXT['void'] : bj_message($st),
+    ];
+}
+
+/** Pay a resolved round and persist it. Called inside tx(). $hand['bet'] is the whole stake across split/doubled hands. */
+function bj_settle(array $hand, array $st): array {
+    $pid = (int)$hand['player_id']; $bet = (int)$hand['bet']; $pay = (int)$st['payout'];
+    $outcome = count($st['hands']) === 1 ? $st['hands'][0]['outcome'] : ($pay > $bet ? 'win' : ($pay < $bet ? 'lose' : 'push'));
     unset($st['shoe']); // no reason to keep 300 cards around once it's over
     // settle as a conditional write first: a hand that is already done or voided can never pay a second time
     $n = q("UPDATE bj_hands SET status = 'done', outcome = ?, payout = ?, state = ?, updated_at = datetime('now') WHERE id = ? AND status = 'active'",
@@ -693,50 +787,34 @@ function blackjack_act(): array {
     $p = require_playable();
     $g = game_cfg('blackjack');
     $pid = (int)$p['id'];
-    $act = (string)($_POST['move'] ?? '');
-    $bet = $act === 'deal' ? clamp_bet($_POST['bet'] ?? '', $g) : 0;
+    $move = (string)($_POST['move'] ?? '');
+    $bet = $move === 'deal' ? clamp_bet($_POST['bet'] ?? '', $g) : 0;
 
-    $hand = tx(function () use ($pid, $act, $bet) {
+    $hand = tx(function () use ($pid, $move, $bet) {
         $hand = bj_active($pid);
-        if ($act === 'deal') {
+        if ($move === 'deal') {
             if ($hand) { throw new DomainException('Finish the hand you\'re in first.'); }
             move_coins($pid, -$bet, 'wager', 'blackjack');
-            $shoe = bj_shoe();
-            $st = ['shoe' => $shoe, 'player' => [], 'dealer' => [], 'doubled' => false];
-            $st['player'][] = array_pop($st['shoe']); $st['dealer'][] = array_pop($st['shoe']);
-            $st['player'][] = array_pop($st['shoe']); $st['dealer'][] = array_pop($st['shoe']);
+            $st = bj_new($bet, bj_shoe());
             q('INSERT INTO bj_hands (player_id, bet, state) VALUES (?,?,?)', [$pid, $bet, json_encode($st)]);
             $hand = row('SELECT * FROM bj_hands WHERE id = ?', [(int)db()->lastInsertId()]);
-            if (bj_natural($st['player']) || bj_natural($st['dealer'])) { $hand = bj_settle($hand, $st); }
-            return $hand;
+            return $st['over'] ? bj_settle($hand, $st) : $hand;
         }
         if (!$hand) { throw new DomainException('No hand in play. Place a bet and deal.'); }
-        $st = json_decode($hand['state'], true);
-
-        if ($act === 'hit') {
-            $st['player'][] = array_pop($st['shoe']);
-            if (bj_value($st['player'])[0] >= 21) { return bj_settle($hand, $st); }
-        } elseif ($act === 'double') {
-            if (count($st['player']) !== 2) { throw new DomainException('You can only double on your first two cards.'); }
-            move_coins($pid, -(int)$hand['bet'], 'wager', 'blackjack', 'double hand #' . $hand['id']);
-            $hand['bet'] = (int)$hand['bet'] * 2;
-            q('UPDATE bj_hands SET bet = ? WHERE id = ?', [$hand['bet'], $hand['id']]);
-            $st['doubled'] = true;
-            $st['player'][] = array_pop($st['shoe']);
-            return bj_settle($hand, $st);
-        } elseif ($act === 'stand') {
-            return bj_settle($hand, $st);
-        } else {
-            throw new DomainException('Unknown move.');
+        $st = bj_step(bj_state($hand), $move);
+        $stake = array_sum(array_column($st['hands'], 'bet'));
+        if ($stake > (int)$hand['bet']) {   // double or split: the extra bet comes off the balance now, or the whole move rolls back
+            move_coins($pid, (int)$hand['bet'] - $stake, 'wager', 'blackjack', $move . ' hand #' . $hand['id']);
+            $hand['bet'] = $stake;
+            q('UPDATE bj_hands SET bet = ? WHERE id = ?', [$stake, $hand['id']]);
         }
+        if ($st['over']) { return bj_settle($hand, $st); }
         q("UPDATE bj_hands SET state = ?, updated_at = datetime('now') WHERE id = ?", [json_encode($st), $hand['id']]);
         return row('SELECT * FROM bj_hands WHERE id = ?', [$hand['id']]);
     });
 
     $pub = bj_public($hand);
-    $bal = (int)val('SELECT balance FROM players WHERE id = ?', [$pid]);
-    return ['hand' => $pub, 'balance' => $bal,
-        'message' => $pub['status'] === 'done' ? (BJ_OUTCOME_TEXT[$pub['outcome']] ?? 'Hand over.') : 'Hit, stand, or double?'];
+    return ['hand' => $pub, 'balance' => bal($pid), 'message' => $pub['message']];
 }
 
 /* ── Coronado Roulette ── single zero, standard payouts (house edge 2.7%). */
@@ -1230,11 +1308,14 @@ function bigwheel_play(): array {
         'balance' => bal($pid), 'message' => 'Landed on ' . ($hit === 'anchor' || $hit === 'sun' ? 'the ' . $hit : $hit) . ($payout ? ' · +' . coins($payout) . ' GC' : '')];
 }
 
-/* ── Surf Sic Bo ── */
+/* ── Surf Sic Bo ── 50 spots. Return per bet, exact over the 216 rolls: small/big 210/216 = 97.22%, singles 199/216 = 92.13%,
+ * totals 175–195/216 = 81.02–90.28%, any triple 186/216 = 86.11%, specific triple 181/216 = 83.80%, two-dice combinations
+ * (6:1, the Macau paytable) 210/216 = 97.22%, doubles 176/216 = 81.48%. Keys are exact spellings: no leading zeros, nothing after the number. */
 const SICBO_TOTALS = [4 => 60, 5 => 30, 6 => 17, 7 => 12, 8 => 8, 9 => 6, 10 => 6, 11 => 6, 12 => 6, 13 => 8, 14 => 12, 15 => 17, 16 => 30, 17 => 60];
 function sicbo_valid(string $k): bool {
     if (in_array($k, ['small', 'big', 'any_triple'], true)) { return true; }
-    if (!preg_match('/^(total|single|double|triple):([1-9]\d?)$/', $k, $m)) { return false; }   // exact spelling: no "04"
+    if (preg_match('/^combo:([1-6])-([1-6])\z/', $k, $m)) { return (int)$m[1] < (int)$m[2]; }   // canonical combo:a-b with a < b
+    if (!preg_match('/^(total|single|double|triple):(0|[1-9]\d*)\z/', $k, $m)) { return false; }
     $n = (int)$m[2];
     return $m[1] === 'total' ? isset(SICBO_TOTALS[$n]) : $n >= 1 && $n <= 6;
 }
@@ -1244,6 +1325,7 @@ function sicbo_returns(string $k, array $d): int {
     if ($k === 'small') { return !$triple && $sum >= 4 && $sum <= 10 ? 2 : 0; }
     if ($k === 'big') { return !$triple && $sum >= 11 && $sum <= 17 ? 2 : 0; }
     if ($k === 'any_triple') { return $triple ? 31 : 0; }
+    if (str_starts_with($k, 'combo:')) { [$a, $b] = explode('-', substr($k, 6)); return isset($cnt[(int)$a], $cnt[(int)$b]) ? 7 : 0; }   // 6:1 when both faces show (30 of 216 rolls: 216 − 2·125 + 64)
     [$t, $n] = explode(':', $k); $n = (int)$n;
     return match ($t) {
         'total' => $sum === $n ? SICBO_TOTALS[$n] + 1 : 0,
@@ -1272,7 +1354,7 @@ const CRABS = [
 ];
 function crabs_play(): array {
     $p = require_playable(); $g = game_cfg('crabs');
-    [$bets, $total] = parse_bets($g, fn($k) => (bool)preg_match('/^crab:[0-5]$/', $k));
+    [$bets, $total] = parse_bets($g, fn($k) => (bool)preg_match('/^crab:[0-5]\z/', $k));   // \z, not $: 'crab:1\n' is not a spot
     $weights = array_map(fn($c) => intdiv(2310000, $c[1]), CRABS); // 2310000 divides evenly by 3,4,5,7,11,21
     $roll = random_int(1, array_sum($weights)); $winner = 0;
     foreach ($weights as $i => $w) { if ($roll <= $w) { $winner = $i; break; } $roll -= $w; }
@@ -1285,7 +1367,10 @@ function crabs_play(): array {
         'message' => CRABS[$winner][0] . ' wins!' . ($payout ? ' +' . coins($payout) . ' GC' : '')];
 }
 
-/* ── Bayfront Baccarat: 8 decks, standard tableau, banker pays 0.95, tie 8:1 ── */
+/* ── Bayfront Baccarat: 8 decks, standard tableau, banker pays 0.95, tie 8:1 ──
+ * Exact 8-deck frequencies: player 44.62%, banker 45.86%, tie 9.52%. Return: player 98.76%, tie 85.64%, banker 98.94% at
+ * multiples of 20 GC. The 5% commission rounds to the nearest whole coin, half up (never floored), so odd tens return a
+ * little more: 10 GC banker returns 20 (101.2%), 30 returns 59, 50 returns 98. */
 function bac_val(array $cards): int { $t = 0; foreach ($cards as $c) { $r = card_rank($c); $t += $r === 14 ? 1 : ($r >= 10 ? 0 : $r); } return $t % 10; }
 function baccarat_play(): array {
     $p = require_playable(); $g = game_cfg('baccarat');
@@ -1311,7 +1396,7 @@ function baccarat_play(): array {
     $payout = 0;
     if ($res === 'tie') { $payout += ($bets['tie'] ?? 0) * 9 + ($bets['player'] ?? 0) + ($bets['banker'] ?? 0); }
     elseif ($res === 'player') { $payout += ($bets['player'] ?? 0) * 2; }
-    else { $payout += (int)floor(($bets['banker'] ?? 0) * 1.95); }
+    else { $payout += intdiv(($bets['banker'] ?? 0) * 195 + 50, 100); }   // 0.95:1, commission rounded to the nearest coin, half up
     $pid = (int)$p['id'];
     tx(fn() => round_oneshot($pid, 'baccarat', $total, $payout, $res, ['player' => $P, 'banker' => $B, 'order' => $order, 'pv' => $pv, 'bv' => $bv, 'result' => $res, 'bets' => $bets]));
     return ['result' => $res, 'win_keys' => [$res], 'payout' => $payout, 'win' => $payout > $total, 'cards' => count($P) + count($B),
@@ -1368,7 +1453,10 @@ function videopoker_act(): array {
         'message' => $done ? $name . ((int)$r['payout'] ? ' · +' . coins((int)$r['payout']) . ' GC' : '') : $name];
 }
 
-/* ── Coastline 3-Card ── */
+/* ── Coastline 3-Card ──
+ * Ante/play with the Queen-6-4 rule: house edge 3.37% of the ante, about 2.0% of all coins bet (98.0% return); always playing
+ * costs 7.65% of the ante. Ante bonus 1-4-5, dealer qualifies with Queen high. Pair Plus 1-4-6-30-40 returns 97.68% exactly
+ * (21,588 / 22,100). Both figures are re-derived in tests/audit_tables_test.php against a brute-force evaluator. */
 function tc_eval(array $cards): array {
     $r = array_map('card_rank', $cards); rsort($r);
     $flush = count(array_unique(array_map('card_suit', $cards))) === 1;
@@ -1385,7 +1473,9 @@ function tc_eval(array $cards): array {
 const TC_NAMES = ['High card', 'Pair', 'Flush', 'Straight', 'Three of a Kind', 'Straight Flush'];
 const TC_PAIRPLUS = [5 => 40, 4 => 30, 3 => 6, 2 => 4, 1 => 1];
 const TC_ANTE_BONUS = [5 => 5, 4 => 4, 3 => 1];
-function tc_cmp(array $a, array $b): int { return [$a[0], ...$a[1]] <=> [$b[0], ...$b[1]]; }
+/** Category first, then ranks high to low. A pair carries two ranks and every other hand three, so the rank lists are padded:
+ *  PHP's <=> on arrays orders by length before contents, which once made every pair lose to every high card. */
+function tc_cmp(array $a, array $b): int { return ($a[0] <=> $b[0]) ?: (array_pad($a[1], 3, 0) <=> array_pad($b[1], 3, 0)); }
 function threecard_act(): array {
     $p = require_playable(); $g = game_cfg('threecard');
     $pid = (int)$p['id']; $move = (string)($_POST['move'] ?? '');
@@ -1939,7 +2029,7 @@ const VS_ART = [
 function roulette3d_play(): array {
     $p = require_playable(); $g = game_cfg('roulette3d');
     [$bets, $total] = parse_bets($g, function (string $k) {
-        if (!preg_match('/^(straight|red|black|odd|even|low|high|dozen|column):(0|[1-9]\d?)$/', $k, $m)) { return false; }   // exact spelling: no "017"
+        if (!preg_match('/^(straight|red|black|odd|even|low|high|dozen|column):(0|[1-9]\d*)\z/', $k, $m)) { return false; }   // one spelling per spot: no 'straight:07', no trailing newline
         $v = (int)$m[2];
         return match ($m[1]) { 'straight' => $v >= 0 && $v <= 36, 'dozen', 'column' => $v >= 1 && $v <= 3, default => $v === 0 };
     });
@@ -1961,7 +2051,11 @@ function roulette3d_play(): array {
  * Returns below include the stake unless noted. "Stays up" bets (place, buy, lay, big 6/8,
  * hardways) pay their profit and remain on the layout, and are OFF on the come-out roll.
  * House edge (standard): pass 1.41%, don't pass 1.36%, come 1.41%, don't come 1.36%, odds 0%,
- * place 6/8 1.52%, place 5/9 4.0%, place 4/10 6.67%, buy (5% on win) 1.67%, lay 4/10 2.44%,
+ * place 6/8 1.52%, place 5/9 4.0%, place 4/10 6.67%, buy 4/10 1.67% / 5/9 2.0% / 6/8 2.27% (5% of the bet, paid on wins only),
+ * lay 4/10 1.67% / 5/9 2.0% / 6/8 2.27% (5% of the win, paid on wins only),
+ * Spots with fractional odds take chips only in their betting unit (craps_unit: place 6/8 in 6s, place 4/5/9/10 in 5s,
+ * odds in the unit of their true odds, buy in 20s, lay in 40/30/24) so every payout and commission is exact; an off-unit
+ * legacy stake rounds to the nearest coin, half up, never floored.
  * big 6/8 9.09%, field 2.78%, hard 6/8 9.09%, hard 4/10 11.1%, 2/12 13.9%, 3/11 11.1%,
  * any craps 11.1%, horn 12.5%, C&E 11.1%, any seven 16.7%.
  */
@@ -1976,20 +2070,51 @@ function craps_label(string $k): string {
         'ace2' => 'Aces (2)', 'ace3' => 'Ace-deuce (3)', 'yo' => 'Yo (11)', 'twelve' => 'Boxcars (12)', 'horn' => 'Horn', 'ce' => 'C & E',
         'big6' => 'Big 6', 'big8' => 'Big 8'];
     if (isset($L[$k])) { return $L[$k]; }
-    if (preg_match('/^(hard|place|buy|lay|come|comeodds|dcome|dcomeodds)(\d+)$/', $k, $m)) {
+    if (preg_match('/^(hard|place|buy|lay|come|comeodds|dcome|dcomeodds)(\d+)\z/', $k, $m)) {
         return ['hard' => 'Hard ', 'place' => 'Place ', 'buy' => 'Buy ', 'lay' => 'Lay ', 'come' => 'Come ', 'comeodds' => 'Come odds ', 'dcome' => "Don't come ", 'dcomeodds' => "Don't come odds "][$m[1]] . $m[2];
     }
     return $k;
 }
-/** Keys a player may add chips to directly (come points themselves are created by rolls). */
+/** Keys a player may add chips to directly (come points themselves are created by rolls). Exact spellings: \z, not $, so 'place6\n' is refused. */
 function craps_placeable(string $k): bool {
     if (in_array($k, ['pass', 'dontpass', 'passodds', 'dpodds', 'come', 'dontcome', 'big6', 'big8', ...CRAPS_ONE_ROLL], true)) { return true; }
-    if (preg_match('/^hard(4|6|8|10)$/', $k)) { return true; }
-    return (bool)preg_match('/^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)$/', $k);
+    if (preg_match('/^hard(4|6|8|10)\z/', $k)) { return true; }
+    return (bool)preg_match('/^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)\z/', $k);
+}
+/** Every key craps_placeable() accepts (51 spots), for the board, the tests and the 3D layout. */
+function craps_keys(): array {
+    $k = ['pass', 'dontpass', 'passodds', 'dpodds', 'come', 'dontcome', 'big6', 'big8', ...CRAPS_ONE_ROLL, 'hard4', 'hard6', 'hard8', 'hard10'];
+    foreach (CRAPS_NUMS as $n) { array_push($k, "place$n", "buy$n", "lay$n", "comeodds$n", "dcomeodds$n"); }
+    return $k;
 }
 function craps_removable(string $k): bool {
-    return !in_array($k, ['pass', 'come'], true) && !preg_match('/^come\d+$/', $k) && !in_array($k, CRAPS_ONE_ROLL, true);
+    return !in_array($k, ['pass', 'come'], true) && !preg_match('/^come\d+\z/', $k) && !in_array($k, CRAPS_ONE_ROLL, true);
 }
+/**
+ * Betting unit of a spot: the smallest amount its odds pay in whole coins, so no fractional payout is ever floored or
+ * rounded. Place 6/8 pay 7:6 (units of 6), place 4/5/9/10 pay 9:5 and 7:5 (units of 5); true odds behind pass/come on
+ * 5/9 pay 3:2 (even amounts) and on 6/8 pay 6:5 (units of 5); lay odds and lay bets pay 1:2 on 4/10 (even), 2:3 on 5/9
+ * (units of 3) and 5:6 on 6/8 (units of 6). Buy bets go in 20s (the 5% commission on the stake is exactly 1 GC per 20 and true
+ * odds are whole at 20 on every number); lay bets go in the stake that wins 20 (40 on 4/10, 30 on 5/9, 24 on 6/8), so the 5%
+ * commission on the win is exactly 1 GC per 20 won. Horn splits 4 ways, C&E 2.
+ * $pt is the point (pass/don't pass odds take their number from it).
+ */
+function craps_unit(string $k, int $pt): int {
+    if ($k === 'horn') { return 4; }
+    if ($k === 'ce') { return 2; }
+    if ($k === 'passodds') { return $pt ? CRAPS_TRUE[$pt][1] : 1; }
+    if ($k === 'dpodds') { return $pt ? CRAPS_TRUE[$pt][0] : 1; }
+    if (preg_match('/^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)\z/', $k, $m)) {
+        $n = (int)$m[2];
+        return match ($m[1]) { 'place' => CRAPS_PLACE[$n][1], 'comeodds' => CRAPS_TRUE[$n][1], 'dcomeodds' => CRAPS_TRUE[$n][0],
+            'buy' => 20, 'lay' => intdiv(20 * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]) };
+    }
+    return 1;
+}
+/** amt × num/den in whole coins. Exact at the spot's unit; a legacy off-unit stake rounds to the nearest coin, half up, never floored. */
+function craps_ratio(int $amt, int $num, int $den): int { return intdiv($amt * $num * 2 + $den, 2 * $den); }
+/** 5% commission (buy: on the stake, lay: on the win): nearest coin, half up, at least 1. Exact at the units; 30 owes 2, 12 owes 1. */
+function craps_vig(int $win): int { return max(1, intdiv($win * 5 + 50, 100)); }
 function craps_state(?array $r): array {
     $s = st($r);
     $bets = $s['bets'] ?? [];
@@ -2004,6 +2129,11 @@ function craps_state(?array $r): array {
 function craps_check_add(array $s, string $k, int $amt, array $g): void {
     $b = $s['bets']; $pt = $s['point']; $cur = ($b[$k] ?? 0) + $amt; $max = (int)$g['max_bet'];
     $need = function (bool $ok, string $why) { if (!$ok) { throw new DomainException($why); } };
+    $u = craps_unit($k, $pt);
+    if ($u > 1 && !in_array($k, ['horn', 'ce'], true) && $amt % $u !== 0) {
+        $lo = $u * intdiv($amt, $u); $hi = $lo + $u;
+        throw new DomainException(craps_label($k) . ' pays in whole coins at multiples of ' . $u . ' GC, so use ' . ($lo >= (int)$g['min_bet'] ? "$lo or $hi" : (string)$hi) . '.');
+    }
     switch (true) {
         case $k === 'pass' || $k === 'dontpass':
             $need(!$pt, 'Line bets go down on the come-out roll only.'); break;
@@ -2015,14 +2145,14 @@ function craps_check_add(array $s, string $k, int $amt, array $g): void {
         case $k === 'dpodds':
             $need($pt && !empty($b['dontpass']), 'Lay odds need a don\'t pass bet and a point.');
             $need($cur <= $b['dontpass'] * 6, 'Lay odds max out at 6× your don\'t pass.'); return;
-        case (bool)preg_match('/^comeodds(\d+)$/', $k, $m):
+        case (bool)preg_match('/^comeodds(\d+)\z/', $k, $m):
             $need(!empty($b['come' . $m[1]]), 'Come odds need a come bet sitting on ' . $m[1] . '.');
             $need($cur <= $b['come' . $m[1]] * CRAPS_ODDS_MAX[(int)$m[1]], 'Odds max out at ' . CRAPS_ODDS_MAX[(int)$m[1]] . '× the come bet.'); return;
-        case (bool)preg_match('/^dcomeodds(\d+)$/', $k, $m):
+        case (bool)preg_match('/^dcomeodds(\d+)\z/', $k, $m):
             $need(!empty($b['dcome' . $m[1]]), 'Lay odds need a don\'t come bet on ' . $m[1] . '.');
             $need($cur <= $b['dcome' . $m[1]] * 6, 'Lay odds max out at 6× the don\'t come bet.'); return;
         case $k === 'horn':
-            $need($amt % 4 === 0, 'Horn bets split four ways, so use a multiple of 4.'); break;
+            $need($amt % 4 === 0, 'Horn bets split four ways, so use a multiple of 4.'); break;   // (kept: the unit rule above skips horn/ce so these messages stay)
         case $k === 'ce':
             $need($amt % 2 === 0, 'C & E splits two ways, so use an even amount.'); break;
     }
@@ -2082,10 +2212,9 @@ function craps_act(): array {
         };
         $lose = function (string $k) use (&$B, &$events, &$act) { $act += $B[$k]; $events[] = ['key' => $k, 'win' => false, 'text' => craps_label($k) . ' loses']; unset($B[$k]); };
         $push = function (string $k, string $why) use (&$B, &$pay, &$events, &$act, &$won) { $act += $B[$k]; $won += $B[$k]; $pay += $B[$k]; $events[] = ['key' => $k, 'win' => null, 'text' => craps_label($k) . ' ' . $why]; unset($B[$k]); };
-        $trueRet = fn(int $amt, int $n) => $amt + intdiv($amt * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]);
-        $layRet = fn(int $amt, int $n) => $amt + intdiv($amt * CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]);
-        $vig = fn(int $win) => max(1, (int)floor($win * 0.05));
-
+        $trueRet = fn(int $amt, int $n) => $amt + craps_ratio($amt, CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]);
+        $layRet = fn(int $amt, int $n) => $amt + craps_ratio($amt, CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]);
+        $vig = 'craps_vig';
         // ── one-roll bets ──
         foreach (CRAPS_ONE_ROLL as $k) {
             if (!isset($B[$k])) { continue; }
@@ -2107,15 +2236,15 @@ function craps_act(): array {
         if (!$comeOut) {
             foreach (CRAPS_NUMS as $n) {
                 if (isset($B["place$n"])) {
-                    if ($sum === $n) { $a = $B["place$n"]; $credit("place$n", intdiv($a * CRAPS_PLACE[$n][0], CRAPS_PLACE[$n][1]), 'pays', false); }
+                    if ($sum === $n) { $a = $B["place$n"]; $credit("place$n", craps_ratio($a, CRAPS_PLACE[$n][0], CRAPS_PLACE[$n][1]), 'pays', false); }
                     elseif ($sum === 7) { $lose("place$n"); }
                 }
                 if (isset($B["buy$n"])) {
-                    if ($sum === $n) { $a = $B["buy$n"]; $w = intdiv($a * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]); $credit("buy$n", $w - $vig($w), 'pays true odds (less 5%)', false); }
+                    if ($sum === $n) { $a = $B["buy$n"]; $w = craps_ratio($a, CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]); $credit("buy$n", $w - $vig($a), 'pays true odds (less 5% of the bet)', false); }
                     elseif ($sum === 7) { $lose("buy$n"); }
                 }
                 if (isset($B["lay$n"])) {
-                    if ($sum === 7) { $a = $B["lay$n"]; $w = intdiv($a * CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]); $credit("lay$n", $w - $vig($w), 'wins (less 5%)', false); }
+                    if ($sum === 7) { $a = $B["lay$n"]; $w = craps_ratio($a, CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]); $credit("lay$n", $w - $vig($w), 'wins (less 5%)', false); }
                     elseif ($sum === $n) { $lose("lay$n"); }
                 }
             }
@@ -4220,6 +4349,8 @@ function page_blackjack(): void {
         $hand = bj_public($raw);
     }
     $live = $hand && $hand['status'] === 'active';
+    $can = $hand['can'] ?? [];
+    $hands = $hand['hands'] ?? [['cards' => [], 'total' => '', 'bet' => 0]];
     ob_start(); ?>
 <section class="table-wrap bj-wrap<?= scene_open('blackjack') ?>">
   <header class="table-head reveal d1">
@@ -4227,19 +4358,21 @@ function page_blackjack(): void {
     <h1 class="display lg"><?= h($g['name']) ?></h1>
   </header>
   <div class="felt reveal d2" data-bj data-state="<?= h(json_encode($hand)) ?>">
-    <p class="felt-rule" aria-hidden="true">Blackjack pays 3 to 2 · Dealer stands on all 17s</p>
+    <p class="felt-rule" aria-hidden="true">Blackjack pays 3 to 2 · Dealer stands on all 17s · Split · Double · Surrender</p>
     <div class="hand dealer">
       <h2>Dealer <span class="total" data-dealer-total><?= $hand ? $hand['dealer_total'] . ($hand['dealer_hidden'] ? ' + ?' : '') : '' ?></span></h2>
       <div class="cards" data-dealer-cards>
         <?php if ($hand) { foreach ($hand['dealer'] as $i => $c) { echo card_html($c, false, $i); } for ($i = 0; $i < $hand['dealer_hidden']; $i++) { echo card_html('', true, 1); } } ?>
       </div>
     </div>
-    <p class="result" data-result aria-live="polite"><?= $hand ? h($live ? 'Hit, stand, or double?' : (BJ_OUTCOME_TEXT[$hand['outcome']] ?? '')) : 'Place a bet to deal.' ?></p>
-    <div class="hand player">
-      <h2>You <span class="total" data-player-total><?= $hand ? $hand['player_total'] : '' ?></span> <span class="bet-tag" data-bet-tag><?= $hand ? coins($hand['bet']) . ' GC' : '' ?></span></h2>
-      <div class="cards" data-player-cards>
-        <?php if ($hand) { foreach ($hand['player'] as $i => $c) { echo card_html($c, false, $i); } } ?>
+    <p class="result" data-result aria-live="polite"><?= $hand ? h($hand['message']) : 'Place a bet to deal.' ?></p>
+    <div class="bj-hands" data-player-hands>
+      <?php foreach ($hands as $i => $hh): ?>
+      <div class="hand player<?= $live && $hand['active'] === $i ? ' on' : '' ?>" data-hand="<?= $i ?>">
+        <h2><?= count($hands) > 1 ? 'Hand ' . ($i + 1) : 'You' ?> <span class="total" data-hand-total><?= $hand ? $hh['total'] : '' ?></span> <span class="bet-tag" data-bet-tag><?= $hand ? coins($hh['bet']) . ' GC' : '' ?></span></h2>
+        <div class="cards" data-hand-cards><?php foreach ($hh['cards'] as $k => $c) { echo card_html($c, false, $k); } ?></div>
       </div>
+      <?php endforeach; ?>
     </div>
     <?php if ($p): ?>
     <form class="controls" method="post" action="<?= h(url('play_blackjack')) ?>" data-game-form>
@@ -4253,9 +4386,12 @@ function page_blackjack(): void {
         <button class="btn gold lg" name="move" value="deal">Deal</button>
       </div>
       <div class="bj-moves" data-when="live" <?= $live ? '' : 'hidden' ?>>
-        <button class="btn gold lg" name="move" value="hit">Hit</button>
-        <button class="btn ghost lg" name="move" value="stand">Stand</button>
-        <button class="btn coral lg" name="move" value="double" data-double <?= $hand && $hand['can_double'] ? '' : 'disabled' ?>>Double</button>
+        <?php // each button is rendered only when the move is legal for the hand deciding now; JS keeps this in sync per response ?>
+        <button class="btn gold lg" name="move" value="hit" data-move="hit" <?= empty($can['hit']) ? 'hidden' : '' ?>>Hit</button>
+        <button class="btn ghost lg" name="move" value="stand" data-move="stand" <?= empty($can['stand']) ? 'hidden' : '' ?>>Stand</button>
+        <button class="btn coral lg" name="move" value="double" data-move="double" <?= empty($can['double']) ? 'hidden' : '' ?>>Double</button>
+        <button class="btn coral lg" name="move" value="split" data-move="split" <?= empty($can['split']) ? 'hidden' : '' ?>>Split</button>
+        <button class="btn ghost" name="move" value="surrender" data-move="surrender" <?= empty($can['surrender']) ? 'hidden' : '' ?>>Surrender</button>
       </div>
     </form>
     <?php else: ?>
@@ -4265,9 +4401,13 @@ function page_blackjack(): void {
   <aside class="panel reveal d3 house-rules">
     <h2 class="display md">House rules</h2>
     <ul class="ticks">
-      <li>Six-deck shoe, reshuffled every hand.</li><li>Dealer peeks for blackjack and stands on all 17s.</li>
-      <li>Blackjack pays 3:2. Wins pay 1:1. Ties push.</li><li>Double down on any first two cards (one more card).</li>
-      <li>No splits or insurance at this table.</li>
+      <li>Six-deck shoe, reshuffled every hand. Dealer stands on all 17s.</li>
+      <li>Dealer peeks for blackjack with an Ace or a ten showing. A dealer blackjack ends the hand at once and only pushes against your own blackjack.</li>
+      <li>Blackjack pays 3:2, wins pay 1:1, ties push. Odd amounts round to the nearest coin, half up (a 25 GC blackjack pays 38).</li>
+      <li>Double down on any two cards, including after a split (one more card).</li>
+      <li>Split a matching pair once (no resplit). Split aces get one card each, and a 21 after a split is 21, not blackjack.</li>
+      <li>Late surrender: give up your first two cards for half your bet back (rounded half up). No insurance.</li>
+      <li><?= h(BJ_EDGE_TEXT) ?></li>
     </ul>
   </aside>
 </section>
@@ -4519,16 +4659,16 @@ function page_rules(): void {
 const GAME_RULES = [
     'poker' => ['No-limit Texas hold\'em, real players at the table (house players fill empty seats and are labelled). Blinds and buy-in range are set per table.', 'Buy in from your Gold Coins. Your stack lives at the table until you stand up, then it goes straight back to your balance.', 'Fold, check, call, raise or shove. Minimum raise is the size of the last raise. Side pots are handled like a live room and odd chips go to the first seat left of the button.', 'The clock gives you ' . 20 . ' seconds an action; two timeouts and you sit out. Leave any time; if you\'re in a hand, you\'re folded and paid when it ends.', 'Every deal is committed to before a card moves: the table shows a SHA-256 of the shuffled deck, and reveals the deck and salt after the hand. Open any hand history to verify it.'],
     'roulette3d' => ['Tap a chip, tap the board, hit Spin. Same single-zero payouts as the 2D table (35:1 straight up).', 'The wheel you watch is the real result: the server picks the pocket, then the ball is steered into it.', 'Right-click or long-press a spot to pull chips back.'],
-    'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay true odds with zero house edge.', 'Every number has Place (6/8 pay 7:6, 5/9 pay 7:5, 4/10 pay 9:5), Buy (true odds, 5% on wins) and Lay (bet the 7 beats it). Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.', 'Chips you take back down were never in play: they don\'t count toward your rounds, wagered or won totals. Each spot takes up to the table max (chips already working included), and each roll up to 10× the table max in new chips.'],
+    'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay true odds with zero house edge.', 'Every number has Place (6/8 pay 7:6, 5/9 pay 7:5, 4/10 pay 9:5), Buy (true odds, 5% on wins) and Lay (bet the 7 beats it). Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Fractional odds are bet in whole units like a real table, so every payout is exact: Place 6/8 in multiples of 6 GC (12 pays 14), Place 4/5/9/10 in multiples of 5; odds on 5/9 in even amounts and on 6/8 in multiples of 5; lay odds on 4/10 even, 5/9 in multiples of 3, 6/8 in multiples of 6; Buy in multiples of 20 (5% of the bet, 1 GC per 20, charged only when it wins); Lay in the stake that wins 20: multiples of 40 on 4/10, 30 on 5/9, 24 on 6/8 (5% of the win, 1 GC per 20 won, charged only when it wins). The table tells you the nearest amounts. Returns: Place 6/8 98.5%, 5/9 96.0%, 4/10 93.3%; Buy and Lay 4/10 98.3%, 5/9 98.0%, 6/8 97.7%.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.', 'Chips you take back down were never in play: they don\'t count toward your rounds, wagered or won totals. Each spot takes up to the table max (chips already working included), and each roll up to 10× the table max in new chips.'],
     'pusher' => ['Each coin you drop costs your coin value. Coins that spill over the front edge are yours.', 'Tap the machine or use the slider to aim. Aiming is just for fun: how many coins fall is decided the moment you drop.', 'About 46% of drops spill something, and rare avalanches pay 25× or 100×. Return to player is 95%.'],
     'scratch' => ['Buy a ticket, scratch all nine spots.', 'Three matching prizes wins that prize. Only one triple per ticket.', 'Top prize is 1,000× the ticket. About 1 in 4 tickets wins something.'],
     'keno' => ['Pick 1 to 10 numbers from 40.', 'Ten numbers are drawn. The more you catch, the more you win.', 'The paytable changes with how many you pick. Big picks, big jackpots.'],
-    'baccarat' => ['Bet on Player, Banker, or Tie. Closest to 9 wins.', 'Cards are worth face value, tens and faces are 0, aces are 1. Only the last digit counts.', 'Player pays 1:1, Banker pays 0.95:1, Tie pays 8:1 (and Player/Banker bets push on a tie).', 'Third cards follow the standard tableau. No decisions needed.'],
-    'sicbo' => ['Three dice are shaken. Bet on what they show.', 'Small (4–10) and Big (11–17) pay 1:1 but lose on any triple.', 'Totals pay 6:1 up to 60:1, doubles 10:1, any triple 30:1, a specific triple 180:1.', 'Single numbers pay 1:1 per die that shows it.'],
+    'baccarat' => ['Bet on Player, Banker, or Tie. Closest to 9 wins.', 'Cards are worth face value, tens and faces are 0, aces are 1. Only the last digit counts.', 'Player pays 1:1, Banker pays 0.95:1, Tie pays 8:1 (and Player/Banker bets push on a tie).', 'The 5% Banker commission rounds to the nearest whole coin, half up, never down: a 10 GC Banker win returns 20 GC, 30 returns 59, 100 returns 195.', 'Third cards follow the standard tableau. No decisions needed.', 'Return to player: Player 98.8%, Banker 98.9% (at multiples of 20 GC; smaller odd chips return a little more because of the rounding), Tie 85.6%.'],
+    'sicbo' => ['Three dice are shaken. Bet on any of the 50 spots.', 'Small (4–10) and Big (11–17) pay 1:1 but lose on any triple.', 'Totals pay 6:1 up to 60:1, doubles 10:1, any triple 30:1, a specific triple 180:1.', 'Two-dice combinations (any two different faces) pay 6:1. Single numbers pay 1:1 per die that shows it.', 'Return to player, exact over all 216 rolls: Small/Big 97.2%, singles 92.1%, totals 81.0–90.3%, any triple 86.1%, specific triple 83.8%, combinations 97.2%, doubles 81.5%.'],
     'bigwheel' => ['Put chips on the symbols you like, then spin.', '54 stops: 24×1, 15×2, 7×5, 4×10, 2×20, one anchor, one sun.', 'Numbers pay their face value to 1. The anchor and sun pay 45 to 1.'],
     'crabs' => ['Back one crab or several.', 'Odds are fixed. Favorites win more often, longshots pay more.', 'Payout is your chip times the odds shown (it includes your chip).'],
     'videopoker' => ['Deal five cards, tap the ones to hold, then draw.', 'Win on a pair of Jacks or better. Full paytable is on the machine.', 'With perfect holds this 9/6 paytable returns about 99.5%.'],
-    'threecard' => ['Place an Ante (and an optional Pair Plus), get three cards.', 'Play (matching your Ante) or fold. Dealer needs Queen-high to qualify.', 'Ante bonus pays on a straight or better no matter what the dealer has.', 'Pair Plus pays on your hand alone: pair 1:1 up to straight flush 40:1.'],
+    'threecard' => ['Place an Ante (and an optional Pair Plus), get three cards.', 'Play (matching your Ante) or fold. Dealer needs Queen-high to qualify.', 'Hands rank straight flush, three of a kind, straight, flush, pair, high card; ties go to the higher cards.', 'Ante bonus pays 1:1 on a straight, 4:1 on trips, 5:1 on a straight flush no matter what the dealer has.', 'Pair Plus pays on your hand alone: pair 1:1, flush 4:1, straight 6:1, trips 30:1, straight flush 40:1 (97.7% return).', 'Playing Queen-6-4 or better, the Ante/Play bet returns about 98% of everything you put down (house edge 3.4% of the Ante).'],
     'hilo' => ['Call whether the next card is higher or lower.', 'Ties count as a win either way. Aces are low.', 'Every right call multiplies your run. Cash out any time after your first call.', 'Up to five skips per run if you don\'t like a card.'],
     'crash' => ['Launch your wave. The multiplier climbs from 1.00×.', 'Cash out any time before the wave breaks to lock in that multiplier.', 'Set an auto cash-out so the server grabs it for you, even if your connection hiccups.', 'Any cash-out target returns 99% over time.'],
     'plinko' => ['Pick 8–16 rows, a risk level, and how many pearls to drop at once (1–20). Your bet is per pearl.',
@@ -4834,6 +4974,8 @@ function panel_sicbo(array $p, array $g): string {
     $b .= '</div><div class="sb-row faces">';
     for ($n = 1; $n <= 6; $n++) { $b .= $btn("double:$n", die_svg($n, 'mini') . die_svg($n, 'mini') . '<small>10:1</small>'); }
     for ($n = 1; $n <= 6; $n++) { $b .= $btn("triple:$n", die_svg($n, 'mini') . die_svg($n, 'mini') . die_svg($n, 'mini') . '<small>180:1</small>'); }
+    $b .= '</div><div class="sb-row combos">';
+    for ($x = 1; $x <= 5; $x++) { for ($y = $x + 1; $y <= 6; $y++) { $b .= $btn("combo:$x-$y", die_svg($x, 'mini') . die_svg($y, 'mini') . '<small>6:1</small>'); } }
     $b .= '</div><div class="sb-row singles">';
     for ($n = 1; $n <= 6; $n++) { $b .= $btn("single:$n", die_svg($n, 'mid') . '<small>1:1 per die</small>'); }
     $b .= '</div></div>';
@@ -5213,9 +5355,7 @@ function panel_craps(array $p, array $g): string {
     }
     $hist = '';
     foreach (array_reverse($s['rolls']) as $d) { $t = $d[0] + $d[1]; $hist .= '<li class="' . ($t === 7 ? 'seven' : '') . '">' . $t . '</li>'; }
-    $placeable = ['pass', 'dontpass', 'passodds', 'dpodds', 'come', 'dontcome', 'field', 'big6', 'big8', 'hard4', 'hard6', 'hard8', 'hard10',
-        'any7', 'anycraps', 'ace2', 'ace3', 'yo', 'twelve', 'horn', 'ce'];
-    foreach (CRAPS_NUMS as $n) { array_push($placeable, "place$n", "buy$n", "lay$n", "comeodds$n", "dcomeodds$n"); }
+    $placeable = craps_keys();   // the same 51 spellings the server accepts
     ob_start(); ?>
 <div class="craps" data-craps data-state="<?= h(json_encode(['point' => $s['point'], 'bets' => (object)$s['bets']])) ?>" data-max="<?= (int)$g['max_bet'] ?>" data-min="<?= (int)$g['min_bet'] ?>">
   <div class="g3d-wrap">
@@ -6972,6 +7112,8 @@ textarea.mono{font:.85rem/1.5 var(--f-mono)}
 .bj-bet,.bj-moves{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:center;width:100%}
 .bj-bet label{font-weight:700;color:#f5ecd7}
 .bj-bet input{width:130px;background:rgba(0,0,0,.35);color:#fff;border-color:rgba(232,182,76,.4);font-family:var(--f-mono)}
+.bj-hands{display:flex;flex-wrap:wrap;justify-content:center;gap:4px 32px}.bj-hands .hand{flex:1 1 240px;max-width:560px}
+.bj-hands .hand.on h2{color:#ffd98a}.bj-hands .hand.on .total{box-shadow:0 0 0 2px var(--gold)}
 .quick{display:flex;gap:6px}
 [hidden]{display:none!important}
 
@@ -7200,6 +7342,7 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
 .sb .die.mini{width:18px;height:18px;display:inline}.sb .die.mid{width:30px;height:30px}
 .sb-row.faces .sb{flex-direction:row}
 .sb-row.faces .sb small{width:100%;text-align:center}
+.sb-row.combos{grid-template-columns:repeat(5,1fr)}.sb-row.combos .sb{flex-direction:row}.sb-row.combos .sb small{width:100%;text-align:center}
 
 /* ═════ crab derby ═════ */
 .derby{position:relative;display:grid;gap:6px;padding:14px 16px;border-radius:18px;background:linear-gradient(180deg,#f1d9a8,#e7c486);box-shadow:inset 0 0 0 4px rgba(90,58,28,.3),var(--shadow);overflow:hidden}
@@ -7296,6 +7439,7 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
   .bw-board{grid-template-columns:repeat(4,1fr)}
   .crab-board{grid-template-columns:repeat(3,1fr)}
   .sb-row.totals{grid-template-columns:repeat(5,1fr)}.sb-row.faces{grid-template-columns:repeat(3,1fr)}.sb-row.singles{grid-template-columns:repeat(3,1fr)}
+  .sb-row.combos{grid-template-columns:repeat(3,1fr)}
   .lane{grid-template-columns:70px 1fr}.lane-name{font-size:.68rem}
   .bac-hands{grid-template-columns:1fr}
   .vp-card .card{--w:clamp(52px,16vw,80px)}
@@ -7872,9 +8016,8 @@ if (machine) {
 const felt = $('[data-bj]');
 if (felt) {
   const form = $('form', felt), res = $('[data-result]', felt);
-  const dBox = $('[data-dealer-cards]', felt), pBox = $('[data-player-cards]', felt);
-  const dTot = $('[data-dealer-total]', felt), pTot = $('[data-player-total]', felt), betTag = $('[data-bet-tag]', felt);
-  const idle = $('[data-when="idle"]', felt), live = $('[data-when="live"]', felt), dbl = $('[data-double]', felt);
+  const dBox = $('[data-dealer-cards]', felt), dTot = $('[data-dealer-total]', felt), handsBox = $('[data-player-hands]', felt);
+  const idle = $('[data-when="idle"]', felt), live = $('[data-when="live"]', felt);
   const SUIT = { S: '♠', H: '♥', D: '♦', C: '♣' }, SNAME = { S: 'spades', H: 'hearts', D: 'diamonds', C: 'clubs' };
   let handId = (JSON.parse(felt.dataset.state || 'null') || {}).id || null;
   let busy = false;
@@ -7883,6 +8026,7 @@ if (felt) {
     const r = c.slice(0, -1), s = c.slice(-1);
     return `<div class="card${s === 'H' || s === 'D' ? ' red' : ''}" style="--i:${i}" aria-label="${esc(r + ' of ' + SNAME[s])}"><span class="r">${esc(r)}</span><span class="s">${SUIT[s]}</span><span class="r2">${esc(r)}${SUIT[s]}</span></div>`;
   };
+  const handHtml = (i, n) => `<div class="hand player" data-hand="${i}"><h2>${n > 1 ? 'Hand ' + (i + 1) : 'You'} <span class="total" data-hand-total></span> <span class="bet-tag" data-bet-tag></span></h2><div class="cards" data-hand-cards></div></div>`;
   function paint(box, cards, hidden, fresh) {
     if (fresh) box.innerHTML = '';
     $$('.card.down', box).forEach(x => x.remove());
@@ -7890,15 +8034,22 @@ if (felt) {
     cards.slice(have).forEach((c, k) => box.insertAdjacentHTML('beforeend', cardHtml(c, k)));
     for (let i = 0; i < hidden; i++) box.insertAdjacentHTML('beforeend', `<div class="card down" style="--i:${cards.length}" aria-label="face-down card"></div>`);
   }
+  // returns true when the felt was rebuilt (new hand, or a split changed the number of hands)
   function render(h, fresh) {
-    paint(pBox, h.player, 0, fresh);
+    if (fresh || $$('[data-hand]', handsBox).length !== h.hands.length) { handsBox.innerHTML = h.hands.map((x, i) => handHtml(i, h.hands.length)).join(''); fresh = true; }
+    h.hands.forEach((x, i) => {
+      const el = $(`[data-hand="${i}"]`, handsBox);
+      paint($('[data-hand-cards]', el), x.cards, 0, fresh);
+      $('[data-hand-total]', el).textContent = x.total;
+      $('[data-bet-tag]', el).textContent = fmt(x.bet) + ' GC';
+      el.classList.toggle('on', h.status === 'active' && h.active === i);
+    });
     paint(dBox, h.dealer, h.dealer_hidden, fresh);
-    pTot.textContent = h.player_total;
     dTot.textContent = h.dealer_total + (h.dealer_hidden ? ' + ?' : '');
-    betTag.textContent = fmt(h.bet) + ' GC';
     const on = h.status === 'active';
     idle.hidden = on; live.hidden = !on;
-    if (dbl) dbl.disabled = !h.can_double;
+    $$('[data-move]', live).forEach(b => { b.hidden = !(h.can && h.can[b.dataset.move]); });
+    return fresh;
   }
 
   $$('[data-quick]', felt).forEach(b => b.addEventListener('click', () => { $('#bj-bet').value = b.dataset.quick; }));
@@ -7915,11 +8066,10 @@ if (felt) {
     try {
       const d = await post(form.action, fd);
       const h = d.hand;
-      const fresh = h.id !== handId;
-      handId = h.id;
       const before = $$('.card', felt).length;
-      render(h, fresh);
-      $$('.card', felt).slice(fresh ? 0 : before).forEach((c, k) => sfx.flip(k * .12));
+      const redrew = render(h, h.id !== handId);
+      handId = h.id;
+      $$('.card', felt).slice(redrew ? 0 : before).forEach((c, k) => sfx.flip(k * .12));
       if (h.status === 'done') setTimeout(() => h.payout > h.bet ? sfx.win('lounge', h.outcome === 'blackjack' ? 4 : 2) : h.payout ? sfx.chime('lounge', 2) : sfx.lose('lounge'), 400);
       if (h.status === 'done') await sleep(350);
       res.textContent = d.message;
@@ -7928,7 +8078,7 @@ if (felt) {
     } catch (err) { toast(err.message, 'err'); res.textContent = err.message; }
     finally {
       busy = false;
-      $$('button', form).forEach(b => { if (b !== dbl) b.disabled = false; });
+      $$('button', form).forEach(b => b.disabled = false);
     }
   });
 }
@@ -9209,7 +9359,16 @@ function initCraps(root) {
   const label = k => { const b = board.querySelector(`.cr-spot[data-bet="${k}"] b`); const m = /^(d?come)(\d+)$/.exec(k); return b ? b.textContent : m ? (m[1] === 'come' ? 'Come ' : "Don't come ") + m[2] : k; };
   const removable = k => !(k === 'pass' || k === 'come' || /^come\d+$/.test(k) || ONE.includes(k));
   const offOnComeOut = k => /^(place|buy|lay|hard|comeodds)\d+$/.test(k) || k === 'big6' || k === 'big8';
-  const unit = k => k === 'horn' ? 4 : k === 'ce' ? 2 : 1;
+  const TRUE_ODDS = { 4: [2, 1], 10: [2, 1], 5: [3, 2], 9: [3, 2], 6: [6, 5], 8: [6, 5] }, PLACE_DEN = { 4: 5, 10: 5, 5: 5, 9: 5, 6: 6, 8: 6 };
+  // betting unit of a spot (mirrors craps_unit on the server): the smallest stake its odds pay in whole coins
+  const unit = k => {
+    if (k === 'horn') return 4; if (k === 'ce') return 2;
+    if (k === 'passodds') return st.point ? TRUE_ODDS[st.point][1] : 1;
+    if (k === 'dpodds') return st.point ? TRUE_ODDS[st.point][0] : 1;
+    const m = /^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)$/.exec(k); if (!m) return 1;
+    if (m[1] === 'buy') return 20; if (m[1] === 'lay') return 20 * TRUE_ODDS[m[2]][0] / TRUE_ODDS[m[2]][1];
+    return m[1] === 'place' ? PLACE_DEN[m[2]] : m[1] === 'comeodds' ? TRUE_ODDS[m[2]][1] : TRUE_ODDS[m[2]][0];
+  };
   // why a spot can't take chips right now ('' means it can)
   function blocked(k) {
     const b = st.bets, pt = st.point; let m;
@@ -9281,7 +9440,7 @@ function initCraps(root) {
     if (amt < MIN || amt <= 0) { toast(`${label(k)} is maxed at ${fmt(c)} GC.`, 'err'); return; }
     if ([...pending.values()].reduce((a, v) => a + v, 0) + amt > MAX * 10) { toast(`Table limit is ${fmt(MAX * 10)} GC of new chips per roll.`, 'err'); return; }
     pending.set(k, (pending.get(k) || 0) + amt);
-    if (amt !== chip && u > 1) toast(`${label(k)} is split ${u} ways, so that's ${fmt(amt)} GC.`);
+    if (amt !== chip && u > 1) toast(k === 'horn' || k === 'ce' ? `${label(k)} is split ${u} ways, so that's ${fmt(amt)} GC.` : `${label(k)} pays in whole coins at multiples of ${u}, so that's ${fmt(amt)} GC.`);
     paint();
   });
   board.addEventListener('contextmenu', e => { const b = e.target.closest('[data-bet]'); if (b) { e.preventDefault(); pending.delete(b.dataset.bet); paint(); } });

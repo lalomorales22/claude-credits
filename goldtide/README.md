@@ -32,13 +32,13 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | | **Sunset Scratchers** | scratch 9 spots with your finger/mouse, match 3 | 91% |
 | | **Kelp Keno** | pick 1–10 of 40, ten drawn | 94–96% |
 | Table Games | **Coronado Roulette** | single-zero wheel, full board | 97.3% |
-| | **Bayfront Baccarat** | player / banker / tie, full third-card tableau | 98.8% banker |
-| | **Surf Sic Bo** | three dice, 50 bets on the board | 97% small/big |
+| | **Bayfront Baccarat** | player / banker / tie, full third-card tableau; 5% commission rounds to the nearest coin | 98.8% player / 98.9% banker |
+| | **Surf Sic Bo** | three dice, 50 bets on the board (incl. 15 two-dice combinations at 6:1) | 97.2% small/big/combos, 92.1% singles, 81–90% the rest |
 | | **Boardwalk Big Six** | 54-stop carnival money wheel | 78–89% (it's a carnival wheel) |
 | | **Crab Crawl Derby** | six racing crabs at fixed odds, animated race | 93.9% |
-| Card Room | **Harbor Blackjack** | 6 decks, S17, 3:2, double | ~99.5% |
+| Card Room | **Harbor Blackjack** | 6 decks, S17, 3:2, double any two, split once (DAS), late surrender, peek | 99.6% (basic strategy, measured over 600k hands) |
 | | **Boardwalk Poker** | Jacks or Better 9/6 video poker | 99.5% perfect play |
-| | **Coastline 3-Card** | ante/play vs dealer + Pair Plus | ~97% |
+| | **Coastline 3-Card** | ante/play vs dealer + Pair Plus | ~98% ante/play (Q-6-4), 97.7% Pair Plus |
 | | **Tide Hi-Lo** | higher or lower, multiplier builds, cash out anytime | 99% |
 | Boardwalk Arcade | **Tide Crash** | live multiplier curve, cash out before it breaks, auto cash-out | 99% |
 | | **Pearl Drop** ★ | the flagship plinko (see below) | 98.5–99% |
@@ -59,7 +59,7 @@ These are real 3D gameplay, built with three.js r170 (MIT). three.js is embedded
 
 ### Full craps
 
-Harbor Craps deals the whole menu, bubble-craps style. You get Pass and Don't Pass, and Come and Don't Come, which travel to their own number. Odds are 3-4-5× behind the line and come bets, and 6× when laying. Every number has Place, Buy and Lay. Big 6 and Big 8, the field and all four hardways are on the board. The props are Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E. Place, buy, lay, big, hardway and come-odds bets are OFF on the come-out, like at a real table. **Take bets down** pulls back anything that isn't a contract bet. The 3D view flips between a full table (every chip stack sits on its printed spot) and a glass bubble dome where air jets pop the dice. A CLI simulation of 80k rolls per bet matched the textbook house edges within noise.
+Harbor Craps deals the whole menu, bubble-craps style. You get Pass and Don't Pass, and Come and Don't Come, which travel to their own number. Odds are 3-4-5× behind the line and come bets, and 6× when laying. Every number has Place, Buy and Lay. Big 6 and Big 8, the field and all four hardways are on the board. The props are Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E. Place, buy, lay, big, hardway and come-odds bets are OFF on the come-out, like at a real table. Spots with fractional odds are bet in whole units, also like a real table, so no payout is ever floored: Place 6/8 in multiples of 6 GC (12 pays 14), Place 4/5/9/10 in 5s, odds on 5/9 in even amounts and on 6/8 in 5s, lay odds on 4/10 even, 5/9 in 3s, 6/8 in 6s, Buy in 20s (the 5% commission is exactly 1 GC per 20 of the bet, charged on wins only) and Lay in the stake that wins 20 (40 on 4/10, 30 on 5/9, 24 on 6/8; 5% of the win, 1 GC per 20 won, on wins only); the chip buttons round up to the unit and the server refuses anything else with the nearest legal amounts. Buy and Lay returns are the textbook 98.3% on 4/10, 98.0% on 5/9 and 97.7% on 6/8. Every bet key has exactly one spelling (51 spots); `place6` with a trailing newline or `place06` is not on the table. **Take bets down** pulls back anything that isn't a contract bet. The 3D view flips between a full table (every chip stack sits on its printed spot) and a glass bubble dome where air jets pop the dice. A CLI simulation of 80k rolls per bet matched the textbook house edges within noise.
 
 ### Slot Hall
 
@@ -75,7 +75,7 @@ The house favorite, and it's featured at the top of the lobby.
 - **Autoplay** with stop-on-big-hit, a profit target and a loss limit, plus **turbo** and the space bar.
 - Synthesized sound (peg tinks, gold chimes, bucket thuds) with a mute toggle, a live bucket heatmap, session stats, a multiplier history strip, and BIG / MEGA / LEGENDARY win banners.
 
-Every paytable was checked with exact math or a 200k-hand simulation. The formulas are in comments next to each engine.
+Every paytable was checked with exact math or a 200k-hand simulation. The formulas are in comments next to each engine. Fractional payouts (baccarat banker 0.95:1, blackjack 3:2 and surrender, the craps buy/lay commission) round to the nearest whole coin, half up, never down; craps place, odds, buy and lay bets are taken only in the unit their odds pay whole, so those payouts are exact. `tests/audit_tables_test.php` re-derives the table-game figures: all 22,100 three-card hands against a brute-force ranker, the blackjack return with basic strategy through the live engine, the exact 216-roll sic bo returns, the craps betting units and exact unit returns (place 6 98.48%, buy/lay 4 98.33%), and the exact bet-key spellings of sic bo, roulette, craps and the crab derby.
 
 - **Free coins**: 10,000 GC welcome stack, a daily bonus with a 7-day streak, a "running low" refill every 4h (it unlocks when your balance **plus the chips you have on tables** is under 500 GC, so parking craps chips doesn't count as being broke), and **promo codes** you can hand out at events
 - **Leaderboards**: biggest stack, biggest single win, most rounds. Only chips that were actually decided count as a round, wagered or won: craps chips you park and take back down count for nothing.
