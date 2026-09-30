@@ -13,7 +13,7 @@
 declare(strict_types=1);
 
 const APP_VERSION    = '1.0.0';
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 define('DATA_DIR', __DIR__ . '/data');
 define('DB_FILE',  DATA_DIR . '/app.sqlite');
 define('PW_FILE',  __DIR__ . '/admin_password.txt');
@@ -55,11 +55,47 @@ function is_https(): bool {
         || (($_SERVER['SERVER_PORT'] ?? '') === '443');
 }
 
+/* Cloudflare's edge ranges, from https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6 (published list,
+ * unchanged for years; Cloudflare announces edits). Used only when the trusted_proxies setting says "cloudflare". */
+const CF_RANGES = ['173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
+    '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13', '104.24.0.0/14',
+    '172.64.0.0/13', '131.0.72.0/22', '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32',
+    '2a06:98c0::/29', '2c0f:f248::/32'];
+
+/** Is $ip inside $cidr ("10.0.0.0/8", "2a06:98c0::/29", or a bare address)? IPv4 or IPv6, never across families. */
+function ip_in_cidr(string $ip, string $cidr): bool {
+    [$net, $bits] = array_pad(explode('/', trim($cidr), 2), 2, null);
+    $a = @inet_pton($ip); $n = @inet_pton((string)$net);
+    if ($a === false || $n === false || strlen($a) !== strlen($n)) { return false; }
+    $len = strlen($a) * 8;
+    $bits = $bits === null ? $len : (ctype_digit($bits) ? (int)$bits : -1);
+    if ($bits < 0 || $bits > $len) { return false; }
+    $full = intdiv($bits, 8); $rem = $bits % 8;
+    if (substr($a, 0, $full) !== substr($n, 0, $full)) { return false; }
+    return $rem === 0 || ((ord($a[$full]) ^ ord($n[$full])) & ((0xFF << (8 - $rem)) & 0xFF)) === 0;
+}
+
+/** Is this TCP peer a proxy allowed to tell us the visitor's IP? Loopback always is (a cloudflared tunnel on this box);
+ *  beyond that, only what the trusted_proxies setting lists (IPs / CIDRs, or the word "cloudflare" for CF_RANGES). */
+function trusted_proxy(string $remote): bool {
+    if (preg_match('/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i', $remote, $m)) { $remote = $m[1]; }   // IPv4-mapped IPv6 peer
+    if (ip_in_cidr($remote, '127.0.0.0/8') || $remote === '::1') { return true; }
+    try { $list = setting('trusted_proxies'); } catch (Throwable) { $list = ''; }
+    foreach (array_filter(array_map('trim', explode(',', strtolower($list)))) as $t) {
+        if ($t === 'cloudflare') { foreach (CF_RANGES as $r) { if (ip_in_cidr($remote, $r)) { return true; } } }
+        elseif (ip_in_cidr($remote, $t)) { return true; }
+    }
+    return false;
+}
+
 function client_ip(): string {
-    // cloudflare tunnel puts the real visitor here; everything else gets REMOTE_ADDR
+    // CF-Connecting-IP is a header anyone can type, so it only counts when the connection itself comes from a proxy we
+    // trust (see trusted_proxy()). Everything else is the TCP peer, which no client can forge: the login lockout, signup
+    // throttle and audit log all key on this.
+    $remote = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
     $cf = $_SERVER['HTTP_CF_CONNECTING_IP'] ?? '';
-    if ($cf !== '' && filter_var($cf, FILTER_VALIDATE_IP)) { return $cf; }
-    return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+    if ($cf !== '' && filter_var($cf, FILTER_VALIDATE_IP) && trusted_proxy($remote)) { return $cf; }
+    return $remote;
 }
 
 function csp_nonce(): string {
@@ -293,10 +329,11 @@ function install(PDO $pdo, bool $fresh): void {
         ['daily_step', '250', 'Extra coins per consecutive day'],
         ['daily_max_streak', '7', 'Streak stops growing after this many days'],
         ['refill_amount', '2500', 'Coins given by the "running low" refill'],
-        ['refill_below', '500', 'Refill unlocks when balance is below this'],
+        ['refill_below', '500', 'Refill unlocks when balance plus chips on the table is below this'],
         ['refill_hours', '4', 'Hours between refills'],
         ['min_age', '21', 'Age players must confirm at signup'],
         ['registration_open', '1', '1 = new signups allowed, 0 = closed'],
+        ['trusted_proxies', '', 'Proxies allowed to set the visitor IP via CF-Connecting-IP: comma list of IPs/CIDRs, or "cloudflare" for Cloudflare\'s edge. Loopback (cloudflared tunnel) is always trusted. Blank = trust only loopback'],
         ['ws_url', '', 'WebSocket URL for the floor and poker (e.g. wss://casino.example.com/ws). Blank = auto: same host on port 8081 in dev, wss://host/ws behind a proxy'],
         ['rt_origins', '', 'Comma-separated origins allowed to open a WebSocket (e.g. https://casino.example.com). Blank = derive from the Host header'],
         ['floor_enabled', '1', '1 = the 3D casino floor is open, 0 = hidden'],
@@ -642,11 +679,13 @@ function bj_settle(array $hand, array $st): array {
     }
 
     $pid = (int)$hand['player_id'];
+    unset($st['shoe']); // no reason to keep 300 cards around once it's over
+    // settle as a conditional write first: a hand that is already done or voided can never pay a second time
+    $n = q("UPDATE bj_hands SET status = 'done', outcome = ?, payout = ?, state = ?, updated_at = datetime('now') WHERE id = ? AND status = 'active'",
+        [$outcome, $pay, json_encode($st), $hand['id']])->rowCount();
+    if ($n !== 1) { throw new DomainException('That hand is already settled.'); }
     if ($pay > 0) { move_coins($pid, $pay, 'payout', 'blackjack', 'hand #' . $hand['id'] . ' ' . $outcome); }
     record_round($pid, $bet, $pay);
-    unset($st['shoe']); // no reason to keep 300 cards around once it's over
-    q("UPDATE bj_hands SET status = 'done', outcome = ?, payout = ?, state = ?, updated_at = datetime('now') WHERE id = ?",
-        [$outcome, $pay, json_encode($st), $hand['id']]);
     return row('SELECT * FROM bj_hands WHERE id = ?', [$hand['id']]);
 }
 
@@ -732,10 +771,13 @@ function roulette_spin(): array {
     if (!is_array($bets) || !$bets) { fail('Place at least one chip.'); }
     if (count($bets) > ROULETTE_MAX_BETS) { fail('Max ' . ROULETTE_MAX_BETS . ' bets per spin.'); }
 
-    $clean = []; $total = 0;
+    // one stack per spot: duplicate entries merge before the caps, so a number can never hold more than max_bet and a
+    // spin never more than 10× that, the same limits parse_bets() puts on the 3D wheel and every other chip board
+    $agg = [];
     foreach ($bets as $b) {
         $type = is_array($b) ? (string)($b['type'] ?? '') : '';
-        $v = (int)($b['value'] ?? 0);
+        $vr = $b['value'] ?? 0;
+        $v = is_numeric($vr) && (int)$vr == $vr ? (int)$vr : -1;
         $ok = match ($type) {
             'straight' => $v >= 0 && $v <= 36,
             'dozen', 'column' => $v >= 1 && $v <= 3,
@@ -743,12 +785,12 @@ function roulette_spin(): array {
             default => false,
         };
         if (!$ok) { fail('That bet isn\'t on the table.'); }
-        $amt = clamp_bet($b['amount'] ?? '', $g);
         if (!in_array($type, ['straight', 'dozen', 'column'], true)) { $v = 0; }
-        $clean[] = ['type' => $type, 'value' => $v, 'amount' => $amt];
-        $total += $amt;
+        $agg["$type:$v"] = ($agg["$type:$v"] ?? 0) + chip_amount($b['amount'] ?? '');
     }
-    if ($total > (int)$g['max_bet'] * 10) { fail('Table limit is ' . coins((int)$g['max_bet'] * 10) . ' GC per spin.'); }
+    $total = cap_spots($g, $agg, 'spin');
+    $clean = [];
+    foreach ($agg as $key => $amt) { [$type, $v] = explode(':', $key, 2); $clean[] = ['type' => $type, 'value' => (int)$v, 'amount' => $amt]; }
 
     $n = random_int(0, 36);
     $payout = 0;
@@ -824,6 +866,21 @@ function bal(int $pid): int { return (int)val('SELECT balance FROM players WHERE
 function round_active(int $pid, string $game): ?array {
     return row("SELECT * FROM rounds WHERE player_id = ? AND game = ? AND status = 'active'", [$pid, $game]);
 }
+/** Chips still at risk on an active round: what a void must hand back. Craps is the only game that pays or returns
+ *  chips while its round stays 'active', so there rounds.bet (everything ever placed) overstates it; state.bets is live. */
+function round_at_risk(array $r): int {
+    if ($r['game'] === 'craps') { return (int)array_sum(craps_state($r)['bets']); }
+    return (int)$r['bet'];
+}
+/** Coins a player has on tables right now: live chips in active rounds, the active blackjack hand, any poker stack.
+ *  The refill gate adds this to the balance so parking take-down-able chips can't fake "running low". */
+function coins_in_play(int $pid): int {
+    $sum = 0;
+    foreach (q("SELECT * FROM rounds WHERE player_id = ? AND status = 'active'", [$pid])->fetchAll() as $r) { $sum += round_at_risk($r); }
+    $sum += (int)(val("SELECT COALESCE(SUM(bet), 0) FROM bj_hands WHERE player_id = ? AND status = 'active'", [$pid]) ?? 0);
+    $sum += (int)(val('SELECT COALESCE(SUM(stack), 0) FROM poker_seats WHERE player_id = ?', [$pid]) ?? 0);
+    return $sum;
+}
 function round_last(int $pid, string $game): ?array {
     if (!empty($GLOBALS['gt_skip_last'])) { return null; }
     return row("SELECT * FROM rounds WHERE player_id = ? AND game = ? AND status != 'void' ORDER BY id DESC LIMIT 1", [$pid, $game]);
@@ -844,10 +901,12 @@ function round_save(array $r, array $state): array {
 }
 function round_close(array $r, array $state, int $payout, string $outcome): array {
     $pid = (int)$r['player_id'];
+    // settle as a conditional write first: a round that is already done or voided can never pay a second time
+    $n = q("UPDATE rounds SET status = 'done', outcome = ?, payout = ?, state = ?, updated_at = datetime('now') WHERE id = ? AND status = 'active'",
+        [$outcome, $payout, json_encode($state), $r['id']])->rowCount();
+    if ($n !== 1) { throw new DomainException('That round is already settled.'); }
     if ($payout > 0) { move_coins($pid, $payout, 'payout', $r['game'], 'round #' . $r['id'] . ' ' . $outcome); }
     record_round($pid, (int)$r['bet'], $payout);
-    q("UPDATE rounds SET status = 'done', outcome = ?, payout = ?, state = ?, updated_at = datetime('now') WHERE id = ?",
-        [$outcome, $payout, json_encode($state), $r['id']]);
     return row('SELECT * FROM rounds WHERE id = ?', [$r['id']]);
 }
 /** A game that's decided in one request: wager, settle, done. */
@@ -855,24 +914,39 @@ function round_oneshot(int $pid, string $game, int $bet, int $payout, string $ou
     return round_close(round_open($pid, $game, $bet, $state), $state, $payout, $outcome);
 }
 
-/** Chip-board games post [{key, amount}, ...]; the no-JS form posts one bet_key + amount. */
+/** One chip's amount as posted: a whole number of coins, at least 1. Range against the table comes after merging. */
+function chip_amount(mixed $raw): int {
+    if (!is_numeric($raw) || (int)$raw != $raw || (int)$raw < 1) { fail('Bet must be a whole number of coins.'); }
+    return (int)$raw;
+}
+/** The table limits every chip board shares: one spot holds at most max_bet (and at least min_bet), and the whole
+ *  $per (spin / round) at most 10 × max_bet. $spots is already merged, one entry per spot. Returns the total. */
+function cap_spots(array $g, array $spots, string $per): int {
+    $max = (int)$g['max_bet']; $total = 0;
+    foreach ($spots as $amt) {
+        if ($amt > $max) { fail('Max ' . coins($max) . ' GC on one spot.'); }
+        clamp_bet($amt, $g);
+        $total += $amt;
+    }
+    if ($total > $max * 10) { fail('Table limit is ' . coins($max * 10) . " GC per $per."); }
+    return $total;
+}
+/** Chip-board games post [{key, amount}, ...]; the no-JS form posts one bet_key + amount.
+ *  Keys must be spelled exactly the way the table spells them (lowercase, no whitespace, no leading zeros in a number), so
+ *  "total:04" can't sit beside "total:4" as a second stack. Duplicate keys merge before any limit is checked. */
 function parse_bets(array $g, callable $valid): array {
     $raw = $_POST['bets'] ?? null;
     $bets = is_string($raw) && $raw !== '' ? json_decode($raw, true)
         : [['key' => $_POST['bet_key'] ?? '', 'amount' => $_POST['amount'] ?? '']];
     if (!is_array($bets) || !$bets) { fail('Put some chips down first.'); }
     if (count($bets) > 40) { fail('Max 40 spots per round.'); }
-    $clean = []; $total = 0;
+    $clean = [];
     foreach ($bets as $b) {
-        $key = is_array($b) ? (string)($b['key'] ?? '') : '';
-        if (!$valid($key)) { fail('That bet isn\'t on this table.'); }
-        $amt = clamp_bet($b['amount'] ?? '', $g);
-        $clean[$key] = ($clean[$key] ?? 0) + $amt;
-        if ($clean[$key] > (int)$g['max_bet']) { fail('Max ' . coins((int)$g['max_bet']) . ' GC on one spot.'); }
-        $total += $amt;
+        $key = is_array($b) && is_string($b['key'] ?? null) ? $b['key'] : '';
+        if (!preg_match('/^(?:[a-z][a-z0-9_]*|0|[1-9]\d*)(?::(?:0|[1-9]\d*))?$/', $key) || !$valid($key)) { fail('That bet isn\'t on this table.'); }
+        $clean[$key] = ($clean[$key] ?? 0) + chip_amount($b['amount'] ?? '');
     }
-    if ($total > (int)$g['max_bet'] * 10) { fail('Table limit is ' . coins((int)$g['max_bet'] * 10) . ' GC per round.'); }
-    return [$clean, $total];
+    return [$clean, cap_spots($g, $clean, 'round')];
 }
 
 function shoe(int $decks): array {
@@ -1146,7 +1220,7 @@ function bigwheel_play(): array {
 const SICBO_TOTALS = [4 => 60, 5 => 30, 6 => 17, 7 => 12, 8 => 8, 9 => 6, 10 => 6, 11 => 6, 12 => 6, 13 => 8, 14 => 12, 15 => 17, 16 => 30, 17 => 60];
 function sicbo_valid(string $k): bool {
     if (in_array($k, ['small', 'big', 'any_triple'], true)) { return true; }
-    if (!preg_match('/^(total|single|double|triple):(\d+)$/', $k, $m)) { return false; }
+    if (!preg_match('/^(total|single|double|triple):([1-9]\d?)$/', $k, $m)) { return false; }   // exact spelling: no "04"
     $n = (int)$m[2];
     return $m[1] === 'total' ? isset(SICBO_TOTALS[$n]) : $n >= 1 && $n <= 6;
 }
@@ -1767,7 +1841,7 @@ const VS_ART = [
 function roulette3d_play(): array {
     $p = require_playable(); $g = game_cfg('roulette3d');
     [$bets, $total] = parse_bets($g, function (string $k) {
-        if (!preg_match('/^(straight|red|black|odd|even|low|high|dozen|column):(\d+)$/', $k, $m)) { return false; }
+        if (!preg_match('/^(straight|red|black|odd|even|low|high|dozen|column):(0|[1-9]\d?)$/', $k, $m)) { return false; }   // exact spelling: no "017"
         $v = (int)$m[2];
         return match ($m[1]) { 'straight' => $v >= 0 && $v <= 36, 'dozen', 'column' => $v >= 1 && $v <= 3, default => $v === 0 };
     });
@@ -1823,7 +1897,10 @@ function craps_state(?array $r): array {
     $bets = $s['bets'] ?? [];
     if (isset($bets['odds'])) { $bets['passodds'] = ($bets['passodds'] ?? 0) + $bets['odds']; unset($bets['odds']); }   // v1 name
     if (isset($bets['yo'])) { /* same key */ }
-    return ['point' => (int)($s['point'] ?? 0), 'bets' => $bets, 'paid' => (int)($s['paid'] ?? 0), 'rolls' => $s['rolls'] ?? []];
+    // action / won: stakes actually decided so far and what they returned. Chips parked and taken back down never
+    // enter either, so the stats and the leaderboard count rounds that were really played (paid also counts take-downs).
+    return ['point' => (int)($s['point'] ?? 0), 'bets' => $bets, 'paid' => (int)($s['paid'] ?? 0), 'rolls' => $s['rolls'] ?? [],
+        'action' => (int)($s['action'] ?? 0), 'won' => (int)($s['won'] ?? 0)];
 }
 /** Validate one chip placement against the current table state. Throws DomainException. */
 function craps_check_add(array $s, string $k, int $amt, array $g): void {
@@ -1873,11 +1950,13 @@ function craps_act(): array {
             $s = craps_state($r); $back = 0;
             foreach ($keys as $k) { if (isset($s['bets'][$k])) { $back += $s['bets'][$k]; unset($s['bets'][$k]); } }
             if (!$back) { throw new DomainException('Nothing to take down there.'); }
-            move_coins($pid, $back, 'payout', 'craps', 'took down ' . implode(', ', $keys));
+            // chips coming back down were never decided, so this reverses the wager (a positive 'wager' row) instead of
+            // paying out: "wagered today" and per-game RTP net it to zero rather than counting it as handle and a 100% return
+            move_coins($pid, $back, 'wager', 'craps', 'took down ' . implode(', ', $keys));
             $s['paid'] += $back;
             if (!$s['bets']) {
                 q("UPDATE rounds SET status = 'done', outcome = 'down', payout = ?, state = ?, updated_at = datetime('now') WHERE id = ?", [$s['paid'], json_encode($s), $r['id']]);
-                record_round($pid, (int)$r['bet'], $s['paid']);
+                if ($s['action'] > 0) { record_round($pid, $s['action'], $s['won']); }   // park-and-take-down is not a round played
             } else { round_save($r, $s); }
             return ['state' => $s, 'back' => $back];
         });
@@ -1895,14 +1974,16 @@ function craps_act(): array {
 
         $d = [random_int(1, 6), random_int(1, 6)];
         $sum = $d[0] + $d[1]; $hard = $d[0] === $d[1]; $pt = $s['point']; $comeOut = !$pt;
-        $pay = 0; $events = [];
+        $pay = 0; $events = []; $act = 0; $won = 0;   // act / won: stakes decided on this roll and what they returned (stats only)
         $B = &$s['bets'];
-        $credit = function (string $k, int $amt, string $what, bool $remove = true) use (&$B, &$pay, &$events) {
+        $credit = function (string $k, int $amt, string $what, bool $remove = true) use (&$B, &$pay, &$events, &$act, &$won) {
+            // a stay-up win pays profit only and keeps the stake working: count that as stake returned and re-bet
+            $act += $B[$k]; $won += $remove ? $amt : $amt + $B[$k];
             $pay += $amt; $events[] = ['key' => $k, 'win' => true, 'text' => craps_label($k) . ' ' . $what . ' +' . coins($amt)];
             if ($remove) { unset($B[$k]); }
         };
-        $lose = function (string $k) use (&$B, &$events) { $events[] = ['key' => $k, 'win' => false, 'text' => craps_label($k) . ' loses']; unset($B[$k]); };
-        $push = function (string $k, string $why) use (&$B, &$pay, &$events) { $pay += $B[$k]; $events[] = ['key' => $k, 'win' => null, 'text' => craps_label($k) . ' ' . $why]; unset($B[$k]); };
+        $lose = function (string $k) use (&$B, &$events, &$act) { $act += $B[$k]; $events[] = ['key' => $k, 'win' => false, 'text' => craps_label($k) . ' loses']; unset($B[$k]); };
+        $push = function (string $k, string $why) use (&$B, &$pay, &$events, &$act, &$won) { $act += $B[$k]; $won += $B[$k]; $pay += $B[$k]; $events[] = ['key' => $k, 'win' => null, 'text' => craps_label($k) . ' ' . $why]; unset($B[$k]); };
         $trueRet = fn(int $amt, int $n) => $amt + intdiv($amt * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]);
         $layRet = fn(int $amt, int $n) => $amt + intdiv($amt * CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]);
         $vig = fn(int $win) => max(1, (int)floor($win * 0.05));
@@ -2010,13 +2091,13 @@ function craps_act(): array {
         }
         unset($B);
         if ($pay) { move_coins($pid, $pay, 'payout', 'craps', "roll $d[0]-$d[1]"); }
-        $s['paid'] += $pay;
+        $s['paid'] += $pay; $s['action'] += $act; $s['won'] += $won;
         $s['rolls'] = array_slice([...$s['rolls'], $d], -16);
         if (!$s['bets']) {
             $s['point'] = 0;
             q("UPDATE rounds SET status = 'done', outcome = ?, payout = ?, state = ?, updated_at = datetime('now') WHERE id = ?",
                 ["$d[0]-$d[1]", $s['paid'], json_encode($s), $r['id']]);
-            record_round($pid, (int)val('SELECT bet FROM rounds WHERE id = ?', [$r['id']]), $s['paid']);
+            if ($s['action'] > 0) { record_round($pid, $s['action'], $s['won']); }   // only chips that were decided count as played
         } else {
             round_save($r, $s);
         }
@@ -2072,7 +2153,8 @@ function daily_status(array $p): array {
 function refill_status(array $p): array {
     $last = $p['last_refill_at'] ? strtotime($p['last_refill_at'] . ' UTC') : 0;
     $next = $last + isetting('refill_hours', 4) * 3600;
-    $low = (int)$p['balance'] < isetting('refill_below', 500);
+    // "running low" counts chips on the table too, so parking take-down-able craps chips can't fake a low balance
+    $low = ((int)$p['balance'] + coins_in_play((int)$p['id'])) < isetting('refill_below', 500);
     return ['ready' => $low && time() >= $next, 'low' => $low, 'wait' => max(0, $next - time()),
         'amount' => isetting('refill_amount', 2500)];
 }
@@ -2095,7 +2177,7 @@ function claim_refill(): array {
     return tx(function () use ($p) {
         $p = row('SELECT * FROM players WHERE id = ?', [$p['id']]);
         $s = refill_status($p);
-        if (!$s['low']) { throw new DomainException('Refills unlock when you drop under ' . coins(isetting('refill_below', 500)) . ' GC.'); }
+        if (!$s['low']) { throw new DomainException('Refills unlock when your balance plus chips on the table drops under ' . coins(isetting('refill_below', 500)) . ' GC.'); }
         if (!$s['ready']) { throw new DomainException('Next refill in ' . human_wait($s['wait']) . '.'); }
         $bal = move_coins((int)$p['id'], $s['amount'], 'refill');
         q("UPDATE players SET last_refill_at = datetime('now') WHERE id = ?", [$p['id']]);
@@ -2321,7 +2403,7 @@ function entities(): array {
                 'username' => ['type' => 'text', 'required' => true, 'pattern' => '/^[A-Za-z0-9_]{3,24}$/', 'hint' => '3–24 letters, numbers, underscores'],
                 'email' => ['type' => 'email'],
                 'password' => ['type' => 'password', 'column' => 'pass_hash', 'min' => 8, 'hint' => 'Blank keeps the current one. 8+ chars.'],
-                'balance' => ['type' => 'int', 'min' => 0, 'required' => true, 'default' => 10000, 'hint' => 'Changes are written to the ledger as an admin adjustment'],
+                'balance' => ['type' => 'int', 'min' => 0, 'required' => true, 'default' => 10000, 'hint' => 'Changes are written to the ledger as an admin adjustment. The save is refused if the balance moved while this form was open'],
                 'status' => ['type' => 'enum', 'options' => ['active', 'suspended'], 'default' => 'active'],
                 'break_until' => ['type' => 'datetime', 'hint' => 'UTC. Blank means no break.'],
                 'daily_streak' => ['type' => 'int', 'min' => 0, 'default' => 0],
@@ -2384,7 +2466,7 @@ function entities(): array {
             'fields' => [
                 'player_id' => ['type' => 'fk', 'ref' => 'players', 'label_col' => 'username', 'required' => true],
                 'bet' => ['type' => 'int', 'min' => 1, 'required' => true],
-                'status' => ['type' => 'enum', 'options' => ['active', 'done', 'void'], 'default' => 'done', 'hint' => 'Setting an active hand to void refunds its bet'],
+                'status' => ['type' => 'enum', 'options' => ['active', 'done', 'void'], 'default' => 'done', 'hint' => 'Setting an active hand to void refunds its bet. Done and void hands can\'t be reopened or voided again'],
                 'outcome' => ['type' => 'text', 'max' => 30],
                 'payout' => ['type' => 'int', 'min' => 0, 'default' => 0],
                 'state' => ['type' => 'json', 'default' => '{}'],
@@ -2397,8 +2479,8 @@ function entities(): array {
             'fields' => [
                 'player_id' => ['type' => 'fk', 'ref' => 'players', 'label_col' => 'username', 'required' => true],
                 'game' => ['type' => 'text', 'required' => true, 'max' => 20],
-                'bet' => ['type' => 'int', 'min' => 1, 'required' => true, 'hint' => 'Total staked this round'],
-                'status' => ['type' => 'enum', 'options' => ['active', 'done', 'void'], 'default' => 'done', 'hint' => 'Setting an active round to void refunds its stake'],
+                'bet' => ['type' => 'int', 'min' => 1, 'required' => true, 'hint' => 'Total staked this round (craps: every chip ever placed, including ones since paid or taken down)'],
+                'status' => ['type' => 'enum', 'options' => ['active', 'done', 'void'], 'default' => 'done', 'hint' => 'Setting an active round to void refunds the chips still at risk on it (craps: what is on the layout now). Done and void rounds can\'t be reopened or voided again'],
                 'outcome' => ['type' => 'text', 'max' => 30],
                 'payout' => ['type' => 'int', 'min' => 0, 'default' => 0],
                 'state' => ['type' => 'json', 'default' => '{}'],
@@ -2541,6 +2623,9 @@ function list_where(array $e): array {
 
 /* ═════════════════════════ ADMIN: validation + save ═════════════════════════ */
 
+/** Fingerprint of a round / hand row as the edit form saw it; the save refuses to overwrite a row that moved since. */
+function row_rev(array $r): string { return substr(hash('sha256', json_encode($r)), 0, 20); }
+
 function validate_entity(string $t, array $e, array $in, ?array $existing): array {
     $data = []; $errs = [];
     foreach ($e['fields'] as $name => $f) {
@@ -2629,8 +2714,21 @@ function do_admin_save(array $admin): void {
     }
 
     try {
-        $newId = tx(function () use ($t, $data, $existing, $id, $admin) {
+        $newId = tx(function () use ($t, $data, &$existing, $id, $admin) {
             if ($existing) {
+                // re-read under the write lock: the form was built from a snapshot, and a roll, hit or cashout may have
+                // landed since. Money-bearing rows also carry what the admin saw and refuse to save over a change.
+                $existing = row("SELECT * FROM $t WHERE id = ?", [$id]);
+                if (!$existing) { throw new DomainException('That record is gone.'); }
+                if ($t === 'players' && isset($_POST['balance_was']) && (int)$_POST['balance_was'] !== (int)$existing['balance']) {
+                    throw new DomainException('Balance changed to ' . coins((int)$existing['balance']) . ' GC while you were editing. Reload and try again.');
+                }
+                if (in_array($t, ['rounds', 'bj_hands'], true)) {
+                    $what = $t === 'rounds' ? 'round' : 'hand';
+                    if (isset($_POST['rev']) && (string)$_POST['rev'] !== row_rev($existing)) { throw new DomainException("This $what changed while you were editing (the player kept playing). Reload and try again."); }
+                    // the only transitions are active → done and active → void: a settled or voided row never reopens or refunds twice
+                    if ($data['status'] !== $existing['status'] && $existing['status'] !== 'active') { throw new DomainException("Settled or voided {$what}s can't be reopened or re-voided."); }
+                }
                 $sets = implode(', ', array_map(fn($c) => "$c = ?", array_keys($data)));
                 q("UPDATE $t SET $sets, updated_at = datetime('now') WHERE id = ?", [...array_values($data), $id]);
                 // side effects that keep the coin economy honest
@@ -2640,8 +2738,10 @@ function do_admin_save(array $admin): void {
                         [$id, 'admin', $delta, $data['balance'], 'adjusted by ' . $admin['username']]);
                 }
                 if ($t === 'rounds' && $existing['status'] === 'active' && $data['status'] === 'void') {
-                    move_coins((int)$existing['player_id'], (int)$existing['bet'], 'admin', $existing['game'], 'voided round #' . $id . ' refund');
-                    q("UPDATE rounds SET outcome = 'void', payout = bet WHERE id = ?", [$id]);
+                    // hand back only what is still on the table: chips already paid or taken down stayed with the player
+                    $refund = round_at_risk($existing); $paid = (int)(st($existing)['paid'] ?? 0);
+                    if ($refund > 0) { move_coins((int)$existing['player_id'], $refund, 'admin', $existing['game'], 'voided round #' . $id . ' refund'); }
+                    q("UPDATE rounds SET outcome = 'void', payout = ? WHERE id = ?", [$paid + $refund, $id]);
                 }
                 if ($t === 'bj_hands' && $existing['status'] === 'active' && $data['status'] === 'void') {
                     move_coins((int)$existing['player_id'], (int)$existing['bet'], 'admin', 'blackjack', 'voided hand #' . $id . ' refund');
@@ -2669,6 +2769,10 @@ function do_admin_save(array $admin): void {
         else { throw $ex; }
         $_SESSION['form_old'] = array_map(fn($v) => is_string($v) ? $v : '', array_diff_key($_POST, ['csrf' => 1, 'password' => 1]));
         flash('err', $human);
+        redirect(url('admin_edit', ['t' => $t, 'id' => $id ?: null]));
+    } catch (DomainException $ex) {
+        // a rule refused the save (balance moved, round already settled, overdraw): say so on a freshly loaded form
+        flash('err', $ex->getMessage());
         redirect(url('admin_edit', ['t' => $t, 'id' => $id ?: null]));
     }
     flash('ok', ($existing ? 'Saved' : 'Created') . " #$newId.");
@@ -3062,7 +3166,7 @@ function bonus_strip(array $p): string {
   <form class="bonus-card" method="post" action="<?= h(url('claim_refill')) ?>" data-ajax>
     <?= csrf_field() ?>
     <h3>Running low?</h3>
-    <p>Under <?= coins(isetting('refill_below', 500)) ?> GC gets you <?= coins($r['amount']) ?> every <?= isetting('refill_hours', 4) ?>h.</p>
+    <p>Under <?= coins(isetting('refill_below', 500)) ?> GC (counting chips on the table) gets you <?= coins($r['amount']) ?> every <?= isetting('refill_hours', 4) ?>h.</p>
     <button class="btn ghost" <?= $r['ready'] ? '' : 'disabled' ?>><?= $r['ready'] ? 'Top me up' : ($r['low'] ? 'Back in ' . h(human_wait($r['wait'])) : 'You\'re good') ?></button>
   </form>
   <form class="bonus-card" method="post" action="<?= h(url('redeem')) ?>" data-ajax>
@@ -3287,6 +3391,7 @@ function page_roulette(): void {
     <h2 class="display md">Payouts</h2>
     <ul class="ticks cols">
       <li>Single number 35:1</li><li>Dozen or column 2:1</li><li>Red/black, odd/even, 1–18/19–36 1:1</li><li>Zero loses outside bets</li>
+      <li>Up to <?= coins((int)$g['max_bet']) ?> GC on any one spot, <?= coins((int)$g['max_bet'] * 10) ?> GC per spin</li>
     </ul>
     <p class="fine">Right-click (or long-press) a spot to pull chips back off it.</p>
   </aside>
@@ -3351,7 +3456,7 @@ function page_account(): void {
         <thead><tr><th>When (UTC)</th><th>What</th><th class="n">Coins</th><th class="n">Balance</th></tr></thead>
         <tbody>
         <?php foreach ($ledger as $l): ?>
-          <tr><td><?= h(substr($l['created_at'], 5, 11)) ?></td><td><?= h(ucfirst($l['kind'])) ?><?= $l['game'] ? ' · ' . h($l['game']) : '' ?></td>
+          <tr><td><?= h(substr($l['created_at'], 5, 11)) ?></td><td><?= $l['kind'] === 'wager' && (int)$l['amount'] > 0 ? 'Chips back' : h(ucfirst($l['kind'])) ?><?= $l['game'] ? ' · ' . h($l['game']) : '' ?></td>
             <td class="n <?= (int)$l['amount'] >= 0 ? 'pos' : 'neg' ?>"><?= ((int)$l['amount'] >= 0 ? '+' : '') . coins((int)$l['amount']) ?></td><td class="n"><?= coins((int)$l['balance_after']) ?></td></tr>
         <?php endforeach; ?>
         </tbody>
@@ -3465,7 +3570,7 @@ function page_rules(): void {
 const GAME_RULES = [
     'poker' => ['No-limit Texas hold\'em, real players at the table (house players fill empty seats and are labelled). Blinds and buy-in range are set per table.', 'Buy in from your Gold Coins. Your stack lives at the table until you stand up, then it goes straight back to your balance.', 'Fold, check, call, raise or shove. Minimum raise is the size of the last raise. Side pots are handled like a live room and odd chips go to the first seat left of the button.', 'The clock gives you ' . 20 . ' seconds an action; two timeouts and you sit out. Leave any time; if you\'re in a hand, you\'re folded and paid when it ends.', 'Every deal is committed to before a card moves: the table shows a SHA-256 of the shuffled deck, and reveals the deck and salt after the hand. Open any hand history to verify it.'],
     'roulette3d' => ['Tap a chip, tap the board, hit Spin. Same single-zero payouts as the 2D table (35:1 straight up).', 'The wheel you watch is the real result: the server picks the pocket, then the ball is steered into it.', 'Right-click or long-press a spot to pull chips back.'],
-    'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay true odds with zero house edge.', 'Every number has Place (6/8 pay 7:6, 5/9 pay 7:5, 4/10 pay 9:5), Buy (true odds, 5% on wins) and Lay (bet the 7 beats it). Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.'],
+    'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay true odds with zero house edge.', 'Every number has Place (6/8 pay 7:6, 5/9 pay 7:5, 4/10 pay 9:5), Buy (true odds, 5% on wins) and Lay (bet the 7 beats it). Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.', 'Chips you take back down were never in play: they don\'t count toward your rounds, wagered or won totals. Each spot takes up to the table max (chips already working included), and each roll up to 10× the table max in new chips.'],
     'pusher' => ['Each coin you drop costs your coin value. Coins that spill over the front edge are yours.', 'Tap the machine or use the slider to aim. Aiming is just for fun: how many coins fall is decided the moment you drop.', 'About 46% of drops spill something, and rare avalanches pay 25× or 100×. Return to player is 95%.'],
     'scratch' => ['Buy a ticket, scratch all nine spots.', 'Three matching prizes wins that prize. Only one triple per ticket.', 'Top prize is 1,000× the ticket. About 1 in 4 tickets wins something.'],
     'keno' => ['Pick 1 to 10 numbers from 40.', 'Ten numbers are drawn. The more you catch, the more you win.', 'The paytable changes with how many you pick. Big picks, big jackpots.'],
@@ -4681,6 +4786,10 @@ function page_admin_edit(array $admin): void {
 </header>
 <form class="panel form edit-form reveal d2" method="post" action="<?= h(url('admin_save')) ?>" novalidate>
   <?= csrf_field() ?><input type="hidden" name="t" value="<?= h($t) ?>"><input type="hidden" name="id" value="<?= $id ?>">
+  <?php // what the admin saw: the save refuses to overwrite a balance or a live round/hand that moved meanwhile
+  if ($r && $t === 'players'): ?><input type="hidden" name="balance_was" value="<?= h($hasOld ? old('balance_was', (string)(int)$r['balance']) : (int)$r['balance']) ?>">
+  <?php elseif ($r && in_array($t, ['rounds', 'bj_hands'], true)): ?><input type="hidden" name="rev" value="<?= h($hasOld ? old('rev', row_rev($r)) : row_rev($r)) ?>">
+  <?php endif; ?>
   <?php foreach ($e['fields'] as $name => $f):
       $col = $f['column'] ?? $name;
       $cur = $hasOld ? old($name) : ($r ? (string)($r[$col] ?? '') : (string)($f['default'] ?? ''));

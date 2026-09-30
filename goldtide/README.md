@@ -77,19 +77,21 @@ The house favorite, and it's featured at the top of the lobby.
 
 Every paytable was checked with exact math or a 200k-hand simulation. The formulas are in comments next to each engine.
 
-- **Free coins**: 10,000 GC welcome stack, a daily bonus with a 7-day streak, a "running low" refill every 4h, and **promo codes** you can hand out at events
-- **Leaderboards**: biggest stack, biggest single win, most rounds
+- **Free coins**: 10,000 GC welcome stack, a daily bonus with a 7-day streak, a "running low" refill every 4h (it unlocks when your balance **plus the chips you have on tables** is under 500 GC, so parking craps chips doesn't count as being broke), and **promo codes** you can hand out at events
+- **Leaderboards**: biggest stack, biggest single win, most rounds. Only chips that were actually decided count as a round, wagered or won: craps chips you park and take back down count for nothing.
+- **Table limits**, the same on every chip board (both roulettes, sic bo, big six, crabs, baccarat, craps): one spot holds at most the table max (default 5,000 GC; duplicate chips on a spot merge before the check, and a spot's name has to match the table's spelling exactly), and one spin or round at most 10× the table max. On craps the per-spot max counts chips already working, and the 10× cap applies to the new chips on each roll.
 - **Take a break**: players can lock their own account for 1–90 days, and it can't be shortened
 - Dark ("night harbor") and light ("day at the pier") themes, fully responsive, keyboard accessible, and it honors reduced motion
 - Every game still plays with JavaScript off (plain forms). JS adds the animation.
 
 **For the house (`?action=admin`)**
-- Dashboard: players, active users, coins in play, today's wagers and hold, actual RTP per game over the last 7 days
+- Dashboard: players, active users, coins in play, today's wagers and hold, actual RTP per game over the last 7 days. Wagers and RTP count chips that were decided: craps chips taken back down are logged as a reversal of their wager (a positive `wager` row, shown to the player as "Chips back"), so they net out of both.
 - Full CRUD on every table (players, games, game rounds, promo codes, redemptions, ledger, blackjack hands, settings, admins, lockouts), with search, filters, sorting, pagination, bulk actions, and CSV export
-- Changing a player's balance writes an `admin` row to the coin ledger. Voiding a stuck round (any game) refunds its stake.
+- Changing a player's balance writes an `admin` row to the coin ledger. The edit form remembers the balance it was opened with and the save is refused ("Balance changed to X while you were editing. Reload and try again.") if the player's balance moved in between, so an open tab can't erase a win or a loss. Round and blackjack-hand edits carry the same kind of check.
+- Voiding a stuck round (any game) refunds the chips still at risk on it: for craps that is what's on the layout right now, not chips already paid or taken down. The refund is decided inside the same transaction as the status change, a settled or voided round can't be reopened or voided again, and the round's `payout` ends up as everything it returned (paid so far + refund).
 - Turn any game on or off, rename it, or change its min/max bet under **Games**. Disabled games vanish from the lobby.
 - Append-only audit log of every admin action, enforced by database triggers
-- Site settings for brand name, tagline, partner name ("Presented with ___"), announcement banner, starting coins, bonus amounts, minimum age, and opening/closing signups
+- Site settings for brand name, tagline, partner name ("Presented with ___"), announcement banner, starting coins, bonus amounts, minimum age, opening/closing signups, and `trusted_proxies` (see security)
 
 ## first run
 
@@ -104,7 +106,8 @@ Every paytable was checked with exact math or a 200k-hand simulation. The formul
 - Multi-step games keep one active round per player per game in the `rounds` table. Crash runs on server time, so lag can't be exploited.
 - All coin movement goes through one function inside `BEGIN IMMEDIATE` transactions, with a `CHECK (balance >= 0)` in the schema as a backstop.
 - bcrypt (cost 12), CSRF tokens on every POST, PDO prepared statements, a CSP with script nonces, HSTS on HTTPS, `SameSite=Strict` cookies, and session regeneration on login
-- Login lockout after 5 failures in 15 minutes (players and admins), promo-code brute-force lockout, signup rate limiting per IP, and a 2-hour admin idle timeout
+- Login lockout after 5 failures in 15 minutes (players and admins), promo-code brute-force lockout (per player), signup rate limiting per IP, and a 2-hour admin idle timeout
+- **Visitor IP and proxies.** The lockouts, the signup throttle and the audit log key on the connecting address (`REMOTE_ADDR`). A `CF-Connecting-IP` header is honored only when the connection itself comes from a proxy you trust; anything else can be typed by an attacker and is ignored. Trusted by default: loopback only, which covers a `cloudflared` tunnel running on the same box (the Raspberry Pi setup). For anything else, set the `trusted_proxies` setting under **Settings**: a comma-separated list of IPs or CIDRs (e.g. `10.0.0.5, 192.168.1.0/24`), or the word `cloudflare` to trust Cloudflare's published edge ranges (IPv4 + IPv6, embedded in `index.php` as `CF_RANGES`; re-check them against <https://www.cloudflare.com/ips/> if Cloudflare announces a change). Use `cloudflare` when the site sits behind Cloudflare's proxy (orange cloud) with your origin reached directly by Cloudflare; leave it blank for a tunnel. If you set it wrong, nothing breaks: rate limits simply key on the proxy's address until you fix it.
 - On Apache it writes `.htaccess` files that block `data/`, `admin_password.txt`, and `*.sqlite`. **On nginx, deny those paths yourself:**
   ```nginx
   location ~ (^/data/|admin_password\.txt|\.sqlite) { deny all; }
