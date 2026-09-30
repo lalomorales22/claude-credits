@@ -5623,6 +5623,7 @@ function rt_page_config(): array {
         'glb' => is_file(DATA_DIR . '/floor.glb') ? '?action=asset&f=glb&v=' . substr(md5((string)filemtime(DATA_DIR . '/floor.glb')), 0, 8) : null,
         'site' => setting('site_name', 'Gold Tide'), 'act_secs' => isetting('poker_action_seconds', 20),
         'register' => url('register'), 'login' => url('login'), 'lobby' => url(),
+        'poker_asset' => '?action=asset&f=poker&v=' . poker_version(),
     ];
 }
 
