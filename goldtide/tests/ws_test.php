@@ -425,6 +425,15 @@ $led = row("SELECT * FROM ledger WHERE player_id = ? AND kind = 'payout' ORDER B
 check($led && $led['game'] === 'poker' && str_starts_with($led['detail'], 'cash-out') && (int)$led['amount'] === $end2['p' . $A], 'the cash-out is one poker payout in the ledger for that amount', short($led));
 check((int)val("SELECT COUNT(*) FROM ledger WHERE player_id = ? AND kind = 'payout'", [$A]) === 1, 'and it is the only payout A ever received (paid exactly once)');
 check((int)($seatRow($B)['stack'] ?? -1) === $end2['p' . $B], 'B\'s poker_seats row carries the settled stack', short([$seatRow($B), $end2]));
+// the leaver's seat is gone when hand_end is flushed, yet A must still see the end of the hand it was in: the hand_end
+// pk_events and a closing pk_state (hand 2, idle, me null, seat gone), not a last frame stuck in 'settle' with leaving=true
+$hasEnd = fn(array $m) => $m['t'] === 'pk_events' && array_filter($m['events'], fn($e) => $e['t'] === 'hand_end' && ($e['deck'] ?? null) === ($ended2['deck'] ?? 0));   // hand 2's, by its revealed deck
+$isFinal = fn(array $m) => $m['t'] === 'pk_state' && (int)($m['table']['hand_no'] ?? 0) === 2 && ($m['table']['phase'] ?? '') === 'idle';
+$a->pump(3, fn() => array_filter($a->seen, $hasEnd) && array_filter($a->seen, $isFinal));
+check((bool)array_filter($a->seen, $hasEnd), 'the mid-hand leaver A still received the hand_end pk_events of hand 2', short(array_map(fn($m) => $m['t'], array_slice($a->seen, -4))));
+$fin = array_values(array_filter($a->seen, $isFinal));
+$finA = $fin ? array_filter((array)$fin[0]['table']['players'], fn($p) => ($p['uid'] ?? null) === 'p' . $A) : null;
+check($fin && $fin[0]['table']['me'] === null && $finA === [], 'and a closing pk_state of it: hand 2, phase idle, me null, A\'s seat gone', short($fin ? array_intersect_key($fin[0]['table'], ['hand_no' => 1, 'phase' => 1, 'me' => 1, 'players' => 1]) : $fin));
 $stackB = (int)$seatRow($B)['stack'];
 $b->close();   // vanish without a word while the table is idle: the away window (6 s in this run) must cash B out
 $t0 = microtime(true);

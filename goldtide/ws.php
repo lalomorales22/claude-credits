@@ -642,14 +642,16 @@ final class GTServer {
      *   watch   connection ids watching (seated players' connections are added at send time)
      *   events  engine events since the last pk_state, flushed once per tick
      *   away    uid => ['since' => float] for disconnected players inside the grace window
-     *   pending a changed poker_tables row waiting for the table to go idle; closing = disabled, emptying out
+     *   pending a changed poker_tables row waiting for the table to go idle; closing = disabled, emptying out;
+     *   farewell = uids whose seat the engine just removed (paid at hand_end, busted, or cashed out at once): they
+     *   still get this tick's pk_events and a closing pk_state (me null) even though they are no longer seated
      * act_secs is passed in explicitly (read once at start-up) so the engine never touches the database.
      */
     private function pkHost(array $row): void {
         $tid = (int)$row['id'];
         $t = pk_new_table($row + ['act_secs' => isetting('poker_action_seconds', 20)]);
         $this->tables[$tid] = ['row' => $row, 't' => $t, 'watch' => [], 'dirty' => true, 'events' => [], 'away' => [],
-                               'closing' => false, 'pending' => null];
+                               'closing' => false, 'pending' => null, 'farewell' => []];
         $this->pkBots($tid, (int)$row['bots']);
         $this->tablesDirty = true;
         ws_log("table $tid '{$row['name']}' open: {$t['seats']} seats, blinds {$t['sb']}/{$t['bb']}, buy-in {$t['min_buy']}-{$t['max_buy']}, bots {$row['bots']}");
@@ -878,7 +880,11 @@ final class GTServer {
         return $out;
     }
 
-    /** Once per tick per changed table: pk_events (same for all) then pk_state built with pk_view() per viewer, never shared. */
+    /**
+     * Once per tick per changed table: pk_events (same for all) then pk_state built with pk_view() per viewer, never shared.
+     * The viewers are the watchers, the seated real players, and (this tick only) the players whose seat was just removed,
+     * so a mid-hand leaver or a busted player sees the hand_end events and the final state of the hand they were in.
+     */
     private function pkFlush(): void {
         foreach ($this->tables as $tid => $T) {
             if (!$T['dirty'] && !$T['events']) { continue; }
@@ -886,6 +892,7 @@ final class GTServer {
             foreach ($T['t']['players'] as $p) {
                 if (empty($p['bot'])) { foreach (array_keys($this->byUid[$p['uid']] ?? []) as $cid) { $viewers[$cid] = true; } }
             }
+            foreach (array_keys($T['farewell']) as $uid) { foreach (array_keys($this->byUid[$uid] ?? []) as $cid) { $viewers[$cid] = true; } }
             $evFrame = $T['events'] ? $this->frame((string)json_encode(['t' => 'pk_events', 'table' => $tid, 'events' => array_values($T['events'])], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)) : null;
             $views = [];
             foreach (array_keys($viewers) as $cid) {
@@ -898,7 +905,7 @@ final class GTServer {
                 }
                 $this->raw($c, $views[$c->uid]);
             }
-            if (isset($this->tables[$tid])) { $this->tables[$tid]['dirty'] = false; $this->tables[$tid]['events'] = []; }
+            if (isset($this->tables[$tid])) { $this->tables[$tid]['dirty'] = false; $this->tables[$tid]['events'] = []; $this->tables[$tid]['farewell'] = []; }
         }
     }
 
@@ -1055,6 +1062,7 @@ final class GTServer {
         $this->tablesDirty = true;
         if ($r < 0) { ws_log("leaving $uid table $tid seat {$s['seat']} after this hand ($why)"); return; }
         unset($this->seatOf[$uid]);
+        $T['farewell'][$uid] = true;
         $bal = $this->pkCashOut($s['pid'], $r, "cash-out {$T['t']['name']} #$tid" . ($why !== 'cash-out' ? " ($why)" : ''));
         $this->sendUid($uid, ['t' => 'bal', 'balance' => $bal]);
         ws_log("stand $uid table $tid seat {$s['seat']} +$r GC ($why), balance $bal");
@@ -1088,7 +1096,7 @@ final class GTServer {
         $handNo = (int)($rec['hand_no'] ?? $t['hand_no']);
         $leavers = is_array($ev['leavers'] ?? null) ? $ev['leavers'] : [];   // seat => stack, bots included (they get nothing)
         $real = [];                                                          // seat => [uid, pid]: this table's real players, mid-hand leavers included
-        foreach ($this->seatOf as $uid => $s) { if ($s['tid'] === $tid) { $real[$s['seat']] = ['uid' => $uid, 'pid' => (int)$s['pid']]; } }
+        foreach ($this->seatOf as $uid => $s) { if ($s['tid'] === $tid) { $real[$s['seat']] = ['uid' => $uid, 'pid' => (int)$s['pid']]; $T['farewell'][$uid] = true; } }
         $players = [];                                                       // the record's real players by seat
         foreach ((array)($rec['players'] ?? []) as $p) {
             if (!is_array($p) || !empty($p['bot']) || !isset($p['seat'])) { continue; }

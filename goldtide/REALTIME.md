@@ -92,7 +92,7 @@ Close codes: a message over 8 KB closes the connection with 1009, a binary frame
 | `pong` | |
 | `pk_tables` | `tables` (same summaries as in `welcome`), sent when occupancy changes |
 | `pk_state` | `table`: the `pk_view()` output for this viewer, sent on watch/join and after every event batch (authoritative, replaces client state). `players` is keyed by seat: JSON carries it as an array when seats `0..n-1` are exactly the occupied ones and as an object (`{"1": …, "3": …}`) otherwise, so clients index it by seat number either way and never assume a dense list |
-| `pk_events` | `table` (id), `events`: list of engine events since the last state, for animation. Always followed by a `pk_state` in the same tick |
+| `pk_events` | `table` (id), `events`: list of engine events since the last state, for animation. Always followed by a `pk_state` in the same tick. A player whose seat the engine just removed (paid at `hand_end`, busted, or cashed out at once) is still a viewer for that tick: they get the `hand_end` events and one closing `pk_state` (`me` null, seat gone) of the hand they were in |
 | `pk_err` | `msg` |
 
 Connections that send nothing (not even a `ping` or a pong) for 40 s are closed with 1001; the server sends a WebSocket ping at half that interval (browsers answer automatically). A socket that has not sent `hello` within 5 s of connecting is closed with 1008. `--idle` changes the 40 s.
