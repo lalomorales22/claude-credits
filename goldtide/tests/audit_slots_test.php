@@ -199,6 +199,21 @@ $balBefore = bal($pid);
 $p = t_play($pid, 'blacksite', ['move' => 'pick', 'tiles' => '[0,1,2]']);
 t_check('pick cap: 3,000× of bonus with 100 GC of room pays 100 and flags capped; total is exactly 5,000× bet', $p['bonus']['win'] === 100 && $p['bonus']['x'] === 3000 && $p['capped'] === true && $p['payout'] === VS_MAX_WIN * 50 && $p['balance'] === $balBefore + VS_MAX_WIN * 50 && str_starts_with($p['message'], 'MAX WIN'));
 
+/* ── 7b. staff void of a pending pick pays the stake AND the parked base/free-spin win; a plain active round refunds just the stake ── */
+$r = tx(fn() => round_open($pid, 'coderain', 60, ['grid' => [], 'x' => 0, 'capped' => false, 'fs' => null, 'spin' => 1234, 'bonus' => ['type' => 'pick', 'name' => 'Mainframe Hack', 'board' => array_fill(0, 12, 2), 'pending' => true]]));
+$balBefore = bal($pid); $ledgerBefore = (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$pid]);
+$v = tx(fn() => round_void($r));
+t_check('void of a pending pick: rounds.payout = bet + parked win, status void, balance up by 60 + 1,234 in two admin ledger rows', $v['status'] === 'void' && $v['outcome'] === 'void' && (int)$v['payout'] === 60 + 1234 && bal($pid) === $balBefore + 60 + 1234
+    && (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$pid]) === $ledgerBefore + 2 && (int)val("SELECT COUNT(*) FROM ledger WHERE player_id = ? AND kind = 'admin' AND amount = 1234", [$pid]) === 1);
+t_check('voided round is skipped by round_last and round_active, so the panel does not resume it', !round_active($pid, 'coderain') && (round_last($pid, 'coderain')['id'] ?? 0) !== (int)$r['id']);
+try { t_play($pid, 'coderain', ['move' => 'pick', 'tiles' => '[0,1,2]']); t_check('pick after a void is refused', false); }
+catch (DomainException $e) { t_check('pick after a void is refused', $e->getMessage() === 'No bonus in progress.', $e->getMessage()); }
+$r = tx(fn() => round_open($pid, 'dice', 25, ['n' => 3])); $balBefore = bal($pid);
+$v = tx(fn() => round_void($r));
+t_check('void of an ordinary active round (no parked win) refunds exactly the stake', (int)$v['payout'] === 25 && bal($pid) === $balBefore + 25);
+t_check('admin save routes an active→void rounds edit through round_void()', str_contains($php, "\$data['status'] === 'void') { round_void(\$existing); }"));
+t_check('bet-adjust JS: the max button snaps to the largest bet on the step', str_contains($php, 'Math.floor(max / step) * step') && str_contains($php, 'min, max: top }'));
+
 /* ── 8. min bet and step: 10 and 49 are refused with the real limits, 55 with the step, 50 and 60 play ── */
 foreach ([10 => 'limits', 49 => 'limits', 55 => 'step', 50 => 'ok', 60 => 'ok'] as $b => $want) {
     $c = t_child($dir, $pid, 'calavera', ['bet' => (string)$b]);

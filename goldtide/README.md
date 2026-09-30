@@ -86,7 +86,7 @@ Every paytable was checked with exact math or a 200k-hand simulation. The formul
 **For the house (`?action=admin`)**
 - Dashboard: players, active users, coins in play, today's wagers and hold, actual RTP per game over the last 7 days
 - Full CRUD on every table (players, games, game rounds, promo codes, redemptions, ledger, blackjack hands, settings, admins, lockouts), with search, filters, sorting, pagination, bulk actions, and CSV export
-- Changing a player's balance writes an `admin` row to the coin ledger. Voiding a stuck round (any game) refunds its stake.
+- Changing a player's balance writes an `admin` row to the coin ledger. Voiding a stuck round (any game) refunds its stake, plus any win the round had already banked but not credited (a video slot waiting on its bonus picks holds its base and free-spin win until the pick settles).
 - Turn any game on or off, rename it, or change its min/max bet under **Games**. Disabled games vanish from the lobby.
 - Append-only audit log of every admin action, enforced by database triggers
 - Site settings for brand name, tagline, partner name ("Presented with ___"), announcement banner, starting coins, bonus amounts, minimum age, and opening/closing signups

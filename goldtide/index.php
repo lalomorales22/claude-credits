@@ -850,6 +850,15 @@ function round_close(array $r, array $state, int $payout, string $outcome): arra
         [$outcome, $payout, json_encode($state), $r['id']]);
     return row('SELECT * FROM rounds WHERE id = ?', [$r['id']]);
 }
+/** Inside tx(): staff void of an active round. Refunds the stake, plus any win the round had already banked but not yet credited
+ *  (a video slot waiting on its bonus picks keeps its base + free-spin win in state.spin until the pick settles), so a void never forfeits it. */
+function round_void(array $r): array {
+    $pid = (int)$r['player_id']; $id = (int)$r['id']; $bet = (int)$r['bet']; $parked = max(0, (int)(st($r)['spin'] ?? 0));
+    move_coins($pid, $bet, 'admin', $r['game'], 'voided round #' . $id . ' refund');
+    if ($parked > 0) { move_coins($pid, $parked, 'admin', $r['game'], 'voided round #' . $id . ' win banked before the bonus pick'); }
+    q("UPDATE rounds SET status = 'void', outcome = 'void', payout = ?, updated_at = datetime('now') WHERE id = ?", [$bet + $parked, $id]);
+    return row('SELECT * FROM rounds WHERE id = ?', [$id]);
+}
 /** A game that's decided in one request: wager, settle, done. */
 function round_oneshot(int $pid, string $game, int $bet, int $payout, string $outcome, array $state): array {
     return round_close(round_open($pid, $game, $bet, $state), $state, $payout, $outcome);
@@ -2482,7 +2491,7 @@ function entities(): array {
                 'player_id' => ['type' => 'fk', 'ref' => 'players', 'label_col' => 'username', 'required' => true],
                 'game' => ['type' => 'text', 'required' => true, 'max' => 20],
                 'bet' => ['type' => 'int', 'min' => 1, 'required' => true, 'hint' => 'Total staked this round'],
-                'status' => ['type' => 'enum', 'options' => ['active', 'done', 'void'], 'default' => 'done', 'hint' => 'Setting an active round to void refunds its stake'],
+                'status' => ['type' => 'enum', 'options' => ['active', 'done', 'void'], 'default' => 'done', 'hint' => 'Setting an active round to void refunds its stake, plus any win it had already banked (a slot bonus waiting on its picks)'],
                 'outcome' => ['type' => 'text', 'max' => 30],
                 'payout' => ['type' => 'int', 'min' => 0, 'default' => 0],
                 'state' => ['type' => 'json', 'default' => '{}'],
@@ -2723,10 +2732,7 @@ function do_admin_save(array $admin): void {
                     q('INSERT INTO ledger (player_id, kind, amount, balance_after, detail) VALUES (?,?,?,?,?)',
                         [$id, 'admin', $delta, $data['balance'], 'adjusted by ' . $admin['username']]);
                 }
-                if ($t === 'rounds' && $existing['status'] === 'active' && $data['status'] === 'void') {
-                    move_coins((int)$existing['player_id'], (int)$existing['bet'], 'admin', $existing['game'], 'voided round #' . $id . ' refund');
-                    q("UPDATE rounds SET outcome = 'void', payout = bet WHERE id = ?", [$id]);
-                }
+                if ($t === 'rounds' && $existing['status'] === 'active' && $data['status'] === 'void') { round_void($existing); }
                 if ($t === 'bj_hands' && $existing['status'] === 'active' && $data['status'] === 'void') {
                     move_coins((int)$existing['player_id'], (int)$existing['bet'], 'admin', 'blackjack', 'voided hand #' . $id . ' refund');
                     q("UPDATE bj_hands SET outcome = 'void', payout = bet WHERE id = ?", [$id]);
@@ -7137,8 +7143,9 @@ document.addEventListener('click', e => {
   if (!b) return;
   const inp = b.closest('.betbox').querySelector('input');
   const min = +inp.min, max = +inp.max, step = +inp.step || 1, v = +inp.value || min;
-  const want = { half: Math.floor(v / 2), double: v * 2, min, max }[b.dataset.adj];
-  inp.value = Math.max(min, Math.min(max, Math.round(want / step) * step)); // respect the input's step (the video slots bet in 10s)
+  const top = Math.max(min, Math.floor(max / step) * step); // the largest bet on the step: a staff max of 5,005 must not fill a bet the server refuses
+  const want = { half: Math.floor(v / 2), double: v * 2, min, max: top }[b.dataset.adj];
+  inp.value = Math.max(min, Math.min(top, Math.round(want / step) * step)); // respect the input's step (the video slots bet in 10s)
 });
 
 /* ── chip board: shared by sic bo, big six, crabs, baccarat ── */
