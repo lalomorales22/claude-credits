@@ -1,3 +1,6 @@
 data/
 admin_password.txt
 .htaccess
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
