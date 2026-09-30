@@ -124,8 +124,10 @@ $o = child('admin_save', ['post' => form_post('rounds', $r, ['status' => 'void']
 check('admin void refunds exactly the 100 still live (balance back to 10,000)', bal_of($p) === 10000, flash_of($o) . ' bal=' . bal_of($p));
 $r = rrow((int)$r['id']);
 check('voided round records payout = 5,000 taken down + 100 refunded', $r['status'] === 'void' && $r['outcome'] === 'void' && (int)$r['payout'] === 5100, json_encode([$r['status'], $r['outcome'], $r['payout']]));
-$l = ledger($p, 'admin', 'voided round #%');
-check('one admin ledger row, +100', count($l) === 1 && (int)$l[0]['amount'] === 100);
+$l = ledger($p, 'wager', 'voided round #%');
+check('one wager-reversal ledger row, +100 (not an admin gift)', count($l) === 1 && (int)$l[0]['amount'] === 100 && count(ledger($p, 'admin', 'voided%')) === 0);
+$net = -(int)val("SELECT COALESCE(SUM(amount),0) FROM ledger WHERE player_id = ? AND kind = 'wager'", [$p]);
+check('voided round drops out of "Wagered today": player\'s wager rows net to 0', $net === 0, "net=$net");
 
 $p = mk_player('void_b', 10000);
 $r = seed_craps($p, 600, ['pass' => 100], 9, 1000);   // pass 100 + field 500; the field hit paid 1,000 and left
@@ -143,7 +145,7 @@ $o = child('admin_save', ['post' => form_post('rounds', $r, ['status' => 'void']
 check('first void refunds the stake', str_contains(flash_of($o), 'ok:') && bal_of($p) === 10000, flash_of($o));
 $r = rrow((int)$r['id']);
 $o = child('admin_save', ['post' => form_post('rounds', $r, ['status' => 'void'])]);
-check('saving a void round as void again moves no coins', bal_of($p) === 10000 && count(ledger($p, 'admin')) === 1, flash_of($o) . ' bal=' . bal_of($p));
+check('saving a void round as void again moves no coins', bal_of($p) === 10000 && count(ledger($p, 'wager', 'voided%')) === 1, flash_of($o) . ' bal=' . bal_of($p));
 $r = rrow((int)$r['id']);
 $o = child('admin_save', ['post' => form_post('rounds', $r, ['status' => 'active'])]);
 check('void → active is refused', str_contains(flash_of($o), "can't be reopened") && rrow((int)$r['id'])['status'] === 'void', flash_of($o));

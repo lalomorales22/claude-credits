@@ -2738,13 +2738,15 @@ function do_admin_save(array $admin): void {
                         [$id, 'admin', $delta, $data['balance'], 'adjusted by ' . $admin['username']]);
                 }
                 if ($t === 'rounds' && $existing['status'] === 'active' && $data['status'] === 'void') {
-                    // hand back only what is still on the table: chips already paid or taken down stayed with the player
+                    // hand back only what is still on the table: chips already paid or taken down stayed with the player.
+                    // Logged as a reversal of the wager (positive 'wager' row, same as a craps take-down) so voided chips
+                    // fall out of "Wagered today" / hold / RTP instead of counting as an admin gift on top of a wager.
                     $refund = round_at_risk($existing); $paid = (int)(st($existing)['paid'] ?? 0);
-                    if ($refund > 0) { move_coins((int)$existing['player_id'], $refund, 'admin', $existing['game'], 'voided round #' . $id . ' refund'); }
+                    if ($refund > 0) { move_coins((int)$existing['player_id'], $refund, 'wager', $existing['game'], 'voided round #' . $id . ' refund'); }
                     q("UPDATE rounds SET outcome = 'void', payout = ? WHERE id = ?", [$paid + $refund, $id]);
                 }
                 if ($t === 'bj_hands' && $existing['status'] === 'active' && $data['status'] === 'void') {
-                    move_coins((int)$existing['player_id'], (int)$existing['bet'], 'admin', 'blackjack', 'voided hand #' . $id . ' refund');
+                    move_coins((int)$existing['player_id'], (int)$existing['bet'], 'wager', 'blackjack', 'voided hand #' . $id . ' refund');
                     q("UPDATE bj_hands SET outcome = 'void', payout = bet WHERE id = ?", [$id]);
                 }
                 $after = row("SELECT * FROM $t WHERE id = ?", [$id]);
