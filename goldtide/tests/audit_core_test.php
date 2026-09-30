@@ -208,7 +208,7 @@ q('DELETE FROM login_attempts');
 /* ═════════ 4. refill counts chips on the table ═════════ */
 echo "── refill gate ──\n";
 $p = mk_player('refill_a', 10000);
-$o = child('engine', ['pid' => $p, 'game' => 'craps', 'post' => ['bets' => $bets(['place6' => 5000, 'place8' => 4600])]]);
+$o = child('engine', ['pid' => $p, 'game' => 'craps', 'post' => ['bets' => $bets(['place6' => 4800, 'place8' => 4800])]]);
 check('park 9,600 of place chips (off on the come-out), balance 400', $o['ok'] && bal_of($p) === 400, err($o) . ' bal=' . bal_of($p));
 check('refill_status: not low with 9,600 on the table', refill_status(prow($p))['low'] === false && coins_in_play($p) === 9600);
 $o = child('refill', ['pid' => $p]);

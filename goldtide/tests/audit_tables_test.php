@@ -541,45 +541,7 @@ if ($run('craps')) {
     $rej = probe('craps_act', ['bets' => json_encode([['key' => 'place6', 'amount' => 10]])]);
     yes(($rej['ok'] ?? true) === false && str_contains($rej['error'] ?? '', 'multiples of 6'), 'HTTP: place 6 at 10 GC rejected: ' . ($rej['error'] ?? '?'));
     // betting units: the unit is the denominator of the odds, so the stake × odds is always whole
-    $u = fn(string $k, int $pt = 0) => craps_unit($k, $pt);
-    eq([$u('place6'), $u('place8'), $u('place5'), $u('place4'), $u('buy5'), $u('buy6'), $u('buy4'), $u('lay4'), $u('lay9'), $u('lay8')], [6, 6, 5, 5, 20, 20, 20, 40, 30, 24], 'place/buy/lay units');
-    eq([$u('passodds', 5), $u('passodds', 6), $u('passodds', 4), $u('dpodds', 4), $u('dpodds', 9), $u('dpodds', 8), $u('comeodds9'), $u('dcomeodds6'), $u('horn'), $u('ce'), $u('pass'), $u('field')], [2, 5, 1, 2, 3, 6, 2, 6, 4, 2, 1, 1], 'odds/lay-odds/prop units');
-    $st = ['point' => 5, 'bets' => ['pass' => 10, 'dontpass' => 10, 'come6' => 10, 'dcome6' => 10]];
-    throws(fn() => craps_check_add($st, 'place6', 10, $g), 'multiples of 6', 'place 6 at 10 refused');
-    throws(fn() => craps_check_add($st, 'place8', 25, $g), 'multiples of 6', 'place 8 at 25 refused');
-    throws(fn() => craps_check_add($st, 'place9', 12, $g), 'multiples of 5', 'place 9 at 12 refused');
-    throws(fn() => craps_check_add($st, 'passodds', 25, $g), 'multiples of 2', 'pass odds on 5 at 25 refused');
-    throws(fn() => craps_check_add($st, 'dpodds', 10, $g), 'multiples of 3', 'lay odds on 5 at 10 refused');
-    throws(fn() => craps_check_add($st, 'comeodds6', 12, $g), 'multiples of 5', 'come odds on 6 at 12 refused');
-    throws(fn() => craps_check_add($st, 'buy6', 12, $g), 'multiples of 20', 'buy 6 at 12 refused');
-    throws(fn() => craps_check_add($st, 'buy4', 25, $g), 'multiples of 20', 'buy 4 at 25 refused');
-    throws(fn() => craps_check_add($st, 'lay9', 10, $g), 'multiples of 30', 'lay 9 at 10 refused');
-    throws(fn() => craps_check_add($st, 'lay4', 20, $g), 'multiples of 40', 'lay 4 at 20 refused');
-    throws(fn() => craps_check_add($st, 'lay8', 12, $g), 'multiples of 24', 'lay 8 at 12 refused');
-    throws(fn() => craps_check_add($st, 'horn', 10, $g), 'multiple of 4', 'horn keeps its own message');
-    $fine = true;
-    foreach ([['place6', 12], ['place8', 30], ['place4', 10], ['place5', 25], ['passodds', 40], ['dpodds', 60], ['comeodds6', 50], ['buy6', 20], ['buy4', 40], ['lay4', 40], ['lay9', 30], ['lay8', 24], ['dcomeodds6', 12], ['field', 10], ['hard6', 10]] as [$k, $a]) {
-        try { craps_check_add($st, $k, $a, $g); } catch (DomainException $e) { $fine = false; yes(false, "$k at $a should be fine: " . $e->getMessage()); }
-    }
-    yes($fine, 'unit-sized stakes on every fractional spot are accepted');
-    // exact payout math (no flooring): 7:6 on 12 = 14, 9:5 on 10 = 18, 7:5 on 10 = 14, 3:2 on 20 = 30, 6:5 on 25 = 30, 5:6 on 12 = 10, 2:3 on 9 = 6, 1:2 on 10 = 5
-    eq([craps_ratio(12, 7, 6), craps_ratio(10, 9, 5), craps_ratio(10, 7, 5), craps_ratio(20, 3, 2), craps_ratio(25, 6, 5), craps_ratio(12, 5, 6), craps_ratio(9, 2, 3), craps_ratio(10, 1, 2)], [14, 18, 14, 30, 30, 10, 6, 5], 'unit stakes pay exactly');
-    eq([craps_ratio(10, 7, 6), craps_ratio(25, 3, 2), craps_ratio(10, 2, 3)], [12, 38, 7], 'a legacy off-unit stake rounds to the nearest coin, half up (11.67 → 12, 37.5 → 38, 6.67 → 7), never floored');
-    eq([craps_vig(20), craps_vig(30), craps_vig(12), craps_vig(10), craps_vig(50), craps_vig(70)], [1, 2, 1, 1, 3, 4], '5% vig: nearest coin half up, at least 1 (1.5 → 2, 2.5 → 3, 3.5 → 4)');
-    // exact returns at the unit (P(number before 7): 4/10 1/3, 5/9 2/5, 6/8 5/11): place 6 at 12 → 98.48%, buy/lay 4 → 98.33%, 5 → 98.0%, 6 → 97.73%
-    near((5 * (12 + craps_ratio(12, 7, 6))) / 11 / 12, 0.9848, 0.0001, 'place 6 at its unit returns 98.48%');
-    $buy = fn(int $n, float $p) => $p * (20 + craps_ratio(20, CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]) - craps_vig(20)) / 20;   // vig on the 20 GC stake
-    $lay = function (int $n, float $p) { $a = craps_unit("lay$n", 0); $w = craps_ratio($a, CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]); return (1 - $p) * ($a + $w - craps_vig($w)) / $a; };
-    near($buy(4, 1 / 3), 0.98333, 0.0001, 'buy 4 at 20 GC (vig 1 on the bet) returns 98.33%');
-    near($buy(5, 2 / 5), 0.98, 0.0001, 'buy 5 at 20 GC returns 98.0%');
-    near($buy(6, 5 / 11), 0.97727, 0.0001, 'buy 6 at 20 GC returns 97.73%');
-    near($lay(4, 1 / 3), 0.98333, 0.0001, 'lay 4 at 40 GC (vig 1 on 20 won) returns 98.33%');
-    near($lay(9, 2 / 5), 0.98, 0.0001, 'lay 9 at 30 GC returns 98.0%');
-    near($lay(8, 5 / 11), 0.97727, 0.0001, 'lay 8 at 24 GC returns 97.73%');
-    near(2 / 5 * (10 + craps_ratio(10, 7, 5)) / 10, 0.96, 0.0001, 'place 5 at 10 returns 96.0%');
-    near(1 / 3 * (10 + craps_ratio(10, 9, 5)) / 10, 0.93333, 0.0001, 'place 4 at 10 returns 93.33%');
-    $rules = implode(' ', GAME_RULES['craps']);
-    yes(str_contains($rules, 'multiples of 6 GC') && str_contains($rules, 'multiples of 20') && str_contains($rules, 'Buy and Lay 4/10 98.3%'), 'craps rules text states the units, the commission and the returns');
+    // craps betting units, vig rounding and the rules copy are covered by tests/audit_arcade3d_test.php (the craps owner).
     // a real round through the engine: unit stakes are accepted and the ledger reconciles
     $_POST = ['bets' => json_encode([['key' => 'pass', 'amount' => 10], ['key' => 'field', 'amount' => 10]])];
     $b0 = balance(); $r = craps_act();

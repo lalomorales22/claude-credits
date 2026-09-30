@@ -203,8 +203,8 @@ t_check('pick cap: 3,000× of bonus with 100 GC of room pays 100 and flags cappe
 $r = tx(fn() => round_open($pid, 'coderain', 60, ['grid' => [], 'x' => 0, 'capped' => false, 'fs' => null, 'spin' => 1234, 'bonus' => ['type' => 'pick', 'name' => 'Mainframe Hack', 'board' => array_fill(0, 12, 2), 'pending' => true]]));
 $balBefore = bal($pid); $ledgerBefore = (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$pid]);
 $v = tx(fn() => round_void($r));
-t_check('void of a pending pick: rounds.payout = bet + parked win, status void, balance up by 60 + 1,234 in two admin ledger rows', $v['status'] === 'void' && $v['outcome'] === 'void' && (int)$v['payout'] === 60 + 1234 && bal($pid) === $balBefore + 60 + 1234
-    && (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$pid]) === $ledgerBefore + 2 && (int)val("SELECT COUNT(*) FROM ledger WHERE player_id = ? AND kind = 'admin' AND amount = 1234", [$pid]) === 1);
+t_check('void of a pending pick: rounds.payout = bet + parked win, status void, balance up by 60 + 1,234 in two ledger rows (stake back as a wager reversal, parked win as a payout)', $v['status'] === 'void' && $v['outcome'] === 'void' && (int)$v['payout'] === 60 + 1234 && bal($pid) === $balBefore + 60 + 1234
+    && (int)val('SELECT COUNT(*) FROM ledger WHERE player_id = ?', [$pid]) === $ledgerBefore + 2 && (int)val("SELECT COUNT(*) FROM ledger WHERE player_id = ? AND kind = 'payout' AND amount = 1234", [$pid]) === 1);
 t_check('voided round is skipped by round_last and round_active, so the panel does not resume it', !round_active($pid, 'coderain') && (round_last($pid, 'coderain')['id'] ?? 0) !== (int)$r['id']);
 try { t_play($pid, 'coderain', ['move' => 'pick', 'tiles' => '[0,1,2]']); t_check('pick after a void is refused', false); }
 catch (DomainException $e) { t_check('pick after a void is refused', $e->getMessage() === 'No bonus in progress.', $e->getMessage()); }

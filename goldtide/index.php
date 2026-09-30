@@ -1046,11 +1046,11 @@ function parse_bets(array $g, callable $valid): array {
     $bets = is_string($raw) && $raw !== '' ? json_decode($raw, true)
         : [['key' => $_POST['bet_key'] ?? '', 'amount' => $_POST['amount'] ?? '']];
     if (!is_array($bets) || !$bets) { fail('Put some chips down first.'); }
-    if (count($bets) > 40) { fail('Max 40 spots per round.'); }
+    if (count($bets) > 60) { fail('Max 60 spots per round.'); }   // sic bo has 50 spots
     $clean = [];
     foreach ($bets as $b) {
         $key = is_array($b) && is_string($b['key'] ?? null) ? $b['key'] : '';
-        if (!preg_match('/^(?:[a-z][a-z0-9_]*|0|[1-9]\d*)(?::(?:0|[1-9]\d*))?\z/', $key) || !$valid($key)) { fail('That bet isn\'t on this table.'); }
+        if (!preg_match('/^(?:[a-z][a-z0-9_]*|0|[1-9]\d*)(?::(?:0|[1-9]\d*(?:-[1-9]\d*)?))?\z/', $key) || !$valid($key)) { fail('That bet isn\'t on this table.'); }
         $clean[$key] = ($clean[$key] ?? 0) + chip_amount($b['amount'] ?? '');
     }
     return [$clean, cap_spots($g, $clean, 'round')];
