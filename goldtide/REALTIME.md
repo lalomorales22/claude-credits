@@ -18,9 +18,18 @@ Everything below is normative. If an implementation needs to deviate, change thi
 PHP_CLI_SERVER_WORKERS=8 php -S 0.0.0.0:8000 index.php   # the site
 php ws.php                                                # the realtime server, port 8081 by default
 php ws.php --port 9000 --bind 127.0.0.1                   # options
+php ws.php --help                                         # --port --bind --tick (ms) --idle (s) --away (s) --max (clients) --verbose
+php tests/ws_test.php                                     # end-to-end tests: start their own ws.php on 8300-8399 against a scratch database
 ```
 
 `ws.php` includes `index.php` with `GT_NO_ROUTE` defined, so it shares the database, `tx()`, `move_coins()`, settings and the poker engine. It never touches the PHP session.
+
+- `GET /health` on the socket port (a plain HTTP request without `Upgrade`) answers `{ "ok": true, "online": n, "tables": [{ "id", "seated", "hand_no" }] }` for monitoring.
+- Logs go to stdout and to `data/ws.log` (rotated to `ws.log.1` above 5 MB); `--verbose` adds one line per connection event, action and hand.
+- The timers can be shortened with `--idle` / `--away` or the environment variables `GT_WS_IDLE` / `GT_WS_AWAY` (the tests do). Settings such as `rt_origins` and `poker_action_seconds` are read once at start-up: restart `ws.php` after changing them.
+- Without an engine (no `pk_*` functions in `index.php`) the server hosts the floor only and answers every `pk_*` message with `pk_err`. `GT_PK_STUB=1` loads `tests/pk_stub.php`, a fake engine for the test-suite only; the server logs a loud warning when it is active.
+- SIGINT / SIGTERM close every socket with 1001, refund every `poker_seats` row and exit 0.
+- One `ws.php` per database: it holds an exclusive lock on `data/ws.lock` for as long as it runs. A second copy (double launch, restart overlap, two servers pointed at one database) logs `Another ws.php already owns …` and exits 1 before it has touched the ledger.
 
 Client auto-discovery of the socket URL, in order:
 1. the `ws_url` setting if it is not blank (e.g. `wss://casino.example.com/ws` behind a Cloudflare tunnel or nginx),
@@ -44,7 +53,9 @@ Guests (not logged in) get a guest ticket: they can walk the floor and chat, but
 
 ## Wire protocol
 
-JSON text frames, one message per frame, `t` is the type. Unknown types are ignored. Any malformed frame or a frame over 8 KB closes the connection (code 1008). Numbers are integers unless stated.
+JSON text frames, one message per frame (continuation frames are reassembled), `t` is the type. Unknown types are ignored. Numbers are integers unless stated.
+
+Close codes: a message over 8 KB closes the connection with 1009, a binary frame with 1003, an unmasked or otherwise protocol-violating frame with 1002. A text frame that is not valid UTF-8 JSON with a string `t` is answered with `err` and counts as a strike; the third strike closes with 1008. Anything sent before `hello`, a bad or reused ticket and an unknown room close with 1008; idle sockets and a server shutdown close with 1001; an internal error while handling a client closes that client with 1011.
 
 ### Client → server
 
@@ -52,14 +63,14 @@ JSON text frames, one message per frame, `t` is the type. Unknown types are igno
 |---|---|---|
 | `hello` | `ticket`, `room` (`"floor"` or `"poker"`) | must be the first message, within 5 s of connecting |
 | `pos` | `x`, `z`, `ry`, `a` | floats; `ry` yaw radians; `a` animation: `0` idle, `1` walk, `2` run, `3` sit. Server ignores more than 15/s and clamps to the floor bounds ±60 |
-| `seat` | `st` (station id string, ≤ 32 chars) or `null` | announce sitting at / leaving a station on the floor; purely cosmetic for others |
+| `seat` | `st` (station id string, ≤ 32 chars) or `null` | announce sitting at / leaving a station on the floor; purely cosmetic for others. A repeat of the current station is ignored, and more than 4 changes a second are dropped (each one is relayed to the whole floor) |
 | `chat` | `text` (≤ 140 chars) | rate limit 1 per 1.5 s, 10 per minute, else dropped with `err` |
 | `pk_watch` | `table` (int) | receive `pk_state` for a table without sitting; also subscribes to its events |
 | `pk_unwatch` | `table` | |
 | `pk_join` | `table`, `seat` (0-based), `buyin` | buy-in must be within the table's min/max and ≤ balance. Coins move in a `tx()` before the seat is granted |
 | `pk_addon` | `amount` | top up between hands, up to `max_buyin` total stack |
 | `pk_leave` | | cash out, coins return to balance (after the current hand if in one: the player is folded/marked leaving and paid when the hand ends) |
-| `pk_sitout` | `on` (bool) | |
+| `pk_sitout` | `on` (bool) | a repeat of the current state is a no-op; more than 2 real toggles a second → `pk_err` (each one costs every viewer a `pk_events` + `pk_state`) |
 | `pk_post` | `on` (bool) | post a big blind to be dealt into the next hand instead of waiting for the big blind; only matters while the seat `owes` one |
 | `pk_act` | `act` (`fold`,`check`,`call`,`raise`,`allin`), `amt` (raise TO total, only for `raise`), `hand`, `seq` | `hand` and `seq` must match the current hand number and action sequence, else `pk_err` and no-op (protects against double clicks and stale UIs) |
 | `ping` | | server replies `pong` |
@@ -68,7 +79,7 @@ JSON text frames, one message per frame, `t` is the type. Unknown types are igno
 
 | t | fields |
 |---|---|
-| `welcome` | `id` (your connection id), `uid`, `name`, `guest` (bool), `players` (array of `[id, uid, name, x, z, ry, a, st]`), `tables` (poker table summaries: `id, name, seats, sb, bb, min_buy, max_buy, seated, playing`), `online` (int) |
+| `welcome` | `id` (your connection id), `uid`, `name`, `guest` (bool), `players` (array of `[id, uid, name, x, z, ry, a, st]`; empty in the `poker` room), `tables` (poker table summaries: `id, name, seats, sb, bb, min_buy, max_buy, seated, playing`; `seated` counts house players, `playing` is a bool), `online` (distinct people, both rooms). A connection whose uid already holds a poker seat (a reconnect inside the away window, or a second tab) also gets a `pk_state` for that table right after `welcome` |
 | `join` | `p`: `[id, uid, name, x, z, ry, a, st]` |
 | `leave` | `id` |
 | `snap` | `ps`: array of `[id, x, z, ry, a]` for everyone who moved since the last snapshot, 10 per second |
@@ -83,7 +94,7 @@ JSON text frames, one message per frame, `t` is the type. Unknown types are igno
 | `pk_events` | `table` (id), `events`: list of engine events since the last state, for animation. Always followed by a `pk_state` in the same tick |
 | `pk_err` | `msg` |
 
-Connections that send nothing (not even `ping`) for 40 s are closed. The server pings every 20 s.
+Connections that send nothing (not even a `ping` or a pong) for 40 s are closed with 1001; the server sends a WebSocket ping at half that interval (browsers answer automatically). A socket that has not sent `hello` within 5 s of connecting is closed with 1008. `--idle` changes the 40 s.
 
 ## The floor (3D) and stations
 
@@ -119,6 +130,7 @@ Tests: `php goldtide/tests/poker_test.php` (no framework, exit 0 = green, ~5 s):
   'seq' => 0,                         // increments on every accepted action; clients echo it in pk_act
   'actions' => [],                    // [['street' => 'preflop', 'seat' => 0, 'act' => 'raise', 'amt' => 60, 'at' => 1712345678.1], ...]
   'winners' => [],                    // at settle: [['seat' => 2, 'amount' => 300, 'hand' => 'Two Pair, Kings and Nines', 'cards' => ['Kh','9d']]]
+                                      // (engine state; pk_view() blanks 'cards' for a seat that did not show, see below)
   'started_at' => null, 'next_at' => null, 'bot_at' => null,
   'log' => [],                        // last 30 human-readable lines
   // private bookkeeping, never serialised by pk_view(): sb_seat, bb_seat, dpos (next deck position), hand_chips (chips dealt in, for the
@@ -218,6 +230,8 @@ pk_view(array $t, ?string $uid): array
     // deck_hash, winners (cards only for seats that show), log (last 30), players (seat => uid, name, bot, stack, bet, total, in, allin,
     // sitout, away, leaving, show, owes, post, last, cards, hand), me (viewer's seat or null), legal (pk_legal() for the viewer in turn, else null).
     // Clients show owes as "waiting for the big blind" with a "post to play" control that sends pk_post.
+    // That rule covers winners[].cards as much as players[].cards: a pot taken because everyone else folded is won without
+    // showing, so its winner's cards are null for everyone but the winner (the hand record keeps them).
 
 pk_bot_act(array $t, int $seat): array   // ['act' => 'raise', 'amt' => 60]
     // Rule-based: preflop chart by hand class and position, postflop by made-hand strength + draws + pot odds, an occasional bluff.
@@ -258,9 +272,10 @@ Before any card is dealt the server publishes `deck_hash = sha256(deck_in_deal_o
 
 ## Persistence (`ws.php`)
 
-- `poker_tables`: configuration, editable in the back office. Loaded at startup and re-read every 30 s; blind changes apply at the next hand.
+- `poker_tables`: configuration, editable in the back office. Loaded at startup and re-read every 30 s: a new enabled table is hosted, a disabled or deleted one cashes everyone out (after the current hand) and disappears, name / blind / buy-in / seat / bot changes apply when the table is next idle.
+- House players want company: at a table where nobody real is seated or watching (`pk_watch`) the bots sit out between hands, so an empty room burns no CPU and writes no bot-only hand histories; they sit back in as soon as someone sits down or watches.
 - `poker_seats`: one row per real seated player (unique on player_id). Written when a player sits (in the same `tx()` as the buy-in `move_coins(pid, -buyin, 'wager', 'poker', ...)`), updated with the end-of-hand stack after every hand, deleted on cash-out (`move_coins(pid, +stack, 'payout', 'poker', ...)`).
-- On startup `ws.php` refunds every row still in `poker_seats` to the players' balances ("table reset") and deletes the rows, so a crash can never eat chips: the worst case is that the interrupted hand is void.
+- On startup `ws.php` refunds every row still in `poker_seats` to the players' balances ("table reset") and deletes the rows, so a crash can never eat chips: the worst case is that the interrupted hand is void. Only the process that owns the database does this: `ws.php` first takes the exclusive lock on `data/ws.lock` and binds its listening socket, and touches the ledger only after both succeeded. A second `ws.php` started by mistake therefore exits without paying out seats the live server still holds (which would otherwise be paid a second time when those players cash out).
 - `poker_hands`: one row per completed hand with the full `pk_hand_record()`. `record_round(pid, wagered, won)` is called per real player per hand so the leaderboards count poker.
 - Bots have `pid = 0`, `uid = "b:<table>:<n>"`, names from a fixed list, and are labelled as house players in every view (`bot: true`). They rebuy to a random stack within the buy-in range after busting.
 - A real player who disconnects is marked `away` (auto sit-out); if still away after 90 s, or at the end of the hand they were in, the server cashes them out.
@@ -268,7 +283,7 @@ Before any card is dealt the server publishes `deck_hash = sha256(deck_in_deal_o
 ## Security rules that apply everywhere
 
 - The socket server trusts nothing from the client except a valid ticket; every `pk_act` is validated by `pk_legal()` and the `hand`/`seq` echo.
-- Hole cards, the deck and the salt are never sent to anyone who is not entitled to them; `pk_view()` is the only serializer used for clients.
+- Hole cards, the deck and the salt are never sent to anyone who is not entitled to them; `pk_view()` is the only serializer used for clients, and `ws.php` re-applies the rule to every view before it goes out (cards only for the viewer's own seat and seats with `show=true`, in `players[]` and `winners[]` alike; never `deck` or `deck_salt`), so an engine bug cannot leak a hand.
 - Chat text is length-limited server-side and HTML-escaped client-side. Names come from the ticket, not from the client.
 - Position updates are clamped and rate-limited; a client can't teleport others or spoof another connection id.
-- `ws.php` checks the `Origin` header against the site origin(s) (setting `rt_origins`, comma-separated; blank = derive from the `Host` header) and drops mismatches before the handshake completes.
+- `ws.php` checks the `Origin` header against the site origin(s) and answers mismatches with 403 before the handshake completes. Setting `rt_origins` (comma-separated) is the allow-list when set; blank = derive from the `Host` header the socket was reached on: `http(s)://<host>` exactly, or any port when the host is localhost / 127.0.0.1 / ::1 / a bare IP address (dev boxes). A request without an `Origin` header is not a browser and is admitted: the ticket is its credential (single use, 60 s, HMAC-signed).
