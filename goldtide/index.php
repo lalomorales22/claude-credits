@@ -273,6 +273,7 @@ function install(PDO $pdo, bool $fresh): void {
         server_seed TEXT NOT NULL, server_hash TEXT NOT NULL, client_seed TEXT NOT NULL,
         nonce INTEGER NOT NULL DEFAULT 0 CHECK (nonce >= 0),
         status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revealed')),
+        next_server_seed TEXT,
         revealed_at TEXT, $ts);
     CREATE UNIQUE INDEX IF NOT EXISTS ux_fair_one_active ON fair_seeds(player_id, game) WHERE status = 'active';
     CREATE TABLE IF NOT EXISTS promo_codes (
@@ -313,6 +314,9 @@ function install(PDO $pdo, bool $fresh): void {
         record TEXT NOT NULL DEFAULT '{}', started_at TEXT NOT NULL, ended_at TEXT, $ts);
     CREATE INDEX IF NOT EXISTS ix_poker_hands_table ON poker_hands(table_id, id DESC);
     ");
+    // v7: fair_seeds.next_server_seed (pre-committed next seed). CREATE IF NOT EXISTS can't add a column to an older db.
+    $cols = array_column($pdo->query('PRAGMA table_info(fair_seeds)')->fetchAll(PDO::FETCH_ASSOC), 'name');
+    if (!in_array('next_server_seed', $cols, true)) { $pdo->exec('ALTER TABLE fair_seeds ADD COLUMN next_server_seed TEXT'); }
 
     // audit log is append-only at the database level too
     $pdo->exec("CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;");
@@ -544,6 +548,17 @@ function clamp_bet(mixed $raw, array $g): int {
         fail('Bets on this table run ' . coins((int)$g['min_bet']) . '–' . coins((int)$g['max_bet']) . ' GC.');
     }
     return $b;
+}
+
+/**
+ * Whole-coin payout for bet × multiplier, in integer math. The multiplier is carried as integer hundredths
+ * (10^$dp) and the product is rounded to the nearest coin, so the multiplier the player sees is the one
+ * they're paid: 100 × 0.29 = 29 (floor(100 * 0.29) on IEEE doubles gives 28). Max product 5000 × 5000 × 10^4
+ * is far inside 64-bit.
+ */
+function pay_mult(int $bet, float $mult, int $dp = 2): int {
+    $scale = 10 ** $dp;
+    return intdiv($bet * (int)round($mult * $scale) + intdiv($scale, 2), $scale);
 }
 
 /* ═════════════════════════ GAMES ═════════════════════════
@@ -1035,7 +1050,7 @@ function parse_bets(array $g, callable $valid): array {
     $clean = [];
     foreach ($bets as $b) {
         $key = is_array($b) && is_string($b['key'] ?? null) ? $b['key'] : '';
-        if (!preg_match('/^(?:[a-z][a-z0-9_]*|0|[1-9]\d*)(?::(?:0|[1-9]\d*))?$/', $key) || !$valid($key)) { fail('That bet isn\'t on this table.'); }
+        if (!preg_match('/^(?:[a-z][a-z0-9_]*|0|[1-9]\d*)(?::(?:0|[1-9]\d*))?\z/', $key) || !$valid($key)) { fail('That bet isn\'t on this table.'); }
         $clean[$key] = ($clean[$key] ?? 0) + chip_amount($b['amount'] ?? '');
     }
     return [$clean, cap_spots($g, $clean, 'round')];
@@ -1057,7 +1072,12 @@ function csprng_shuffle(array $a): array {
 function card_rank(string $c): int { return ['A' => 14, 'K' => 13, 'Q' => 12, 'J' => 11][substr($c, 0, -1)] ?? (int)substr($c, 0, -1); }
 function card_suit(string $c): string { return substr($c, -1); }
 
-/* ── Lighthouse Dice: 1% edge at every setting ── */
+/* ── Lighthouse Dice: 1% edge at every setting ──
+ * The roll is k/100 for k in 0..9999. "Under T" wins on the 100·T outcomes 0.00..T-0.01 and "over T" wins on
+ * the 100·(100-T) outcomes T.00..99.99 (target or higher), so both directions win exactly `chance`% of rolls
+ * and 99 ÷ chance is the fair-less-1% multiplier. A strict `>` for over would drop one outcome (0.01 pp).
+ */
+function dice_win(float $roll, string $dir, float $target): bool { return $dir === 'under' ? $roll < $target : $roll >= $target; }
 function dice_play(): array {
     $p = require_playable(); $g = game_cfg('dice');
     $bet = clamp_bet($_POST['bet'] ?? '', $g);
@@ -1069,8 +1089,8 @@ function dice_play(): array {
     if ($chance < 2 || $chance > 95) { fail('Win chance has to be between 2% and 95%.'); }
     $mult = floor(99 / $chance * 10000) / 10000;
     $roll = random_int(0, 9999) / 100;
-    $win = $dir === 'under' ? $roll < $target : $roll > $target;
-    $payout = $win ? (int)floor($bet * $mult) : 0;
+    $win = dice_win($roll, $dir, $target);
+    $payout = $win ? pay_mult($bet, $mult, 4) : 0;
     $pid = (int)$p['id'];
     $r = tx(fn() => round_oneshot($pid, 'dice', $bet, $payout, $win ? 'win' : 'lose',
         ['roll' => $roll, 'target' => $target, 'dir' => $dir, 'mult' => $mult, 'chance' => $chance]));
@@ -1119,12 +1139,22 @@ const PD_ROWS = [8, 10, 12, 14, 16];
 const PD_BALLS = [1, 3, 5, 10, 20];
 const PD_GOLD = 3;
 
+/**
+ * The live seed pair, plus the pre-committed NEXT server seed. Its hash is shown before the player picks the
+ * client seed that will be used with it, so the server can't choose a seed after seeing the client's input
+ * (fair_rotate promotes it; a fresh next seed is drawn for the rotation after that).
+ */
 function fair_active(int $pid, string $game): array {
     $s = row("SELECT * FROM fair_seeds WHERE player_id = ? AND game = ? AND status = 'active'", [$pid, $game]);
+    if ($s && $s['next_server_seed'] === null) {   // rows from before v7 get their commitment on first use
+        $next = bin2hex(random_bytes(32));
+        q("UPDATE fair_seeds SET next_server_seed = ?, updated_at = datetime('now') WHERE id = ?", [$next, $s['id']]);
+        $s['next_server_seed'] = $next;
+    }
     if ($s) { return $s; }
     $seed = bin2hex(random_bytes(32));
-    q('INSERT INTO fair_seeds (player_id, game, server_seed, server_hash, client_seed) VALUES (?,?,?,?,?)',
-        [$pid, $game, $seed, hash('sha256', $seed), bin2hex(random_bytes(8))]);
+    q('INSERT INTO fair_seeds (player_id, game, server_seed, server_hash, client_seed, next_server_seed) VALUES (?,?,?,?,?,?)',
+        [$pid, $game, $seed, hash('sha256', $seed), bin2hex(random_bytes(8)), bin2hex(random_bytes(32))]);
     return row('SELECT * FROM fair_seeds WHERE id = ?', [(int)db()->lastInsertId()]);
 }
 function fair_bytes(string $seed, string $msg): array { return array_values(unpack('C*', hash_hmac('sha256', $msg, $seed, true))); }
@@ -1166,6 +1196,9 @@ function plinko_play(): array {
     $rows = (int)($_POST['rows'] ?? 12); if (!in_array($rows, PD_ROWS, true)) { $rows = 12; }
     $risk = (string)($_POST['risk'] ?? 'med'); if (!isset(PD_TABLES[$rows][$risk])) { $risk = 'med'; }
     $n = (int)($_POST['balls'] ?? 1); if (!in_array($n, PD_BALLS, true)) { $n = 1; }
+    // the table limit is per drop (bet × pearls), the same max_bet × 10 the chip boards allow per round
+    $cap = (int)$g['max_bet'] * 10;
+    if ($bet * $n > $cap) { fail('Drop limit is ' . coins($cap) . ' GC per drop (bet × pearls).'); }
     $pid = (int)$p['id'];
 
     $out = tx(function () use ($pid, $bet, $rows, $risk, $n) {
@@ -1179,7 +1212,7 @@ function plinko_play(): array {
             $slot = substr_count($path, '1');
             $hits = pd_hits($path, $gold);
             $mult = round(PD_TABLES[$rows][$risk][$slot] * (2 ** count($hits)), 2);
-            $win = (int)floor($bet * $mult);
+            $win = pay_mult($bet, $mult);   // nearest coin, integer math: 10 GC × 0.23 pays 2, × 0.37 pays 4
             $payout += $win; $best = max($best, $mult);
             $balls[] = ['path' => $path, 'slot' => $slot, 'hits' => $hits, 'mult' => $mult, 'win' => $win];
         }
@@ -1195,7 +1228,11 @@ function plinko_play(): array {
         'message' => ($n > 1 ? "$n pearls · best {$out['best']}× · " : $out['best'] . '× · ') . ($out['payout'] ? coins($out['payout']) . ' GC back' : 'nothing back')];
 }
 
-/** Rotate seeds: reveal the old server seed, start a fresh one (optionally with a new client seed). */
+/**
+ * Rotate seeds: reveal the old server seed and promote the pre-committed next seed (whose hash the player
+ * already saw) as the new server seed, paired with the client seed they choose now. Only then is a fresh
+ * next seed drawn and its hash committed for the rotation after this one.
+ */
 function fair_rotate(): never {
     csrf_check();
     $p = require_player();
@@ -1206,31 +1243,36 @@ function fair_rotate(): never {
     $res = tx(function () use ($pid, $game, $client) {
         $old = fair_active($pid, $game);
         q("UPDATE fair_seeds SET status = 'revealed', revealed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", [$old['id']]);
-        $seed = bin2hex(random_bytes(32));
+        $seed = (string)$old['next_server_seed'];   // committed (hash shown) before this client seed was chosen
+        $next = bin2hex(random_bytes(32));
         $cs = $client !== '' ? $client : bin2hex(random_bytes(8));
-        q('INSERT INTO fair_seeds (player_id, game, server_seed, server_hash, client_seed) VALUES (?,?,?,?,?)',
-            [$pid, $game, $seed, hash('sha256', $seed), $cs]);
+        q('INSERT INTO fair_seeds (player_id, game, server_seed, server_hash, client_seed, next_server_seed) VALUES (?,?,?,?,?,?)',
+            [$pid, $game, $seed, hash('sha256', $seed), $cs, $next]);
         return ['revealed' => ['server_seed' => $old['server_seed'], 'server_hash' => $old['server_hash'],
             'client_seed' => $old['client_seed'], 'nonces' => (int)$old['nonce']],
-            'active' => ['server_hash' => hash('sha256', $seed), 'client_seed' => $cs, 'nonce' => 0]];
+            'active' => ['server_hash' => hash('sha256', $seed), 'client_seed' => $cs, 'nonce' => 0, 'next_server_hash' => hash('sha256', $next)]];
     });
     if (wants_json()) { ok($res + ['message' => 'Seed revealed. New seed pair is live.']); }
     flash('ok', 'Seed revealed: ' . $res['revealed']['server_seed']);
     redirect(url('plinko'));
 }
 
-/* ── Kelp Keno: 40 balls, 10 drawn. Every pick count returns ~94–96%. ── */
+/* ── Kelp Keno: 40 balls, 10 drawn. Every pick count returns 94–96%. ──
+ * Exact RTP for p picks is Σ_k P(k) · pay[p][k] with the hypergeometric P(k) = C(p,k)·C(40-p,10-k) / C(40,10).
+ * Solved so each row lands in the 94–96% band (tests/keno_rtp.php prints the table and the per-cell sensitivity):
+ *   1: 95.00  2: 94.23  3: 95.34  4: 95.39  5: 95.59  6: 95.13  7: 95.05  8: 94.81  9: 94.83  10: 95.16
+ */
 const KENO_PAY = [
     1 => [0, 3.8],
     2 => [0, 1.1, 9],
-    3 => [0, 0, 3.5, 38],
+    3 => [0, 0, 3.6, 38],
     4 => [0, 0, 2, 8.5, 83],
     5 => [0, 0, 1.3, 4, 19, 250],
-    6 => [0, 0, 0.6, 3, 8, 65, 650],
+    6 => [0, 0, 0.6, 3, 9, 65, 650],
     7 => [0, 0, 0.7, 1.5, 4.5, 29, 175, 1500],
-    8 => [0, 0, 0, 1.7, 3.5, 14, 70, 500, 3500],
+    8 => [0, 0, 0, 1.7, 3.5, 15, 70, 500, 3500],
     9 => [0, 0, 0, 0.8, 3.5, 8.5, 33, 170, 1300, 8000],
-    10 => [0, 0, 0, 0.9, 1.8, 5.5, 21, 90, 500, 3500, 15000],
+    10 => [0, 0, 0, 0.9, 1.8, 5.2, 21, 90, 500, 3500, 15000],
 ];
 function keno_play(): array {
     $p = require_playable(); $g = game_cfg('keno');
@@ -1244,7 +1286,7 @@ function keno_play(): array {
     $drawn = array_slice(csprng_shuffle(range(1, 40)), 0, 10);
     $hits = array_values(array_intersect($picks, $drawn));
     $mult = KENO_PAY[count($picks)][count($hits)];
-    $payout = (int)floor($bet * $mult);
+    $payout = pay_mult($bet, $mult);
     $pid = (int)$p['id'];
     tx(fn() => round_oneshot($pid, 'keno', $bet, $payout, count($hits) . '/' . count($picks),
         ['picks' => $picks, 'drawn' => $drawn, 'hits' => $hits, 'mult' => $mult]));
@@ -1552,7 +1594,7 @@ function hilo_act(): array {
         }
         if ($move === 'cashout') {
             if ($s['steps'] < 1) { throw new DomainException('Make at least one call before cashing out.'); }
-            return round_close($r, $s, (int)floor($r['bet'] * $s['mult']), 'cashout');
+            return round_close($r, $s, pay_mult((int)$r['bet'], $s['mult'], 4), 'cashout');
         }
         if ($move !== 'hi' && $move !== 'lo') { throw new DomainException('Unknown move.'); }
         $pOdds = hilo_odds($s['card']['r'])[$move];
@@ -1563,20 +1605,22 @@ function hilo_act(): array {
         if (!$ok) { return round_close($r, $s, 0, 'wrong'); }
         $s['mult'] = min(5000, floor($s['mult'] * 0.99 / $pOdds * 10000) / 10000);
         $s['steps']++;
-        if ($s['mult'] >= 5000) { return round_close($r, $s, (int)floor($r['bet'] * $s['mult']), 'max'); }
+        if ($s['mult'] >= 5000) { return round_close($r, $s, pay_mult((int)$r['bet'], $s['mult'], 4), 'max'); }
         return round_save($r, $s);
     });
     $s = st($r);
-    $msg = $r['status'] === 'active' ? 'Run at ' . number_format($s['mult'], 2) . '× · worth ' . coins((int)floor($r['bet'] * $s['mult'])) . ' GC'
+    $msg = $r['status'] === 'active' ? 'Run at ' . number_format($s['mult'], 2) . '× · worth ' . coins(pay_mult((int)$r['bet'], $s['mult'], 4)) . ' GC'
         : ($r['outcome'] === 'wrong' ? 'Wrong call. The tide took it.' : 'Cashed out at ' . number_format($s['mult'], 2) . '× · +' . coins((int)$r['payout']) . ' GC');
     return ['payout' => (int)$r['payout'], 'win' => (int)$r['payout'] > 0, 'balance' => bal($pid), 'message' => $msg];
 }
 
-/* ── Reef Mines: 5×5, you choose 1–24 urchins, 1% edge ── */
+/* ── Reef Mines: 5×5, you choose 1–24 urchins, 1% edge, wins capped at MINES_MAX_WIN × bet ── */
+const MINES_MAX_WIN = 5000;   // × bet, same ceiling as hi-lo and the video slots; the round auto-cashes when the ladder reaches it
+/** Multiplier after k pearls with n urchins: 0.99 / P(k safe picks), truncated to 2 dp, capped. */
 function mines_mult(int $n, int $k): float {
     $m = 0.99;
     for ($i = 0; $i < $k; $i++) { $m *= (25 - $i) / (25 - $n - $i); }
-    return floor($m * 100) / 100;
+    return min((float)MINES_MAX_WIN, floor(round($m * 100, 6)) / 100);   // round(…, 6) keeps 1.65 from reading 1.64 on binary drift
 }
 function mines_act(): array {
     $p = require_playable(); $g = game_cfg('mines');
@@ -1594,14 +1638,16 @@ function mines_act(): array {
         $s = st($r);
         if ($move === 'cashout') {
             if (!$s['open']) { throw new DomainException('Flip at least one tile first.'); }
-            return round_close($r, $s, (int)floor($r['bet'] * mines_mult($s['n'], count($s['open']))), 'cashout');
+            return round_close($r, $s, pay_mult((int)$r['bet'], mines_mult($s['n'], count($s['open']))), 'cashout');
         }
         $t = (int)($_POST['tile'] ?? -1);
         if ($move !== 'reveal' || $t < 0 || $t > 24 || in_array($t, $s['open'], true)) { throw new DomainException('Pick a covered tile.'); }
         if (in_array($t, $s['mines'], true)) { $s['boom'] = $t; return round_close($r, $s, 0, 'boom'); }
         $s['open'][] = $t;
-        if (count($s['open']) === 25 - $s['n']) {
-            return round_close($r, $s, (int)floor($r['bet'] * mines_mult($s['n'], count($s['open']))), 'cleared');
+        $k = count($s['open']);
+        if (mines_mult($s['n'], $k) >= MINES_MAX_WIN) { return round_close($r, $s, pay_mult((int)$r['bet'], (float)MINES_MAX_WIN), 'max'); }   // ladder capped: auto-cash
+        if ($k === 25 - $s['n']) {
+            return round_close($r, $s, pay_mult((int)$r['bet'], mines_mult($s['n'], $k)), 'cleared');
         }
         return round_save($r, $s);
     });
@@ -1609,13 +1655,17 @@ function mines_act(): array {
     $k = count($s['open']);
     $msg = match ($r['outcome']) {
         null => $k ? $k . ' pearl' . ($k > 1 ? 's' : '') . ' · ' . number_format(mines_mult($s['n'], $k), 2) . '×. Keep going or cash out.' : 'Tap a tile.',
-        'boom' => 'Urchin! Ouch.', default => 'Cashed ' . number_format(mines_mult($s['n'], $k), 2) . '× · +' . coins((int)$r['payout']) . ' GC',
+        'boom' => 'Urchin! Ouch.',
+        'max' => 'Max win! ' . number_format(MINES_MAX_WIN) . '× · +' . coins((int)$r['payout']) . ' GC',
+        default => 'Cashed ' . number_format(mines_mult($s['n'], $k), 2) . '× · +' . coins((int)$r['payout']) . ' GC',
     };
     return ['payout' => (int)$r['payout'], 'win' => (int)$r['payout'] > 0, 'boom' => $r['outcome'] === 'boom', 'balance' => bal($pid), 'message' => $msg];
 }
 
 /* ── Tide Crash ──
- * Crash point: P(crash ≥ m) = 0.99 / m, so any cash-out target returns 99%.
+ * Crash point: P(crash ≥ m) = 0.99 / m, so any cash-out target returns 99%. That calibration is for an
+ * INCLUSIVE rule: a cash-out at exactly the break multiplier wins, whether it came from the button or from
+ * the auto target (both live on the same 0.01 grid, so the tie is a real 0.99·0.01/(m(m+0.01)) slice of mass).
  * The multiplier grows as e^(0.08·t) on SERVER time; the client only draws it.
  */
 const CRASH_K = 0.08;
@@ -1628,12 +1678,12 @@ function crash_now(array $s): float { return floor(exp(CRASH_K * (microtime(true
 function crash_resolve(array $r, bool $cashout = false): array {
     $s = st($r);
     $m = crash_now($s);
-    if ($s['auto'] > 0 && $s['auto'] <= $s['crash'] && $m >= $s['auto']) {
+    if ($s['auto'] > 0 && $s['auto'] <= $s['crash'] && $m >= $s['auto']) {   // a reached auto target beats a later click
         $s['cashed'] = $s['auto'];
-        return round_close($r, $s, (int)floor($r['bet'] * $s['auto']), 'cashout');
+        return round_close($r, $s, pay_mult((int)$r['bet'], (float)$s['auto']), 'cashout');
     }
+    if ($cashout && $m <= $s['crash']) { $s['cashed'] = $m; return round_close($r, $s, pay_mult((int)$r['bet'], $m), 'cashout'); }   // ties win, same as auto
     if ($m >= $s['crash']) { return round_close($r, $s, 0, 'crashed'); }
-    if ($cashout) { $s['cashed'] = $m; return round_close($r, $s, (int)floor($r['bet'] * $m), 'cashout'); }
     return $r;
 }
 function crash_act(): array {
@@ -1645,7 +1695,7 @@ function crash_act(): array {
         $a = trim((string)($_POST['auto'] ?? ''));
         if ($a !== '') {
             if (!is_numeric($a) || (float)$a < 1.01 || (float)$a > 1000) { fail('Auto cash-out has to be between 1.01× and 1000×.'); }
-            $auto = floor((float)$a * 100) / 100;
+            $auto = round((float)$a, 2);   // the form steps by 0.01; floor(1.14 * 100) / 100 would store 1.13
         }
     }
     $r = tx(function () use ($pid, $move, $bet, $auto) {
@@ -1909,8 +1959,7 @@ function vs_play(): array {
     $slug = (string)($_GET['g'] ?? '');
     $t = VSLOTS[$slug] ?? null;
     if (!$t) { fail('No such slot.', 404); }
-    $p = require_playable(); $g = vs_game(game_cfg($slug));
-    $pid = (int)$p['id'];
+    $p = require_playable(); $g = vs_game(game_cfg($slug));    $pid = (int)$p['id'];
     if (($_POST['move'] ?? '') === 'pick') { return vs_pick($slug, $t, $pid); }
     $bet = clamp_bet($_POST['bet'] ?? '', $g);
     if ($bet % VS_BET_STEP) { fail('Bets on this slot go in steps of ' . VS_BET_STEP . ' GC (' . coins((int)$g['min_bet']) . '–' . coins((int)$g['max_bet']) . ').'); }
@@ -2050,20 +2099,57 @@ function roulette3d_play(): array {
 /* ── Harbor Craps: the full bubble-craps menu ──
  * Returns below include the stake unless noted. "Stays up" bets (place, buy, lay, big 6/8,
  * hardways) pay their profit and remain on the layout, and are OFF on the come-out roll.
- * House edge (standard): pass 1.41%, don't pass 1.36%, come 1.41%, don't come 1.36%, odds 0%,
- * place 6/8 1.52%, place 5/9 4.0%, place 4/10 6.67%, buy 4/10 1.67% / 5/9 2.0% / 6/8 2.27% (5% of the bet, paid on wins only),
- * lay 4/10 1.67% / 5/9 2.0% / 6/8 2.27% (5% of the win, paid on wins only),
- * Spots with fractional odds take chips only in their betting unit (craps_unit: place 6/8 in 6s, place 4/5/9/10 in 5s,
- * odds in the unit of their true odds, buy in 20s, lay in 40/30/24) so every payout and commission is exact; an off-unit
- * legacy stake rounds to the nearest coin, half up, never floored.
+ * Lay bets are off on the come-out too (a house rule here; many live tables work them).
+ * House edge, exact at the CRAPS_UNIT amounts craps_check_add() enforces: pass 1.41%, don't pass 1.36%, come 1.41%,
+ * don't come 1.36%, odds 0%, place 6/8 1.52%, place 5/9 4.0%, place 4/10 6.67%,
+ * buy (5% of the amount bought, charged only on a win) 4/10 1.67%, 5/9 2.00%, 6/8 2.27%,
+ * lay (5% of the win, charged only on a win) 4/10 1.67%, 5/9 2.00%, 6/8 2.27%,
  * big 6/8 9.09%, field 2.78%, hard 6/8 9.09%, hard 4/10 11.1%, 2/12 13.9%, 3/11 11.1%,
  * any craps 11.1%, horn 12.5%, C&E 11.1%, any seven 16.7%.
+ * tests/audit_arcade3d_test.php checks the exact expectation of every place, buy, lay and odds bet at every legal amount.
  */
 const CRAPS_NUMS = [4, 5, 6, 8, 9, 10];
 const CRAPS_ONE_ROLL = ['field', 'any7', 'anycraps', 'ace2', 'ace3', 'yo', 'twelve', 'horn', 'ce'];
 const CRAPS_TRUE = [4 => [2, 1], 10 => [2, 1], 5 => [3, 2], 9 => [3, 2], 6 => [6, 5], 8 => [6, 5]];   // odds on the number
 const CRAPS_PLACE = [4 => [9, 5], 10 => [9, 5], 5 => [7, 5], 9 => [7, 5], 6 => [7, 6], 8 => [7, 6]];
 const CRAPS_ODDS_MAX = [4 => 3, 10 => 3, 5 => 4, 9 => 4, 6 => 5, 8 => 5];                          // 3-4-5× odds
+// Chip increments that make every printed ratio exact (no truncated coins). The server refuses other totals and the
+// client snaps a tap to them. Lay units each win 20 per unit, so the 5% commission on the win is exactly one coin.
+const CRAPS_UNIT = [
+    'place'   => [4 => 5, 10 => 5, 5 => 5, 9 => 5, 6 => 6, 8 => 6],        // 9:5, 7:5, 7:6
+    'buy'     => [4 => 20, 10 => 20, 5 => 20, 9 => 20, 6 => 20, 8 => 20],  // 2:1 / 3:2 / 6:5 whole, and 5% of the buy is a whole coin
+    'lay'     => [4 => 40, 10 => 40, 5 => 30, 9 => 30, 6 => 24, 8 => 24],  // 1:2 / 2:3 / 5:6, win 20 per unit
+    'odds'    => [4 => 1, 10 => 1, 5 => 2, 9 => 2, 6 => 5, 8 => 5],        // behind pass / come: 2:1, 3:2, 6:5
+    'layodds' => [4 => 2, 10 => 2, 5 => 3, 9 => 3, 6 => 6, 8 => 6],        // behind don't pass / don't come: 1:2, 2:3, 5:6
+];
+/** 5% commission = 1/20 of the base, rounded to the nearest coin (a whole coin at every CRAPS_UNIT amount). */
+function craps_vig(int $base): int { return intdiv($base + 10, 20); }
+/** Profit on a winning place bet: 7:6 on 6/8, 7:5 on 5/9, 9:5 on 4/10. */
+function craps_place_win(int $n, int $a): int { return intdiv($a * CRAPS_PLACE[$n][0], CRAPS_PLACE[$n][1]); }
+/** Profit on a winning buy bet: true odds less 5% of the amount bought, charged only on the win. */
+function craps_buy_win(int $n, int $a): int { return intdiv($a * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]) - craps_vig($a); }
+/** Profit on a winning lay bet: true odds the other way, less 5% of that win, charged only on the win. */
+function craps_lay_win(int $n, int $a): int { $w = intdiv($a * CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]); return $w - craps_vig($w); }
+/** Stake plus true-odds profit for odds behind pass / come. */
+function craps_odds_ret(int $a, int $n): int { return $a + intdiv($a * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]); }
+/** Stake plus profit for lay odds behind don't pass / don't come. */
+function craps_lay_odds_ret(int $a, int $n): int { return $a + intdiv($a * CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]); }
+/** The increment rule for a key, or null: [kind, number, unit, label]. Odds keys need the point for pass / don't pass. */
+function craps_unit(string $k, int $pt): ?array {
+    if (preg_match('/^(place|buy|lay)(\d+)$/', $k, $m)) { return [$m[1], (int)$m[2], CRAPS_UNIT[$m[1]][(int)$m[2]], craps_label($k)]; }
+    if ($k === 'passodds' && $pt) { return ['odds', $pt, CRAPS_UNIT['odds'][$pt], "Pass odds on $pt"]; }
+    if ($k === 'dpodds' && $pt) { return ['layodds', $pt, CRAPS_UNIT['layodds'][$pt], "Don't pass odds on $pt"]; }
+    if (preg_match('/^comeodds(\d+)$/', $k, $m)) { return ['odds', (int)$m[1], CRAPS_UNIT['odds'][(int)$m[1]], craps_label($k)]; }
+    if (preg_match('/^dcomeodds(\d+)$/', $k, $m)) { return ['layodds', (int)$m[1], CRAPS_UNIT['layodds'][(int)$m[1]], craps_label($k)]; }
+    return null;
+}
+/** Human message for a rejected amount: "Place 6 pays 7:6, so bet in multiples of 6 GC." */
+function craps_unit_msg(array $u): string {
+    [$kind, $n, $unit, $label] = $u;
+    [$x, $y] = $kind === 'place' ? CRAPS_PLACE[$n] : ($kind === 'odds' || $kind === 'buy' ? CRAPS_TRUE[$n] : array_reverse(CRAPS_TRUE[$n]));
+    $less = match ($kind) { 'buy' => ' less a 5% vig', 'lay' => ' less 5% of the win', default => '' };
+    return "$label pays $x:$y$less, so bet in multiples of $unit GC.";
+}
 function craps_label(string $k): string {
     static $L = ['pass' => 'Pass line', 'dontpass' => "Don't pass", 'passodds' => 'Pass odds', 'dpodds' => "Don't pass odds",
         'come' => 'Come', 'dontcome' => "Don't come", 'field' => 'Field', 'any7' => 'Any seven', 'anycraps' => 'Any craps',
@@ -2099,22 +2185,8 @@ function craps_removable(string $k): bool {
  * commission on the win is exactly 1 GC per 20 won. Horn splits 4 ways, C&E 2.
  * $pt is the point (pass/don't pass odds take their number from it).
  */
-function craps_unit(string $k, int $pt): int {
-    if ($k === 'horn') { return 4; }
-    if ($k === 'ce') { return 2; }
-    if ($k === 'passodds') { return $pt ? CRAPS_TRUE[$pt][1] : 1; }
-    if ($k === 'dpodds') { return $pt ? CRAPS_TRUE[$pt][0] : 1; }
-    if (preg_match('/^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)\z/', $k, $m)) {
-        $n = (int)$m[2];
-        return match ($m[1]) { 'place' => CRAPS_PLACE[$n][1], 'comeodds' => CRAPS_TRUE[$n][1], 'dcomeodds' => CRAPS_TRUE[$n][0],
-            'buy' => 20, 'lay' => intdiv(20 * CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]) };
-    }
-    return 1;
-}
 /** amt × num/den in whole coins. Exact at the spot's unit; a legacy off-unit stake rounds to the nearest coin, half up, never floored. */
-function craps_ratio(int $amt, int $num, int $den): int { return intdiv($amt * $num * 2 + $den, 2 * $den); }
 /** 5% commission (buy: on the stake, lay: on the win): nearest coin, half up, at least 1. Exact at the units; 30 owes 2, 12 owes 1. */
-function craps_vig(int $win): int { return max(1, intdiv($win * 5 + 50, 100)); }
 function craps_state(?array $r): array {
     $s = st($r);
     $bets = $s['bets'] ?? [];
@@ -2129,11 +2201,8 @@ function craps_state(?array $r): array {
 function craps_check_add(array $s, string $k, int $amt, array $g): void {
     $b = $s['bets']; $pt = $s['point']; $cur = ($b[$k] ?? 0) + $amt; $max = (int)$g['max_bet'];
     $need = function (bool $ok, string $why) { if (!$ok) { throw new DomainException($why); } };
-    $u = craps_unit($k, $pt);
-    if ($u > 1 && !in_array($k, ['horn', 'ce'], true) && $amt % $u !== 0) {
-        $lo = $u * intdiv($amt, $u); $hi = $lo + $u;
-        throw new DomainException(craps_label($k) . ' pays in whole coins at multiples of ' . $u . ' GC, so use ' . ($lo >= (int)$g['min_bet'] ? "$lo or $hi" : (string)$hi) . '.');
-    }
+    // the running total on the spot (not just this chip) has to sit on the unit, so stacked chips still pay whole coins
+    $unit = function () use ($k, $pt, $cur, $need) { if ($u = craps_unit($k, $pt)) { $need($cur % $u[2] === 0, craps_unit_msg($u)); } };
     switch (true) {
         case $k === 'pass' || $k === 'dontpass':
             $need(!$pt, 'Line bets go down on the come-out roll only.'); break;
@@ -2141,16 +2210,18 @@ function craps_check_add(array $s, string $k, int $amt, array $g): void {
             $need((bool)$pt, 'Come and Don\'t Come need a point to be on.'); break;
         case $k === 'passodds':
             $need($pt && !empty($b['pass']), 'Pass odds need a pass line bet and a point.');
-            $need($cur <= $b['pass'] * CRAPS_ODDS_MAX[$pt], 'Odds on ' . $pt . ' max out at ' . CRAPS_ODDS_MAX[$pt] . '× your pass line.'); return;
+            $need($cur <= $b['pass'] * CRAPS_ODDS_MAX[$pt], 'Odds on ' . $pt . ' max out at ' . CRAPS_ODDS_MAX[$pt] . '× your pass line.'); $unit(); return;
         case $k === 'dpodds':
             $need($pt && !empty($b['dontpass']), 'Lay odds need a don\'t pass bet and a point.');
-            $need($cur <= $b['dontpass'] * 6, 'Lay odds max out at 6× your don\'t pass.'); return;
-        case (bool)preg_match('/^comeodds(\d+)\z/', $k, $m):
+            $need($cur <= $b['dontpass'] * 6, 'Lay odds max out at 6× your don\'t pass.'); $unit(); return;
+        case (bool)preg_match('/^comeodds(\d+)$/', $k, $m):
             $need(!empty($b['come' . $m[1]]), 'Come odds need a come bet sitting on ' . $m[1] . '.');
-            $need($cur <= $b['come' . $m[1]] * CRAPS_ODDS_MAX[(int)$m[1]], 'Odds max out at ' . CRAPS_ODDS_MAX[(int)$m[1]] . '× the come bet.'); return;
-        case (bool)preg_match('/^dcomeodds(\d+)\z/', $k, $m):
+            $need($cur <= $b['come' . $m[1]] * CRAPS_ODDS_MAX[(int)$m[1]], 'Odds max out at ' . CRAPS_ODDS_MAX[(int)$m[1]] . '× the come bet.'); $unit(); return;
+        case (bool)preg_match('/^dcomeodds(\d+)$/', $k, $m):
             $need(!empty($b['dcome' . $m[1]]), 'Lay odds need a don\'t come bet on ' . $m[1] . '.');
-            $need($cur <= $b['dcome' . $m[1]] * 6, 'Lay odds max out at 6× the don\'t come bet.'); return;
+            $need($cur <= $b['dcome' . $m[1]] * 6, 'Lay odds max out at 6× the don\'t come bet.'); $unit(); return;
+        case (bool)preg_match('/^(place|buy|lay)\d+$/', $k):
+            $unit(); break;
         case $k === 'horn':
             $need($amt % 4 === 0, 'Horn bets split four ways, so use a multiple of 4.'); break;   // (kept: the unit rule above skips horn/ce so these messages stay)
         case $k === 'ce':
@@ -2212,9 +2283,8 @@ function craps_act(): array {
         };
         $lose = function (string $k) use (&$B, &$events, &$act) { $act += $B[$k]; $events[] = ['key' => $k, 'win' => false, 'text' => craps_label($k) . ' loses']; unset($B[$k]); };
         $push = function (string $k, string $why) use (&$B, &$pay, &$events, &$act, &$won) { $act += $B[$k]; $won += $B[$k]; $pay += $B[$k]; $events[] = ['key' => $k, 'win' => null, 'text' => craps_label($k) . ' ' . $why]; unset($B[$k]); };
-        $trueRet = fn(int $amt, int $n) => $amt + craps_ratio($amt, CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]);
-        $layRet = fn(int $amt, int $n) => $amt + craps_ratio($amt, CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]);
-        $vig = 'craps_vig';
+        $trueRet = 'craps_odds_ret'; $layRet = 'craps_lay_odds_ret';   // stake + true odds; exact at CRAPS_UNIT amounts
+
         // ── one-roll bets ──
         foreach (CRAPS_ONE_ROLL as $k) {
             if (!isset($B[$k])) { continue; }
@@ -2236,15 +2306,15 @@ function craps_act(): array {
         if (!$comeOut) {
             foreach (CRAPS_NUMS as $n) {
                 if (isset($B["place$n"])) {
-                    if ($sum === $n) { $a = $B["place$n"]; $credit("place$n", craps_ratio($a, CRAPS_PLACE[$n][0], CRAPS_PLACE[$n][1]), 'pays', false); }
+                    if ($sum === $n) { $credit("place$n", craps_place_win($n, $B["place$n"]), 'pays', false); }
                     elseif ($sum === 7) { $lose("place$n"); }
                 }
-                if (isset($B["buy$n"])) {
-                    if ($sum === $n) { $a = $B["buy$n"]; $w = craps_ratio($a, CRAPS_TRUE[$n][0], CRAPS_TRUE[$n][1]); $credit("buy$n", $w - $vig($a), 'pays true odds (less 5% of the bet)', false); }
+                if (isset($B["buy$n"])) {   // 5% of the amount bought, charged only now that it won
+                    if ($sum === $n) { $credit("buy$n", craps_buy_win($n, $B["buy$n"]), 'pays true odds (less 5% of the buy)', false); }
                     elseif ($sum === 7) { $lose("buy$n"); }
                 }
-                if (isset($B["lay$n"])) {
-                    if ($sum === 7) { $a = $B["lay$n"]; $w = craps_ratio($a, CRAPS_TRUE[$n][1], CRAPS_TRUE[$n][0]); $credit("lay$n", $w - $vig($w), 'wins (less 5%)', false); }
+                if (isset($B["lay$n"])) {   // 5% of the win, charged only now that it won
+                    if ($sum === 7) { $credit("lay$n", craps_lay_win($n, $B["lay$n"]), 'wins (less 5% of the win)', false); }
                     elseif ($sum === $n) { $lose("lay$n"); }
                 }
             }
@@ -3389,9 +3459,24 @@ function do_take_break(): void {
     if (!in_array($days, [1, 7, 30, 90], true)) { fail('Pick 1, 7, 30, or 90 days.'); }
     if (($_POST['confirm'] ?? '') !== 'BREAK') { fail('Type BREAK to confirm.'); }
     $until = gmdate('Y-m-d H:i:s', time() + $days * 86400);
-    // a break can only be extended, never shortened, from the player side
-    q("UPDATE players SET break_until = MAX(COALESCE(break_until, ''), ?), updated_at = datetime('now') WHERE id = ?", [$until, $p['id']]);
-    flash('ok', "Break's on. Games unlock again after $until UTC. Proud of you for checking in with yourself.");
+    $pid = (int)$p['id'];
+    // a break can only be extended, never shortened, from the player side.
+    // Tide Crash is the only game that runs on the wall clock, so a live wave is settled in the same transaction that
+    // starts the break (cashed out at the current multiplier, or already lost if it has broken); it must not keep running
+    // while the player is locked out. Every other multi-step game (mines, hi-lo, blackjack, ...) simply resumes afterwards.
+    $settled = tx(function () use ($pid, $until) {
+        $r = round_active($pid, 'crash');
+        if ($r) { $r = crash_resolve($r, true); }   // same path as move=cashout: a reached auto target or a break already on the clock wins out
+        q("UPDATE players SET break_until = MAX(COALESCE(break_until, ''), ?), updated_at = datetime('now') WHERE id = ?", [$until, $pid]);
+        return $r;
+    });
+    $note = '';
+    if ($settled && $settled['outcome'] === 'cashout') {
+        $note = ' Your live Tide Crash wave was cashed out first at ' . number_format((float)st($settled)['cashed'], 2) . '× for +' . coins((int)$settled['payout']) . ' GC.';
+    } elseif ($settled) {
+        $note = ' Your Tide Crash wave had already broken at ' . number_format((float)st($settled)['crash'], 2) . '×.';
+    }
+    flash('ok', "Break's on. Games unlock again after $until UTC.$note Proud of you for checking in with yourself.");
     redirect(url('account'));
 }
 
@@ -3942,7 +4027,7 @@ function do_admin_export(array $admin): never {
     $out = fopen('php://output', 'w');
     $first = true;
     while ($r = $st->fetch()) {
-        unset($r['pass_hash']);
+        unset($r['pass_hash'], $r['next_server_seed']);
         if (($r['status'] ?? '') === 'active' && isset($r['server_seed'])) { $r['server_seed'] = '(hidden)'; }
         if ($first) { fputcsv($out, array_keys($r), ',', '"', '\\'); $first = false; }
         // stop spreadsheet apps from treating cells as formulas
@@ -4567,7 +4652,7 @@ function page_account(): void {
         <?php if ($until = on_break($p)): ?>
           <p>You're on a break until <strong><?= h($until) ?> UTC</strong>. Games and bonuses stay locked until then. You can extend it below.</p>
         <?php else: ?>
-          <p>Even with play money, it's healthy to step away. This locks games and bonuses for the time you pick, and it can't be shortened.</p>
+          <p>Even with play money, it's healthy to step away. This locks games and bonuses for the time you pick, and it can't be shortened. A live Tide Crash wave is cashed out at its current multiplier the moment the break starts (or has already broken); any other unfinished round simply picks up where it was when you come back.</p>
         <?php endif; ?>
         <form method="post" action="<?= h(url('take_break')) ?>" class="form">
           <?= csrf_field() ?>
@@ -4659,25 +4744,24 @@ function page_rules(): void {
 const GAME_RULES = [
     'poker' => ['No-limit Texas hold\'em, real players at the table (house players fill empty seats and are labelled). Blinds and buy-in range are set per table.', 'Buy in from your Gold Coins. Your stack lives at the table until you stand up, then it goes straight back to your balance.', 'Fold, check, call, raise or shove. Minimum raise is the size of the last raise. Side pots are handled like a live room and odd chips go to the first seat left of the button.', 'The clock gives you ' . 20 . ' seconds an action; two timeouts and you sit out. Leave any time; if you\'re in a hand, you\'re folded and paid when it ends.', 'Every deal is committed to before a card moves: the table shows a SHA-256 of the shuffled deck, and reveals the deck and salt after the hand. Open any hand history to verify it.'],
     'roulette3d' => ['Tap a chip, tap the board, hit Spin. Same single-zero payouts as the 2D table (35:1 straight up).', 'The wheel you watch is the real result: the server picks the pocket, then the ball is steered into it.', 'Right-click or long-press a spot to pull chips back.'],
-    'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay true odds with zero house edge.', 'Every number has Place (6/8 pay 7:6, 5/9 pay 7:5, 4/10 pay 9:5), Buy (true odds, 5% on wins) and Lay (bet the 7 beats it). Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Fractional odds are bet in whole units like a real table, so every payout is exact: Place 6/8 in multiples of 6 GC (12 pays 14), Place 4/5/9/10 in multiples of 5; odds on 5/9 in even amounts and on 6/8 in multiples of 5; lay odds on 4/10 even, 5/9 in multiples of 3, 6/8 in multiples of 6; Buy in multiples of 20 (5% of the bet, 1 GC per 20, charged only when it wins); Lay in the stake that wins 20: multiples of 40 on 4/10, 30 on 5/9, 24 on 6/8 (5% of the win, 1 GC per 20 won, charged only when it wins). The table tells you the nearest amounts. Returns: Place 6/8 98.5%, 5/9 96.0%, 4/10 93.3%; Buy and Lay 4/10 98.3%, 5/9 98.0%, 6/8 97.7%.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.', 'Chips you take back down were never in play: they don\'t count toward your rounds, wagered or won totals. Each spot takes up to the table max (chips already working included), and each roll up to 10× the table max in new chips.'],
+    'craps' => ['Come-out roll: Pass or Don\'t Pass. 7 or 11 wins Pass, 2, 3 or 12 loses it (12 pushes Don\'t Pass). Any other number becomes the point; hit it again before a 7 to win.', 'Come and Don\'t Come work the same way on any roll after the point is set, and travel to their own number. Back line and come bets with odds (3-4-5× behind Pass and Come, 6× laying): odds pay exactly true odds with zero house edge. So the ratio never has to be rounded, odds go down in multiples of 1 GC on 4/10, 2 GC on 5/9 and 5 GC on 6/8 (laying: 2, 3 and 6 GC).', 'Every number has Place (6/8 pay 7:6 in multiples of 6 GC, 5/9 pay 7:5 and 4/10 pay 9:5 in multiples of 5 GC), Buy and Lay. Buy pays true odds and charges a 5% commission on the amount bought, only when it wins, rounded to the nearest coin: house edge 1.67% on 4/10, 2.00% on 5/9, 2.27% on 6/8; buy in multiples of 20 GC so the 5% is a whole coin. Lay bets the 7 comes first, pays true odds the other way less 5% of the win, only when it wins (1.67% / 2.00% / 2.27%); lay in multiples of 40 GC on 4/10, 30 GC on 5/9 and 24 GC on 6/8. A chip tap snaps to the right multiple. Big 6 and Big 8 pay even money. These stay up until they lose and are OFF on the come-out roll.', 'Field, Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E are one-roll bets. Hardways stay up until the pair hits, a 7 rolls, or the number comes easy.', 'Use Take bets down to pull place, buy, lay, odds, hardways, Big 6/8 and don\'t bets back. Pass and come bets are contract bets and ride until they\'re decided. Right-click or long-press pulls back chips you haven\'t rolled yet.'],
     'pusher' => ['Each coin you drop costs your coin value. Coins that spill over the front edge are yours.', 'Tap the machine or use the slider to aim. Aiming is just for fun: how many coins fall is decided the moment you drop.', 'About 46% of drops spill something, and rare avalanches pay 25× or 100×. Return to player is 95%.'],
     'scratch' => ['Buy a ticket, scratch all nine spots.', 'Three matching prizes wins that prize. Only one triple per ticket.', 'Top prize is 1,000× the ticket. About 1 in 4 tickets wins something.'],
-    'keno' => ['Pick 1 to 10 numbers from 40.', 'Ten numbers are drawn. The more you catch, the more you win.', 'The paytable changes with how many you pick. Big picks, big jackpots.'],
+    'keno' => ['Pick 1 to 10 numbers from 40.', 'Ten numbers are drawn. The more you catch, the more you win.', 'The paytable changes with how many you pick. Big picks, big jackpots.', 'Every pick count returns between 94% and 96% over time (1: 95.0%, 2: 94.2%, 3: 95.3%, 4: 95.4%, 5: 95.6%, 6: 95.1%, 7: 95.1%, 8: 94.8%, 9: 94.8%, 10: 95.2%). Wins are bet × multiplier, rounded to the nearest coin.'],
     'baccarat' => ['Bet on Player, Banker, or Tie. Closest to 9 wins.', 'Cards are worth face value, tens and faces are 0, aces are 1. Only the last digit counts.', 'Player pays 1:1, Banker pays 0.95:1, Tie pays 8:1 (and Player/Banker bets push on a tie).', 'The 5% Banker commission rounds to the nearest whole coin, half up, never down: a 10 GC Banker win returns 20 GC, 30 returns 59, 100 returns 195.', 'Third cards follow the standard tableau. No decisions needed.', 'Return to player: Player 98.8%, Banker 98.9% (at multiples of 20 GC; smaller odd chips return a little more because of the rounding), Tie 85.6%.'],
-    'sicbo' => ['Three dice are shaken. Bet on any of the 50 spots.', 'Small (4–10) and Big (11–17) pay 1:1 but lose on any triple.', 'Totals pay 6:1 up to 60:1, doubles 10:1, any triple 30:1, a specific triple 180:1.', 'Two-dice combinations (any two different faces) pay 6:1. Single numbers pay 1:1 per die that shows it.', 'Return to player, exact over all 216 rolls: Small/Big 97.2%, singles 92.1%, totals 81.0–90.3%, any triple 86.1%, specific triple 83.8%, combinations 97.2%, doubles 81.5%.'],
-    'bigwheel' => ['Put chips on the symbols you like, then spin.', '54 stops: 24×1, 15×2, 7×5, 4×10, 2×20, one anchor, one sun.', 'Numbers pay their face value to 1. The anchor and sun pay 45 to 1.'],
+    'sicbo' => ['Three dice are shaken. Bet on any of the 50 spots.', 'Small (4–10) and Big (11–17) pay 1:1 but lose on any triple.', 'Totals pay 6:1 up to 60:1, doubles 10:1, any triple 30:1, a specific triple 180:1.', 'Two-dice combinations (any two different faces) pay 6:1. Single numbers pay 1:1 per die that shows it.', 'Return to player, exact over all 216 rolls: Small/Big 97.2%, singles 92.1%, totals 81.0–90.3%, any triple 86.1%, specific triple 83.8%, combinations 97.2%, doubles 81.5%.'],    'bigwheel' => ['Put chips on the symbols you like, then spin.', '54 stops: 24×1, 15×2, 7×5, 4×10, 2×20, one anchor, one sun.', 'Numbers pay their face value to 1. The anchor and sun pay 45 to 1.'],
     'crabs' => ['Back one crab or several.', 'Odds are fixed. Favorites win more often, longshots pay more.', 'Payout is your chip times the odds shown (it includes your chip).'],
     'videopoker' => ['Deal five cards, tap the ones to hold, then draw.', 'Win on a pair of Jacks or better. Full paytable is on the machine.', 'With perfect holds this 9/6 paytable returns about 99.5%.'],
     'threecard' => ['Place an Ante (and an optional Pair Plus), get three cards.', 'Play (matching your Ante) or fold. Dealer needs Queen-high to qualify.', 'Hands rank straight flush, three of a kind, straight, flush, pair, high card; ties go to the higher cards.', 'Ante bonus pays 1:1 on a straight, 4:1 on trips, 5:1 on a straight flush no matter what the dealer has.', 'Pair Plus pays on your hand alone: pair 1:1, flush 4:1, straight 6:1, trips 30:1, straight flush 40:1 (97.7% return).', 'Playing Queen-6-4 or better, the Ante/Play bet returns about 98% of everything you put down (house edge 3.4% of the Ante).'],
     'hilo' => ['Call whether the next card is higher or lower.', 'Ties count as a win either way. Aces are low.', 'Every right call multiplies your run. Cash out any time after your first call.', 'Up to five skips per run if you don\'t like a card.'],
-    'crash' => ['Launch your wave. The multiplier climbs from 1.00×.', 'Cash out any time before the wave breaks to lock in that multiplier.', 'Set an auto cash-out so the server grabs it for you, even if your connection hiccups.', 'Any cash-out target returns 99% over time.'],
+    'crash' => ['Launch your wave. The multiplier climbs from 1.00×.', 'Cash out any time before the wave breaks to lock in that multiplier. A cash-out at exactly the multiplier the wave breaks on still wins, whether you clicked or the auto target grabbed it.', 'Set an auto cash-out so the server grabs it for you, even if your connection hiccups. A reached auto target is paid even if you click later.', 'P(the wave reaches m) = 0.99 ÷ m, so any cash-out target returns 99% over time. Wins are bet × multiplier, rounded to the nearest coin. Starting a break cashes out a live wave at its current multiplier.'],
     'plinko' => ['Pick 8–16 rows, a risk level, and how many pearls to drop at once (1–20). Your bet is per pearl.',
         'Every drop, 3 golden pegs light up. Each golden peg a pearl touches doubles that pearl\'s multiplier, and they stack: ×2, ×4, ×8.',
-        'Every row count and risk level returns 98.5–99% over time, with the golden peg bonus included.',
-        'Provably fair: your drops come from a server seed that\'s locked in (and fingerprinted) before you play. Rotate it any time to reveal it and verify every drop right on this page.',
+        'Each pearl pays bet × multiplier rounded to the nearest coin. Every row count and risk level returns 98.5–98.9% over time with the golden peg bonus included, exact when your bet per pearl is a multiple of 100 GC; at other stakes the coin rounding moves it: 97.5–99.4% at the 10 GC minimum, 96.8–100.3% across every stake from 10 to 5,000 GC (the widest swings are at odd stakes under 100 GC, e.g. 12 GC), and 98.3–99.1% at any stake of 100 GC or more. One drop can wager up to 10× the table maximum (bet × pearls).',
+        'Provably fair: your drops come from a server seed that\'s locked in (and fingerprinted) before you play, and the NEXT server seed is fingerprinted too, before you choose the client seed that will go with it. Rotate any time to reveal the current seed and verify every drop right on this page.',
         'Autoplay can stop itself on a big hit, a profit target, or a loss limit. Space bar drops too.'],
-    'mines' => ['Choose how many urchins hide in the reef (1–24).', 'Flip tiles. Every pearl raises the multiplier, an urchin ends the round.', 'Cash out whenever you want. More urchins, faster growth.'],
-    'dice' => ['Slide to set your target, pick roll over or under.', 'The roll is 0.00–99.99. Lower chance, higher payout.', 'Multiplier = 99 ÷ win chance, so every setting has the same 1% edge.'],
+    'mines' => ['Choose how many urchins hide in the reef (1–24).', 'Flip tiles. Every pearl raises the multiplier, an urchin ends the round.', 'Cash out whenever you want. More urchins, faster growth.', 'Multiplier after k pearls = 0.99 ÷ P(k safe flips), so every setting has a 1% edge; wins are bet × multiplier rounded to the nearest coin. Wins are capped at 5,000× your bet: the round cashes out by itself when the ladder reaches the cap.'],
+    'dice' => ['Slide to set your target, pick roll over or under.', 'The roll is 0.00–99.99. Over wins when the roll is your target or higher; under wins when it\'s below. Lower chance, higher payout.', 'Multiplier = 99 ÷ win chance (4 decimals), paid as bet × multiplier rounded to the nearest coin, so every setting has the same 1% edge.'],
 ];
 
 function game_panel(string $slug): string {
@@ -4784,7 +4868,7 @@ function panel_plinko(array $p, array $g): string {
     $seed = tx(fn() => fair_active($pid, 'plinko'));
     $revealed = q("SELECT server_seed, server_hash, client_seed, nonce, revealed_at FROM fair_seeds WHERE player_id = ? AND game = 'plinko' AND status = 'revealed' ORDER BY id DESC LIMIT 5", [$pid])->fetchAll();
     $recent = q("SELECT state, bet, payout FROM rounds WHERE player_id = ? AND game = 'plinko' AND status = 'done' ORDER BY id DESC LIMIT 8", [$pid])->fetchAll();
-    $cfg = ['tables' => PD_TABLES, 'gold' => PD_GOLD, 'min' => (int)$g['min_bet'], 'max' => (int)$g['max_bet']];
+    $cfg = ['tables' => PD_TABLES, 'gold' => PD_GOLD, 'min' => (int)$g['min_bet'], 'max' => (int)$g['max_bet'], 'cap' => (int)$g['max_bet'] * 10];
     $seg = function (string $name, array $opts, $cur) {
         $o = '<div class="seg" role="radiogroup" aria-label="' . h(ucfirst($name)) . '">';
         foreach ($opts as $v => $l) { $o .= '<label><input type="radio" name="' . h($name) . '" value="' . h($v) . '"' . ((string)$v === (string)$cur ? ' checked' : '') . '> ' . h($l) . '</label>'; }
@@ -4817,7 +4901,7 @@ function panel_plinko(array $p, array $g): string {
     </div>
     <div class="pd-row main">
       <?= bet_box($g, $per, 'bet', 'Bet per pearl') ?>
-      <p class="pd-total">Drop costs <b data-pd-cost><?= coins($per * $balls) ?></b> GC</p>
+      <p class="pd-total">Drop costs <b data-pd-cost><?= coins($per * $balls) ?></b> GC <span class="muted">(limit <?= coins((int)$g['max_bet'] * 10) ?> per drop)</span></p>
       <button class="btn gold xl pd-drop" data-pd-drop>Drop</button>
     </div>
     <details class="pd-auto">
@@ -4849,8 +4933,9 @@ function panel_plinko(array $p, array $g): string {
           <dt>Server seed hash</dt><dd><code data-fair-hash><?= h($seed['server_hash']) ?></code></dd>
           <dt>Client seed</dt><dd><code data-fair-client><?= h($seed['client_seed']) ?></code></dd>
           <dt>Next nonce</dt><dd><code data-fair-nonce><?= (int)$seed['nonce'] ?></code></dd>
+          <dt>Next server seed hash</dt><dd><code data-fair-next><?= h(hash('sha256', (string)$seed['next_server_seed'])) ?></code></dd>
         </dl>
-        <p class="hint">We lock in the server seed before you play and show you its SHA-256 fingerprint. Every drop is HMAC-SHA256(server seed, "client:nonce:ball:N"). Rotate to reveal the seed and check every drop you made with it.</p>
+        <p class="hint">We lock in the server seed before you play and show you its SHA-256 fingerprint. Every drop is HMAC-SHA256(server seed, "client:nonce:ball:N"). The NEXT server seed is committed too: when you rotate, the new pair uses the seed whose hash is already shown above, paired with whatever client seed you type, so we can't pick a seed after seeing your input. Rotate to reveal the current seed and check every drop you made with it (its hash should match what was shown as "next" before).</p>
         <form method="post" action="<?= h(url('fair', ['g' => 'plinko'])) ?>" class="form" data-fair-rotate>
           <?= csrf_field() ?>
           <label>New client seed <small>(optional)</small> <input name="client_seed" maxlength="64" pattern="[A-Za-z0-9_\-]{1,64}" placeholder="anything you like"></label>
@@ -5127,7 +5212,7 @@ function panel_hilo(array $p, array $g): string {
   </div>
   <div class="hilo-main"><?= $r ? card_html($cardCode($s['card'])) : card_html('', true) ?></div>
   <?php if ($live): $o = hilo_odds($s['card']['r']); ?>
-    <p class="result">Run: <b><?= number_format($s['mult'], 2) ?>×</b> · worth <?= coins((int)floor($r['bet'] * $s['mult'])) ?> GC</p>
+    <p class="result">Run: <b><?= number_format($s['mult'], 2) ?>×</b> · worth <?= coins(pay_mult((int)$r['bet'], $s['mult'], 4)) ?> GC</p>
     <?= play_form_open('hilo', 'controls') ?>
       <button class="btn gold lg" name="move" value="hi">▲ Higher or same <small><?= round($o['hi'] * 100) ?>% · <?= number_format(0.99 / $o['hi'], 2) ?>×</small></button>
       <button class="btn gold lg" name="move" value="lo">▼ Lower or same <small><?= round($o['lo'] * 100) ?>% · <?= number_format(0.99 / $o['lo'], 2) ?>×</small></button>
@@ -5163,10 +5248,10 @@ function panel_mines(array $p, array $g): string {
   <div class="mines-side">
   <?php if ($live): $k = count($open); ?>
     <p class="result">Pearls <?= $k ?> / <?= 25 - $n ?> · <b><?= number_format($k ? mines_mult($n, $k) : 1, 2) ?>×</b></p>
-    <p class="muted">Next pearl: <?= number_format(mines_mult($n, $k + 1), 2) ?>×</p>
-    <?= play_form_open('mines', 'controls') ?><button class="btn coral xl" name="move" value="cashout" <?= $k ? '' : 'disabled' ?>>Cash out <?= $k ? coins((int)floor($r['bet'] * mines_mult($n, $k))) : '' ?></button></form>
+    <p class="muted">Next pearl: <?= number_format(mines_mult($n, $k + 1), 2) ?>×<?= mines_mult($n, $k + 1) >= MINES_MAX_WIN ? ' (max win, auto cash-out)' : '' ?> · cap <?= number_format(MINES_MAX_WIN) ?>×</p>
+    <?= play_form_open('mines', 'controls') ?><button class="btn coral xl" name="move" value="cashout" <?= $k ? '' : 'disabled' ?>>Cash out <?= $k ? coins(pay_mult((int)$r['bet'], mines_mult($n, $k))) : '' ?></button></form>
   <?php else: ?>
-    <?= $r ? result_line($r['outcome'] === 'boom' ? 'Urchin! Round over.' : 'Cashed ' . number_format(mines_mult($n, count($open)), 2) . '× · +' . coins((int)$r['payout']) . ' GC', (int)$r['payout'] > 0) : '<p class="result">Pick your danger level.</p>' ?>
+    <?= $r ? result_line($r['outcome'] === 'boom' ? 'Urchin! Round over.' : ($r['outcome'] === 'max' ? 'Max win! ' . number_format(MINES_MAX_WIN) . '×' : 'Cashed ' . number_format(mines_mult($n, count($open)), 2) . '×') . ' · +' . coins((int)$r['payout']) . ' GC', (int)$r['payout'] > 0) : '<p class="result">Pick your danger level.</p>' ?>
     <?= play_form_open('mines', 'controls stacked') ?>
       <label>Urchins <select name="mines"><?php foreach ([1, 2, 3, 5, 8, 10, 15, 20, 24] as $m): ?><option<?= $m === $n ? ' selected' : '' ?>><?= $m ?></option><?php endforeach; ?></select></label>
       <?= bet_box($g, (int)($r['bet'] ?? 100)) ?>
@@ -5336,21 +5421,22 @@ function panel_craps(array $p, array $g): string {
     $dice = fn(int $a, int $b) => die_svg($a) . die_svg($b);
     $chips = '';
     $first = true;
-    foreach ([10, 25, 50, 100, 500, 1000] as $c) {
+    // 20 and 30 chips cover the buy (20s) and place 6/8 (6s) units in one tap; other taps snap up to the unit
+    foreach ([10, 20, 30, 50, 100, 500, 1000] as $c) {
         if ($c < (int)$g['min_bet'] || $c > (int)$g['max_bet']) { continue; }
         $chips .= '<button type="button" class="chip c' . $c . '" role="radio" aria-checked="' . ($first ? 'true' : 'false') . '" data-chip="' . $c . '">' . ($c >= 1000 ? ($c / 1000) . 'K' : $c) . '</button>';
         $first = false;
     }
     $cols = '';
     foreach (CRAPS_NUMS as $n) {
-        [$pa, $pb] = CRAPS_PLACE[$n]; [$ta, $tb] = CRAPS_TRUE[$n];
+        [$pa, $pb] = CRAPS_PLACE[$n]; [$ta, $tb] = CRAPS_TRUE[$n]; $U = CRAPS_UNIT;
         $cols .= '<div class="cr-col' . ($s['point'] === $n ? ' pt' : '') . '" data-cr-num="' . $n . '" role="group" aria-label="Number ' . $n . '">'
-            . $spot("lay$n", 'Lay', "$tb:$ta · 5% on win", 'mini lay')
+            . $spot("lay$n", 'Lay', "$tb:$ta · 5% of win · ×{$U['lay'][$n]}", 'mini lay')
             . '<div class="cr-num"><span class="cr-puck" aria-hidden="true">ON</span><b>' . ($n === 6 ? 'SIX' : ($n === 9 ? 'NINE' : $n)) . '</b><div class="cr-cp" data-cr-cp="' . $n . '"></div></div>'
-            . $spot("place$n", 'Place', "$pa:$pb", 'mini place')
-            . $spot("buy$n", 'Buy', "$ta:$tb · 5% on win", 'mini')
-            . $spot("comeodds$n", 'Come odds', "$ta:$tb true", 'mini odds')
-            . $spot("dcomeodds$n", 'DC odds', "$tb:$ta true", 'mini odds')
+            . $spot("place$n", 'Place', "$pa:$pb · ×{$U['place'][$n]}", 'mini place')
+            . $spot("buy$n", 'Buy', "$ta:$tb · 5% vig · ×{$U['buy'][$n]}", 'mini')
+            . $spot("comeodds$n", 'Come odds', "$ta:$tb true · ×{$U['odds'][$n]}", 'mini odds')
+            . $spot("dcomeodds$n", 'DC odds', "$tb:$ta true · ×{$U['layodds'][$n]}", 'mini odds')
             . '</div>';
     }
     $hist = '';
@@ -5834,7 +5920,8 @@ function page_admin_view(array $admin): void {
     $r = row("SELECT * FROM $t WHERE id = ?", [$id]);
     if (!$r) { error_page(404, 'Not found', "There's no $t #$id."); }
     unset($r['pass_hash']);
-    if ($t === 'fair_seeds' && $r['status'] === 'active') { $r['server_seed'] = '(hidden until the player rotates)'; }
+    // a revealed row's next seed is the CURRENT seed of the pair that followed it, so it stays hidden on every row
+    if ($t === 'fair_seeds') { unset($r['next_server_seed']); if ($r['status'] === 'active') { $r['server_seed'] = '(hidden until the player rotates)'; } }
     ob_start(); ?>
 <header class="table-head row reveal d1">
   <div>
@@ -7123,7 +7210,7 @@ textarea.mono{font:.85rem/1.5 var(--f-mono)}
   box-shadow:0 4px 10px rgba(0,0,0,.4),inset 0 0 0 3px rgba(255,255,255,.35);transition:transform .2s}
 .chip:hover{transform:translateY(-3px) rotate(-12deg)}
 .chip[aria-checked="true"]{transform:translateY(-6px) scale(1.08);box-shadow:0 0 0 3px var(--gold2),0 10px 20px rgba(0,0,0,.5)}
-.chip.c10{--c1:#eef1f5;--c2:#6c7bd6}.chip.c25{--c1:#e6f5ec;--c2:#1b8a5a}.chip.c50{--c1:#fbe6e8;--c2:#d6283f}.chip.c100{--c1:#e9e9ef;--c2:#1c1c24}
+.chip.c10{--c1:#eef1f5;--c2:#6c7bd6}.chip.c20{--c1:#e6f0fb;--c2:#2b6fd6}.chip.c25{--c1:#e6f5ec;--c2:#1b8a5a}.chip.c30{--c1:#fbefe0;--c2:#d9781a}.chip.c50{--c1:#fbe6e8;--c2:#d6283f}.chip.c100{--c1:#e9e9ef;--c2:#1c1c24}
 .chip.c500{--c1:#f2e6fb;--c2:#7b3fb3}.chip.c1000{--c1:#fff3cf;--c2:#d19a1a}
 
 /* roulette */
@@ -7481,7 +7568,7 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
 .pd-field>span{font:700 .72rem var(--f-body);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
 .pd-field .seg label{padding:7px 12px}
 .seg input:disabled+*,.seg label:has(input:disabled){opacity:.5;cursor:not-allowed}
-.pd-total{margin:0;color:var(--muted);font-size:.9rem;align-self:center}.pd-total b{font-family:var(--f-mono);color:var(--ink)}
+.pd-total{margin:0;color:var(--muted);font-size:.9rem;align-self:center}.pd-total b{font-family:var(--f-mono);color:var(--ink)}.pd-total b.over{color:var(--coral)}
 .pd-drop{min-width:200px}
 .pd-auto summary{cursor:pointer;font-weight:700;color:var(--gold-text);text-align:center;list-style:none}
 .pd-auto summary::-webkit-details-marker{display:none}
@@ -8545,7 +8632,7 @@ function initCrash(root) {
     if (done || !el.isConnected) return;
     const t = (now - t0) / 1000, m = Math.floor(Math.exp(k * t) * 100) / 100;
     multEl.textContent = m.toFixed(2) + '×';
-    if (cash) cash.textContent = 'Cash out ' + fmt(Math.floor(bet * m));
+    if (cash) cash.textContent = 'Cash out ' + fmt(Math.floor((bet * Math.round(m * 100) + 50) / 100));   // same integer rounding as pay_mult()
     const [p, f] = crashPath(k, t); wave.setAttribute('d', p); fill.setAttribute('d', f);
     if (now - lastPeek > 600 || (auto && m >= auto)) { lastPeek = now; peek(); }
     requestAnimationFrame(frame);
@@ -8786,7 +8873,8 @@ function initPearlDrop(root) {
   paintStats();
 
   /* ── controls ── */
-  const updCost = () => { costEl.textContent = fmt((+form.bet.value || 0) * (+pick('balls') || 1)); };
+  const dropCost = () => (+form.bet.value || 0) * (+pick('balls') || 1);
+  const updCost = () => { const c = dropCost(); costEl.textContent = fmt(c); costEl.classList.toggle('over', c > cfg.cap); dropBtn.disabled = c > cfg.cap; };
   form.addEventListener('input', updCost);
   form.addEventListener('change', e => {
     if (e.target.name === 'rows' || e.target.name === 'risk') {
@@ -8820,7 +8908,8 @@ function initPearlDrop(root) {
     if (inflight >= 2) return null;
     pdAudio.unlock();
     const fd = new FormData(form);
-    const cost = (+form.bet.value || 0) * (+pick('balls') || 1);
+    const cost = dropCost();
+    if (cost > cfg.cap) { toast(`Drop limit is ${fmt(cfg.cap)} GC per drop (bet × pearls).`, 'err'); return null; }
     const balEl = document.querySelector('[data-balance]');
     const before = balEl ? +balEl.dataset.balance : null;
     if (before !== null && cost > before) { toast('Not enough Gold Coins for that drop.', 'err'); return null; }
@@ -8894,6 +8983,7 @@ function initPearlDrop(root) {
       $('[data-fair-hash]', el).textContent = d.active.server_hash;
       $('[data-fair-client]', el).textContent = d.active.client_seed;
       $('[data-fair-nonce]', el).textContent = '0';
+      const nx = $('[data-fair-next]', el); if (nx) nx.textContent = d.active.next_server_hash;
       const list = $('[data-fair-revealed]', el), r = d.revealed;
       const li = document.createElement('li');
       li.innerHTML = `<button type="button" class="linkish"><code>${esc(r.server_seed.slice(0, 16))}…</code> · ${r.nonces} drops</button>`;
@@ -9077,8 +9167,7 @@ function initVideoSlot(root) {
   const cellHtml = s => `<div class="vs-cell" data-s="${s}"><svg viewBox="0 0 64 64" role="img" aria-label="${esc(cfg.names[s] || s)}">${cfg.art[s]}</svg></div>`;
   let busy = false, auto = false;
 
-  const paytable = () => { const b = +form.bet.value || 0; $$('[data-vs-paygrid] [data-pay]', el).forEach(x => { const s = x.closest('[data-sym]').dataset.sym; x.textContent = fmt(Math.floor(Math.round(cfg.pays[s][+x.dataset.pay] * 100) * b / 100)); }); $$('[data-jp]', el).forEach(x => { x.textContent = fmt(+x.dataset.jp * b); }); };
-  form.addEventListener('input', paytable); paytable();
+  const paytable = () => { const b = +form.bet.value || 0; $$('[data-vs-paygrid] [data-pay]', el).forEach(x => { const s = x.closest('[data-sym]').dataset.sym; x.textContent = fmt(Math.floor(Math.round(cfg.pays[s][+x.dataset.pay] * 100) * b / 100)); }); $$('[data-jp]', el).forEach(x => { x.textContent = fmt(+x.dataset.jp * b); }); };  form.addEventListener('input', paytable); paytable();
 
   function spinReel(reel, final, i, teaseMs) {
     const strip = $('.vs-strip', reel), cell = reel.clientHeight / 3;
@@ -9359,15 +9448,16 @@ function initCraps(root) {
   const label = k => { const b = board.querySelector(`.cr-spot[data-bet="${k}"] b`); const m = /^(d?come)(\d+)$/.exec(k); return b ? b.textContent : m ? (m[1] === 'come' ? 'Come ' : "Don't come ") + m[2] : k; };
   const removable = k => !(k === 'pass' || k === 'come' || /^come\d+$/.test(k) || ONE.includes(k));
   const offOnComeOut = k => /^(place|buy|lay|hard|comeodds)\d+$/.test(k) || k === 'big6' || k === 'big8';
-  const TRUE_ODDS = { 4: [2, 1], 10: [2, 1], 5: [3, 2], 9: [3, 2], 6: [6, 5], 8: [6, 5] }, PLACE_DEN = { 4: 5, 10: 5, 5: 5, 9: 5, 6: 6, 8: 6 };
-  // betting unit of a spot (mirrors craps_unit on the server): the smallest stake its odds pay in whole coins
+  // mirror of CRAPS_UNIT: the increments that pay whole coins; a tap snaps the chip up to the unit
+  const UNIT = { place: { 4: 5, 10: 5, 5: 5, 9: 5, 6: 6, 8: 6 }, buy: { 4: 20, 10: 20, 5: 20, 9: 20, 6: 20, 8: 20 }, lay: { 4: 40, 10: 40, 5: 30, 9: 30, 6: 24, 8: 24 },
+    odds: { 4: 1, 10: 1, 5: 2, 9: 2, 6: 5, 8: 5 }, layodds: { 4: 2, 10: 2, 5: 3, 9: 3, 6: 6, 8: 6 } };
   const unit = k => {
+    let m;
     if (k === 'horn') return 4; if (k === 'ce') return 2;
-    if (k === 'passodds') return st.point ? TRUE_ODDS[st.point][1] : 1;
-    if (k === 'dpodds') return st.point ? TRUE_ODDS[st.point][0] : 1;
-    const m = /^(place|buy|lay|comeodds|dcomeodds)(4|5|6|8|9|10)$/.exec(k); if (!m) return 1;
-    if (m[1] === 'buy') return 20; if (m[1] === 'lay') return 20 * TRUE_ODDS[m[2]][0] / TRUE_ODDS[m[2]][1];
-    return m[1] === 'place' ? PLACE_DEN[m[2]] : m[1] === 'comeodds' ? TRUE_ODDS[m[2]][1] : TRUE_ODDS[m[2]][0];
+    if ((m = /^(place|buy|lay)(\d+)$/.exec(k))) return UNIT[m[1]][m[2]] || 1;
+    if (k === 'passodds') return UNIT.odds[st.point] || 1; if (k === 'dpodds') return UNIT.layodds[st.point] || 1;
+    if ((m = /^comeodds(\d+)$/.exec(k))) return UNIT.odds[m[1]] || 1; if ((m = /^dcomeodds(\d+)$/.exec(k))) return UNIT.layodds[m[1]] || 1;
+    return 1;
   };
   // why a spot can't take chips right now ('' means it can)
   function blocked(k) {
@@ -9440,7 +9530,7 @@ function initCraps(root) {
     if (amt < MIN || amt <= 0) { toast(`${label(k)} is maxed at ${fmt(c)} GC.`, 'err'); return; }
     if ([...pending.values()].reduce((a, v) => a + v, 0) + amt > MAX * 10) { toast(`Table limit is ${fmt(MAX * 10)} GC of new chips per roll.`, 'err'); return; }
     pending.set(k, (pending.get(k) || 0) + amt);
-    if (amt !== chip && u > 1) toast(k === 'horn' || k === 'ce' ? `${label(k)} is split ${u} ways, so that's ${fmt(amt)} GC.` : `${label(k)} pays in whole coins at multiples of ${u}, so that's ${fmt(amt)} GC.`);
+    if (amt !== chip && u > 1) toast(k === 'horn' || k === 'ce' ? `${label(k)} is split ${u} ways, so that's ${fmt(amt)} GC.` : `${label(k)} pays in units of ${u}, so that's ${fmt(amt)} GC.`);
     paint();
   });
   board.addEventListener('contextmenu', e => { const b = e.target.closest('[data-bet]'); if (b) { e.preventDefault(); pending.delete(b.dataset.bet); paint(); } });
