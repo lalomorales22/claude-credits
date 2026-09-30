@@ -314,7 +314,7 @@ function install(PDO $pdo, bool $fresh): void {
     }
 
     $g = $pdo->prepare('INSERT OR IGNORE INTO games (slug, name, blurb, min_bet, max_bet, sort_order) VALUES (?,?,?,?,?,?)');
-    foreach (GAME_REGISTRY as $slug => [$name, , $blurb, $sort]) { $g->execute([$slug, $name, $blurb, 10, 5000, $sort]); }
+    foreach (GAME_REGISTRY as $slug => [$name, , $blurb, $sort]) { $g->execute([$slug, $name, $blurb, isset(VSLOTS[$slug]) ? VS_MIN_BET : 10, 5000, $sort]); }
     // v3: plinko became Pearl Drop. Only rename if staff never customized it.
     $pdn = GAME_REGISTRY['plinko'];
     $pdo->prepare("UPDATE games SET name = ?, blurb = ?, sort_order = ?, updated_at = datetime('now') WHERE slug = 'plinko' AND name = 'Pier Plinko'")->execute([$pdn[0], $pdn[2], $pdn[3]]);
@@ -1521,42 +1521,42 @@ function play_game(): never {
  */
 const VSLOTS = [
     'tiki' => [
-        'name' => 'Tiki Tides', 'blurb' => 'Laid-back luau. Frequent wins, volcano free spins at 2×.', 'sort' => 44,
+        'name' => 'Tiki Tides', 'blurb' => 'Laid-back luau. Frequent wins, volcano free spins at 2×.', 'sort' => 44, 'rtp' => 95.6,
         'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 64, 'S' => 40],
         'pays' => ['H1' => [1.8, 5.5, 18.3], 'H2' => [1.5, 3.7, 11], 'H3' => [1.1, 2.7, 7.3], 'H4' => [0.91, 2.2, 5.5], 'L1' => [0.37, 0.91, 2.7], 'L2' => [0.37, 0.73, 2.2], 'L3' => [0.27, 0.73, 1.8], 'L4' => [0.27, 0.55, 1.5], 'L5' => [0.18, 0.55, 1.1]],
         'fs' => [3 => 10, 4 => 15, 5 => 20], 'mult' => 2,
         'bonus' => ['type' => 'wheel', 'name' => 'Volcano Wheel'],
     ],
     'calavera' => [
-        'name' => 'Calavera Fiesta', 'blurb' => 'Día de los Muertos under the marigolds. 12+ free spins at 2×.', 'sort' => 45,
+        'name' => 'Calavera Fiesta', 'blurb' => 'Día de los Muertos under the marigolds. 12+ free spins at 2×.', 'sort' => 45, 'rtp' => 95.1,
         'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 52, 'S' => 40],
         'pays' => ['H1' => [2, 6.1, 20.2], 'H2' => [1.6, 4, 12.1], 'H3' => [1.2, 3, 8.1], 'H4' => [1, 2.4, 6.1], 'L1' => [0.4, 1, 3], 'L2' => [0.4, 0.81, 2.4], 'L3' => [0.3, 0.81, 2], 'L4' => [0.3, 0.61, 1.6], 'L5' => [0.2, 0.61, 1.2]],
         'fs' => [3 => 12, 4 => 16, 5 => 24], 'mult' => 2,
         'bonus' => ['type' => 'wheel', 'name' => 'Fiesta Wheel'],
     ],
     'abyss' => [
-        'name' => 'Abyss Critters', 'blurb' => 'Glow-in-the-dark deep sea. Kraken wilds, pearl-clam free spins at 3×.', 'sort' => 40,
+        'name' => 'Abyss Critters', 'blurb' => 'Glow-in-the-dark deep sea. Kraken wilds, pearl-clam free spins at 3×.', 'sort' => 40, 'rtp' => 95.5,
         'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 48, 'S' => 36],
         'pays' => ['H1' => [2.1, 6.3, 21], 'H2' => [1.7, 4.2, 12.6], 'H3' => [1.3, 3.1, 8.4], 'H4' => [1, 2.5, 6.3], 'L1' => [0.42, 1, 3.1], 'L2' => [0.42, 0.84, 2.5], 'L3' => [0.31, 0.84, 2.1], 'L4' => [0.31, 0.63, 1.7], 'L5' => [0.21, 0.63, 1.3]],
         'fs' => [3 => 10, 4 => 15, 5 => 25], 'mult' => 3,
         'bonus' => ['type' => 'pick', 'name' => 'Sunken Treasure', 'tile' => 'clam'],
     ],
     'tinfoil' => [
-        'name' => 'Tinfoil Hat', 'blurb' => 'They don\'t want you to know about these free spins. UFO scatters, 3× bonus.', 'sort' => 41,
+        'name' => 'Tinfoil Hat', 'blurb' => 'They don\'t want you to know about these free spins. UFO scatters, 3× bonus.', 'sort' => 41, 'rtp' => 95.0,
         'w' => ['H1' => 40, 'H2' => 60, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 44, 'S' => 35],
         'pays' => ['H1' => [2.2, 6.7, 22.3], 'H2' => [1.8, 4.5, 13.4], 'H3' => [1.3, 3.3, 8.9], 'H4' => [1.1, 2.7, 6.7], 'L1' => [0.45, 1.1, 3.3], 'L2' => [0.45, 0.89, 2.7], 'L3' => [0.33, 0.89, 2.2], 'L4' => [0.33, 0.67, 1.8], 'L5' => [0.22, 0.67, 1.3]],
         'fs' => [3 => 10, 4 => 14, 5 => 20], 'mult' => 3,
         'bonus' => ['type' => 'pick', 'name' => 'Declassified', 'tile' => 'file'],
     ],
     'blacksite' => [
-        'name' => 'Black Site Breach', 'blurb' => 'Crack the vault. Keycard wilds, classified-file free spins at 4×.', 'sort' => 42,
+        'name' => 'Black Site Breach', 'blurb' => 'Crack the vault. Keycard wilds, classified-file free spins at 4×.', 'sort' => 42, 'rtp' => 95.3,
         'w' => ['H1' => 32, 'H2' => 52, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 40, 'S' => 32],
         'pays' => ['H1' => [2.2, 6.6, 22], 'H2' => [1.8, 4.4, 13.2], 'H3' => [1.3, 3.3, 8.8], 'H4' => [1.1, 2.6, 6.6], 'L1' => [0.44, 1.1, 3.3], 'L2' => [0.44, 0.88, 2.6], 'L3' => [0.33, 0.88, 2.2], 'L4' => [0.33, 0.66, 1.8], 'L5' => [0.22, 0.66, 1.3]],
         'fs' => [3 => 10, 4 => 15, 5 => 20], 'mult' => 4,
         'bonus' => ['type' => 'pick', 'name' => 'Vault Cracker', 'tile' => 'safe'],
     ],
     'coderain' => [
-        'name' => 'Code Rain', 'blurb' => 'Green code falls forever. Rare free spins at a massive 5×.', 'sort' => 43,
+        'name' => 'Code Rain', 'blurb' => 'Green code falls forever. Rare free spins at a massive 5×.', 'sort' => 43, 'rtp' => 95.0,
         'w' => ['H1' => 30, 'H2' => 50, 'H3' => 80, 'H4' => 100, 'L1' => 160, 'L2' => 180, 'L3' => 200, 'L4' => 220, 'L5' => 240, 'W' => 40, 'S' => 30],
         'pays' => ['H1' => [2.2, 6.7, 22.4], 'H2' => [1.8, 4.5, 13.4], 'H3' => [1.3, 3.4, 9], 'H4' => [1.1, 2.7, 6.7], 'L1' => [0.45, 1.1, 3.4], 'L2' => [0.45, 0.9, 2.7], 'L3' => [0.34, 0.9, 2.2], 'L4' => [0.34, 0.67, 1.8], 'L5' => [0.22, 0.67, 1.3]],
         'fs' => [3 => 8, 4 => 12, 5 => 16], 'mult' => 5,
@@ -1565,10 +1565,18 @@ const VSLOTS = [
 ];
 const VS_SYMS = ['H1', 'H2', 'H3', 'H4', 'L1', 'L2', 'L3', 'L4', 'L5'];
 const VS_SCATTER_PAY = [3 => 2, 4 => 10, 5 => 50];
-const VS_MAX_WIN = 5000; // × total bet, per spin including its free spins
-/* Bonus game: a wild on each of reels 2, 3 and 4 in the base game.
+const VS_MAX_WIN = 5000; // × total bet, per spin including its free spins and bonus
+/* Pays are 2-decimal multiples of the bet, so all win math runs in integer hundredths of the bet and a spin's coin
+ * total is floored ONCE (vs_coins). That single floor still costs up to about 20/bet points of RTP (1.2–1.5 at 10 GC,
+ * 0.4 at 51 GC, ≈0.1 at 50 GC, nothing at multiples of 100), so rather than under-deliver the advertised return the
+ * slots take 50 GC or more in steps of 10, which keeps the loss under 0.4 points at every allowed bet. */
+const VS_MIN_BET = 50;
+const VS_BET_STEP = 10;
+/* Bonus game: a wild on each of reels 2, 3 and 4 in the base game only (free-spin grids are never checked).
  * P(trigger) = Π over reels 2–4 of 1 − (1 − p_wild)³, which runs from about 1 in 430 (Tiki) to 1 in 1,500 (Code Rain).
- * The pick bonus draws 3 prizes from VS_PICK (EV 6.76× each, 20.28× total). The wheel draws one stop from VS_WHEEL (EV 14.13×).
+ * The pick bonus deals 12 hidden tiles i.i.d. from VS_PICK and the player keeps the 3 they pick; a pick can't depend on
+ * values nobody has seen, so the sum of any 3 tiles is 3 i.i.d. draws: EV 6.76× each, 20.28× total, unchanged from the
+ * old 3-draw design. The wheel draws one stop from VS_WHEEL (EV 14.13×) and the client only animates to it.
  * The bonus value is independent of the grid, so RTP = base + free spins + P(trigger)·E[bonus]. Each paytable was re-solved to 95–95.6%.
  */
 const VS_PICK = [2 => 3000, 3 => 2500, 5 => 1800, 8 => 1200, 10 => 800, 15 => 400, 25 => 200, 75 => 70, 250 => 25, 1000 => 5];   // per 10,000
@@ -1583,7 +1591,8 @@ function vs_weighted(array $table): int {
 function vs_bonus_hit(array $grid): bool {
     return in_array('W', $grid[1], true) && in_array('W', $grid[2], true) && in_array('W', $grid[3], true);
 }
-/** Draw a bonus outcome. 'x' is × total bet. */
+/** Draw a bonus. 'x' is × total bet. Wheel: the stop is decided here and settled with the spin. Pick: the 12 tile
+ *  prizes are dealt now, stay hidden in the round state, and vs_pick_settle() reveals the 3 the player asks for. */
 function vs_bonus(array $t): array {
     $b = $t['bonus'];
     if ($b['type'] === 'wheel') {
@@ -1591,9 +1600,7 @@ function vs_bonus(array $t): array {
         $stops = array_keys(VS_WHEEL_SEGS, $v, true);
         return ['type' => 'wheel', 'name' => $b['name'], 'segments' => VS_WHEEL_SEGS, 'stop' => $stops[random_int(0, count($stops) - 1)], 'x' => $v];
     }
-    $picks = [vs_weighted(VS_PICK), vs_weighted(VS_PICK), vs_weighted(VS_PICK)];
-    $others = []; for ($i = 0; $i < 9; $i++) { $others[] = vs_weighted(VS_PICK); }
-    return ['type' => 'pick', 'name' => $b['name'], 'tile' => $b['tile'] ?? '', 'picks' => $picks, 'others' => $others, 'x' => array_sum($picks)];
+    return ['type' => 'pick', 'name' => $b['name'], 'tile' => $b['tile'] ?? '', 'board' => array_map(fn() => vs_weighted(VS_PICK), range(0, 11))];
 }
 
 function vs_draw(array $w, int $reel): string {
@@ -1608,9 +1615,9 @@ function vs_grid(array $w): array {
     for ($r = 0; $r < 5; $r++) { for ($y = 0; $y < 3; $y++) { $g[$r][$y] = vs_draw($w, $r); } }
     return $g;
 }
-/** Evaluate a grid: ways wins + scatter count. Returns multiples of total bet. */
+/** Evaluate a grid: ways wins + scatter count. 'c' is the exact total in integer hundredths of the bet ('x' is the same as a float, for display). */
 function vs_eval(array $grid, array $pays): array {
-    $wins = []; $total = 0.0;
+    $wins = []; $total = 0;
     foreach (VS_SYMS as $s) {
         $ways = 1; $k = 0; $cells = [];
         for ($r = 0; $r < 5; $r++) {
@@ -1621,61 +1628,138 @@ function vs_eval(array $grid, array $pays): array {
         }
         if ($k >= 3) {
             $cells = array_values(array_filter($cells, fn($x) => $x[0] < $k));
-            $m = $pays[$s][$k - 3] * $ways;
-            $total += $m;
-            $wins[] = ['sym' => $s, 'k' => $k, 'ways' => $ways, 'x' => $m, 'cells' => $cells];
+            $c = (int)round($pays[$s][$k - 3] * 100) * $ways; // every pay is an exact 2-decimal value, so no float survives past this line
+            $total += $c;
+            $wins[] = ['sym' => $s, 'k' => $k, 'ways' => $ways, 'x' => $c / 100, 'c' => $c, 'cells' => $cells];
         }
     }
     $sc = [];
     foreach ($grid as $r => $col) { foreach ($col as $y => $v) { if ($v === 'S') { $sc[] = [$r, $y]; } } }
     $n = count($sc);
-    if ($n >= 3) { $total += VS_SCATTER_PAY[min($n, 5)]; }
-    usort($wins, fn($a, $b) => $b['x'] <=> $a['x']);
-    return ['wins' => $wins, 'x' => $total, 'scatters' => $sc];
+    if ($n >= 3) { $total += VS_SCATTER_PAY[min($n, 5)] * 100; }
+    usort($wins, fn($a, $b) => $b['c'] <=> $a['c']);
+    return ['wins' => $wins, 'x' => $total / 100, 'c' => $total, 'scatters' => $sc];
+}
+/** Coins for $c hundredths of a $bet-coin bet: exact integer floor, the only place a slot win becomes coins. */
+function vs_coins(int $bet, int $c): int { return intdiv($bet * $c, 100); }
+
+/**
+ * One spin at $bet coins: the base grid, then its free spins, as a running integer total in hundredths of the bet.
+ * The total is floored once; each displayed part (base_win, spins[].win) is the difference of successive cumulative
+ * floors, so base_win + fs.win == payout exactly and a sub-coin remainder carries into the next free spin instead of
+ * being lost. The 5,000× cap is applied to the same running total: a capped spin's parts still add up, and the
+ * free-spin feature ends at the spin that reaches it (fs.played < fs.count). $draw lets tests force grids.
+ */
+function vs_spin(array $t, int $bet, ?callable $draw = null): array {
+    $draw ??= fn() => vs_grid($t['w']);
+    $capC = VS_MAX_WIN * 100;
+    $base = $draw(); $ev = vs_eval($base, $t['pays']);
+    $raw = $ev['c']; $c = min($raw, $capC);
+    $baseWin = vs_coins($bet, $c); $paid = $baseWin;
+    $fs = null; $n = count($ev['scatters']);
+    if ($n >= 3) {
+        $count = $t['fs'][min($n, 5)]; $spins = [];
+        for ($i = 0; $i < $count && $raw < $capC; $i++) {
+            $gr = $draw(); $e = vs_eval($gr, $t['pays']);
+            $raw += $e['c'] * $t['mult']; $c = min($raw, $capC);
+            $now = vs_coins($bet, $c);
+            $spins[] = ['grid' => $gr, 'wins' => $e['wins'], 'scatters' => $e['scatters'], 'win' => $now - $paid];
+            $paid = $now;
+        }
+        $fs = ['count' => $count, 'played' => count($spins), 'mult' => $t['mult'], 'spins' => $spins, 'win' => $paid - $baseWin];
+    }
+    return ['grid' => $base, 'wins' => $ev['wins'], 'scatters' => $ev['scatters'], 'base_win' => $baseWin, 'fs' => $fs,
+        'c' => $c, 'payout' => $paid, 'capped' => $raw > $capC, 'bonus_hit' => vs_bonus_hit($base)];
+}
+
+/** The slots never take less than VS_MIN_BET whatever the games row says. Rows seeded at 10 before the floor existed
+ *  are raised once, so the lobby card, page header and admin show the same limit the engine enforces. */
+function vs_game(array $g): array {
+    if ((int)$g['min_bet'] < VS_MIN_BET) {
+        q("UPDATE games SET min_bet = ?, max_bet = MAX(max_bet, ?), updated_at = datetime('now') WHERE slug = ? AND min_bet < ?", [VS_MIN_BET, VS_MIN_BET, $g['slug'], VS_MIN_BET]);
+        $g['min_bet'] = VS_MIN_BET; $g['max_bet'] = max((int)$g['max_bet'], VS_MIN_BET);
+    }
+    $g['min_bet'] = (int)ceil((int)$g['min_bet'] / VS_BET_STEP) * VS_BET_STEP; // a staff-set minimum off the step rounds up to it
+    return $g;
+}
+function vs_tier(int $payout, int $bet): string { $wm = $payout / $bet; return $wm >= 50 ? 'epic' : ($wm >= 20 ? 'mega' : ($wm >= 8 ? 'big' : '')); }
+function vs_random_tiles(): array { return array_slice(csprng_shuffle(range(0, 11)), 0, 3); }
+/** Inside tx(): settle a pick round. $tiles are the player's 3 indices, or 3 random ones when a later spin finds the bonus abandoned. */
+function vs_pick_settle(array $r, array $tiles, bool $auto): array {
+    $s = st($r); $b = $s['bonus']; $bet = (int)$r['bet'];
+    $vals = array_map(fn($i) => (int)$b['board'][$i], $tiles); $x = array_sum($vals);
+    $win = min($bet * $x, VS_MAX_WIN * $bet - (int)$s['spin']); // the cap counts base + free spins + bonus together
+    $s['bonus'] = ['type' => 'pick', 'name' => $b['name'], 'board' => $b['board'], 'picks' => array_values($tiles), 'values' => $vals, 'x' => $x, 'win' => $win, 'auto' => $auto];
+    $s['capped'] = !empty($s['capped']) || $win < $bet * $x;
+    $payout = (int)$s['spin'] + $win; $s['x'] = round($payout / $bet, 4);
+    return round_close($r, $s, $payout, 'bonus ' . $x . 'x' . ($auto ? ' auto' : ''));
+}
+/** The settlement fields every slot response carries, read back from the round row so a response can't disagree with the ledger.
+ *  For a round still waiting on its picks, 'payout' is the base + free-spin win so far: it is credited together with the bonus. */
+function vs_money(array $r, array $t): array {
+    $s = st($r); $bet = (int)$r['bet']; $pending = $r['status'] === 'active';
+    $payout = $pending ? (int)($s['spin'] ?? 0) : (int)$r['payout'];
+    $b = $s['bonus'] ?? null; $fs = $s['fs'] ?? null;
+    $jp = $b && !$pending ? array_values(array_filter($b['type'] === 'wheel' ? [$b['x']] : $b['values'], fn($v) => isset(VS_JP[$v]))) : [];
+    $msg = $pending ? $b['name'] . ' bonus! Pick 3 tiles.'
+        : ($b ? $b['name'] . ($jp ? ' ' . strtoupper(VS_JP[max($jp)]) . ' JACKPOT' : ' bonus') . '! Total +' . coins($payout) . ' GC' . (!empty($b['auto']) ? ' (settled with 3 random tiles)' : '')
+        : ($fs ? $fs['count'] . ' free spins at ' . $t['mult'] . '×! Total +' . coins($payout) . ' GC'
+        : ($payout ? 'Win +' . coins($payout) . ' GC' : 'No win. Spin again?')));
+    if (!empty($s['capped'])) { $msg = 'MAX WIN ' . coins(VS_MAX_WIN) . '×! ' . $msg; }
+    return ['payout' => $payout, 'bet' => $bet, 'x' => round($payout / $bet, 2), 'capped' => !empty($s['capped']), 'pending' => $pending,
+        'win' => $payout > $bet, 'balance' => bal((int)$r['player_id']), 'tier' => $pending ? '' : vs_tier($payout, $bet), 'message' => $msg];
+}
+/** move=pick&tiles=[i,j,k]: reveal the player's 3 tiles, pay bet × their sum with the round's base + free-spin win, close the round. */
+function vs_pick(string $slug, array $t, int $pid): array {
+    $raw = $_POST['tiles'] ?? '';
+    $tiles = is_array($raw) ? $raw : (json_decode((string)$raw, true) ?? explode(',', (string)$raw));
+    $tiles = is_array($tiles) ? array_values(array_map(fn($v) => ctype_digit((string)$v) ? (int)$v : -1, $tiles)) : [];
+    if (count($tiles) !== 3 || count(array_unique($tiles)) !== 3 || min($tiles) < 0 || max($tiles) > 11) { fail('Pick 3 different tiles.'); }
+    $r = tx(function () use ($pid, $slug, $tiles) {
+        $r = round_active($pid, $slug);
+        if (!$r) { // a pick that arrives after a newer spin: that spin already settled the bonus (it is the round before it)
+            $auto = array_filter(q('SELECT state FROM rounds WHERE player_id = ? AND game = ? ORDER BY id DESC LIMIT 2', [$pid, $slug])->fetchAll(), fn($x) => !empty(st($x)['bonus']['auto']));
+            throw new DomainException($auto ? 'That bonus was already settled with 3 random tiles when you spun again.' : 'No bonus in progress.');
+        }
+        return vs_pick_settle($r, $tiles, false);
+    });
+    $s = st($r);
+    return ['bonus' => $s['bonus'] + ['tile' => $t['bonus']['tile'] ?? ''], 'spin_win' => (int)$s['spin']] + vs_money($r, $t);
 }
 
 function vs_play(): array {
     $slug = (string)($_GET['g'] ?? '');
     $t = VSLOTS[$slug] ?? null;
     if (!$t) { fail('No such slot.', 404); }
-    $p = require_playable(); $g = game_cfg($slug);
-    $bet = clamp_bet($_POST['bet'] ?? '', $g);
-
-    $base = vs_grid($t['w']);
-    $ev = vs_eval($base, $t['pays']);
-    $x = $ev['x'];
-    $bonus = null;
-    if (vs_bonus_hit($base)) { $bonus = vs_bonus($t); $x += $bonus['x']; $bonus['win'] = (int)floor($bet * $bonus['x']); }
-    $fs = null;
-    $n = count($ev['scatters']);
-    if ($n >= 3) {
-        $count = $t['fs'][min($n, 5)];
-        $spins = []; $fx = 0.0;
-        for ($i = 0; $i < $count; $i++) {
-            $gr = vs_grid($t['w']);
-            $e = vs_eval($gr, $t['pays']);
-            $m = $e['x'] * $t['mult'];
-            $fx += $m;
-            $spins[] = ['grid' => $gr, 'wins' => $e['wins'], 'scatters' => $e['scatters'], 'win' => (int)floor($bet * $m)];
-        }
-        $x += $fx;
-        $fs = ['count' => $count, 'mult' => $t['mult'], 'spins' => $spins, 'win' => (int)floor($bet * $fx)];
-    }
-    $capped = $x > VS_MAX_WIN;
-    $x = min($x, VS_MAX_WIN);
-    $payout = (int)floor($bet * $x);
-    $baseWin = (int)floor($bet * $ev['x']);
+    $p = require_playable(); $g = vs_game(game_cfg($slug));
     $pid = (int)$p['id'];
-    tx(fn() => round_oneshot($pid, $slug, $bet, $payout, $bonus ? 'bonus ' . $bonus['x'] . 'x' : ($fs ? 'free spins' : ($payout ? round($x, 2) . 'x' : 'no win')),
-        ['grid' => $base, 'x' => round($x, 4), 'fs' => $fs ? ['count' => $fs['count'], 'win' => $fs['win']] : null, 'bonus' => $bonus ? ['name' => $bonus['name'], 'x' => $bonus['x'], 'win' => $bonus['win']] : null]));
-    $wm = $payout / max(1, $bet);
-    $jp = $bonus ? array_values(array_filter($bonus['type'] === 'wheel' ? [$bonus['x']] : $bonus['picks'], fn($v) => isset(VS_JP[$v]))) : [];
-    return ['grid' => $base, 'wins' => $ev['wins'], 'scatters' => $ev['scatters'], 'base_win' => $baseWin, 'fs' => $fs, 'bonus' => $bonus,
-        'payout' => $payout, 'bet' => $bet, 'x' => round($x, 2), 'capped' => $capped, 'win' => $payout > $bet, 'balance' => bal($pid),
-        'tier' => $wm >= 50 ? 'epic' : ($wm >= 20 ? 'mega' : ($wm >= 8 ? 'big' : '')),
-        'message' => $bonus ? $bonus['name'] . ($jp ? ' ' . strtoupper(VS_JP[max($jp)]) . ' JACKPOT' : ' bonus') . '! Total +' . coins($payout) . ' GC'
-            : ($fs ? $fs['count'] . ' free spins at ' . $t['mult'] . '×! Total +' . coins($payout) . ' GC'
-            : ($payout ? 'Win +' . coins($payout) . ' GC' : 'No win. Spin again?'))];
+    if (($_POST['move'] ?? '') === 'pick') { return vs_pick($slug, $t, $pid); }
+    $bet = clamp_bet($_POST['bet'] ?? '', $g);
+    if ($bet % VS_BET_STEP) { fail('Bets on this slot go in steps of ' . VS_BET_STEP . ' GC (' . coins((int)$g['min_bet']) . '–' . coins((int)$g['max_bet']) . ').'); }
+
+    $sp = vs_spin($t, $bet);
+    $bonus = $sp['bonus_hit'] ? vs_bonus($t) : null;
+    $payout = $sp['payout']; $capped = $sp['capped'];
+    if ($bonus && $bonus['type'] === 'wheel') { // settled with the spin, inside whatever room the cap left
+        $bonus['win'] = min($bet * $bonus['x'], VS_MAX_WIN * $bet - $payout);
+        $payout += $bonus['win']; $capped = $capped || $bonus['win'] < $bet * $bonus['x'];
+    }
+    $state = ['grid' => $sp['grid'], 'x' => round($payout / $bet, 4), 'capped' => $capped,
+        'fs' => $sp['fs'] ? ['count' => $sp['fs']['count'], 'played' => $sp['fs']['played'], 'win' => $sp['fs']['win']] : null,
+        'bonus' => !$bonus ? null : ($bonus['type'] === 'wheel' ? ['type' => 'wheel', 'name' => $bonus['name'], 'x' => $bonus['x'], 'win' => $bonus['win']]
+            : ['type' => 'pick', 'name' => $bonus['name'], 'board' => $bonus['board'], 'pending' => true])];
+    $resolved = null;
+    $r = tx(function () use ($pid, $slug, $bet, $payout, $state, $sp, &$resolved) {
+        // a bonus left mid-pick is settled with 3 random tiles before the new wager, so no round is ever stranded
+        if ($old = round_active($pid, $slug)) { $resolved = vs_pick_settle($old, vs_random_tiles(), true); }
+        if (!empty($state['bonus']['pending'])) { $state['spin'] = $payout; return round_open($pid, $slug, $bet, $state); } // wager now; base + free spins are credited with the pick
+        return round_oneshot($pid, $slug, $bet, $payout, $state['bonus'] ? 'bonus ' . $state['bonus']['x'] . 'x' : ($sp['fs'] ? 'free spins' : ($payout ? round($payout / $bet, 2) . 'x' : 'no win')), $state);
+    });
+    // the pick board never leaves the server until it is settled: the client gets the tile count only
+    $out = ['grid' => $sp['grid'], 'wins' => $sp['wins'], 'scatters' => $sp['scatters'], 'base_win' => $sp['base_win'], 'fs' => $sp['fs'],
+        'bonus' => !$bonus ? null : ($bonus['type'] === 'wheel' ? $bonus : ['type' => 'pick', 'name' => $bonus['name'], 'tile' => $bonus['tile'], 'tiles' => 12])] + vs_money($r, $t);
+    if ($resolved) { $out['bonus_resolved'] = st($resolved)['bonus'] + ['payout' => (int)$resolved['payout'], 'bet' => (int)$resolved['bet']]; }
+    return $out;
 }
 
 const VS_ART = [
@@ -3505,10 +3589,10 @@ function play_url(string $slug): string { return url('play', ['g' => $slug]); }
 function play_form_open(string $slug, string $class = ''): string {
     return '<form method="post" action="' . h(play_url($slug)) . '" data-play class="' . h($class) . '">' . csrf_field();
 }
-function bet_box(array $g, int $default, string $name = 'bet', string $label = 'Bet'): string {
+function bet_box(array $g, int $default, string $name = 'bet', string $label = 'Bet', int $step = 1): string {
     $d = max((int)$g['min_bet'], min((int)$g['max_bet'], $default ?: 100));
     return '<div class="betbox"><label>' . h($label) . ' <input type="number" name="' . h($name) . '" min="' . (int)$g['min_bet'] . '" max="' . (int)$g['max_bet']
-        . '" step="1" value="' . $d . '" inputmode="numeric" required></label><div class="bet-quick" role="group" aria-label="Adjust bet">'
+        . '" step="' . $step . '" value="' . $d . '" inputmode="numeric" required></label><div class="bet-quick" role="group" aria-label="Adjust bet">'
         . '<button type="button" data-adj="half">½</button><button type="button" data-adj="double">2×</button>'
         . '<button type="button" data-adj="min">min</button><button type="button" data-adj="max">max</button></div></div>';
 }
@@ -4023,14 +4107,17 @@ function vs_sym(string $slug, string $s): string {
     return '<svg viewBox="0 0 64 64" role="img" aria-label="' . h(VS_ART[$slug][$s]['name'] ?? $s) . '">' . (VS_ART[$slug][$s]['svg'] ?? '') . '</svg>';
 }
 function panel_videoslot(string $slug, array $p, array $g): string {
-    $t = VSLOTS[$slug];
+    $t = VSLOTS[$slug]; $g = vs_game($g);
     $last = round_last((int)$p['id'], $slug); $s = st($last);
+    $pending = $last && $last['status'] === 'active' && !empty($s['bonus']['pending']); // a pick left unfinished comes back on reload
     $grid = $s['grid'] ?? null;
     if (!$grid) { $grid = [['H1', 'L1', 'L3'], ['L2', 'W', 'H2'], ['H3', 'S', 'L4'], ['L5', 'H1', 'L1'], ['H4', 'L2', 'S']]; }
     $art = [];
     foreach (VS_ART[$slug] as $k => $a) { $art[$k] = $a['svg']; }
     $names = array_map(fn($a) => $a['name'], VS_ART[$slug]);
-    $cfg = ['slug' => $slug, 'art' => $art, 'names' => $names, 'pays' => $t['pays'], 'fs' => $t['fs'], 'mult' => $t['mult'], 'scat' => VS_SCATTER_PAY];
+    $cfg = ['slug' => $slug, 'art' => $art, 'names' => $names, 'pays' => $t['pays'], 'fs' => $t['fs'], 'mult' => $t['mult'], 'scat' => VS_SCATTER_PAY, 'maxwin' => VS_MAX_WIN,
+        // the tile count only: the hidden prizes stay in the round row until the picks are settled
+        'pending' => $pending ? ['type' => 'pick', 'name' => $s['bonus']['name'], 'tile' => $t['bonus']['tile'] ?? '', 'tiles' => 12, 'bet' => (int)$last['bet'], 'spin_win' => (int)($s['spin'] ?? 0)] : null];
     $bet = (int)($last['bet'] ?? max((int)$g['min_bet'], 50));
     ob_start(); ?>
 <div class="vs vs-<?= h($slug) ?>" data-vslot="<?= h($slug) ?>" data-cfg="<?= h(json_encode($cfg, JSON_UNESCAPED_UNICODE)) ?>">
@@ -4056,13 +4143,13 @@ function panel_videoslot(string $slug, array $p, array $g): string {
       <div class="vs-banner" data-vs-banner aria-hidden="true"></div>
     </div>
     <div class="vs-winbar">
-      <span class="vs-winlabel">WIN</span><b class="vs-winamt" data-vs-win><?= $last ? coins((int)$last['payout']) : 0 ?></b>
-      <span class="vs-msg" data-vs-msg aria-live="polite"><?= $last ? h(($s['fs'] ?? null) ? 'Free spins paid ' . coins((int)$s['fs']['win']) . ' GC' : ((int)$last['payout'] ? 'Last spin won ' . coins((int)$last['payout']) . ' GC' : 'Good luck!')) : 'Match 3+ symbols on adjacent reels from the left.' ?></span>
+      <span class="vs-winlabel">WIN</span><b class="vs-winamt" data-vs-win><?= $last ? coins($pending ? (int)($s['spin'] ?? 0) : (int)$last['payout']) : 0 ?></b>
+      <span class="vs-msg" data-vs-msg aria-live="polite"><?= $last ? h($pending ? 'Bonus waiting: pick 3 tiles.' : (!empty($s['capped']) ? 'Max win: ' . coins((int)$last['payout']) . ' GC' : (($s['fs'] ?? null) ? 'Free spins paid ' . coins((int)$s['fs']['win']) . ' GC' : ((int)$last['payout'] ? 'Last spin won ' . coins((int)$last['payout']) . ' GC' : 'Good luck!')))) : 'Match 3+ symbols on adjacent reels from the left.' ?></span>
     </div>
   </div>
   <form class="vs-controls" method="post" action="<?= h(play_url($slug)) ?>" data-vs-form>
     <?= csrf_field() ?>
-    <?= bet_box($g, $bet, 'bet', 'Total bet') ?>
+    <?= bet_box($g, $bet, 'bet', 'Total bet', VS_BET_STEP) ?>
     <button class="btn gold xl vs-spin" data-vs-spin>Spin</button>
     <div class="vs-auto">
       <label>Autospin <select data-vs-auto-n><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select></label>
@@ -4078,16 +4165,16 @@ function panel_videoslot(string $slug, array $p, array $g): string {
       <?php foreach (['W', 'S', ...VS_SYMS] as $sy): ?>
         <div class="vs-payrow" data-sym="<?= h($sy) ?>"><div class="vs-payicon"><?= vs_sym($slug, $sy) ?></div><div>
           <b><?= h($names[$sy]) ?></b>
-          <?php if ($sy === 'W'): ?><small>Wild on reels 2–4. Stands in for everything except the scatter. A wild on each of reels 2, 3 and 4 starts the <?= h($t['bonus']['name']) ?> bonus.</small>
+          <?php if ($sy === 'W'): ?><small>Wild on reels 2–4. Stands in for everything except the scatter. A wild on each of reels 2, 3 and 4 in a base-game spin starts the <?= h($t['bonus']['name']) ?> bonus (free spins can't trigger it).</small>
           <?php elseif ($sy === 'S'): ?><small>3 / 4 / 5 anywhere: <?= VS_SCATTER_PAY[3] ?>× / <?= VS_SCATTER_PAY[4] ?>× / <?= VS_SCATTER_PAY[5] ?>× bet and <?= $t['fs'][3] ?> / <?= $t['fs'][4] ?> / <?= $t['fs'][5] ?> free spins at ×<?= (int)$t['mult'] ?></small>
           <?php else: ?><small class="mono">5× <span data-pay="2"><?= $t['pays'][$sy][2] ?></span> · 4× <span data-pay="1"><?= $t['pays'][$sy][1] ?></span> · 3× <span data-pay="0"><?= $t['pays'][$sy][0] ?></span></small><?php endif; ?>
         </div></div>
       <?php endforeach; ?>
     </div>
-    <p class="fine">Pays shown are × your total bet, per way. 243 ways: a symbol pays when it lands anywhere on reels 1, 2, 3 (and 4, 5) in a row, and the win multiplies by how many times it shows on each reel. Free spins play automatically, can't retrigger, and every free-spin win is multiplied. <?= $t['bonus']['type'] === 'pick'
-    ? h($t['bonus']['name']) . ' bonus: pick 3 of 12 tiles. Each tile hides 2×–1,000× your bet: 2× (30%), 3× (25%), 5× (18%), 8× (12%), 10× (8%), 15× (4%), Mini 25× (2%), Minor 75× (0.7%), Major 250× (0.25%), Grand 1,000× (0.05%).'
-    : h($t['bonus']['name']) . ' bonus: one spin of the wheel, 5×–1,000× your bet. The stops aren\'t equally likely: 5× (22%), 8× (20%), 10× (17%), 12× (14%), 15× (11%), 20× (7%), Mini 25× (5%), 40× (2.5%), Minor 75× (1%), Major 250× (0.4%), Grand 1,000× (0.1%).' ?>
-    Wins cap at <?= coins(VS_MAX_WIN) ?>× bet per spin. Return to player ≈ 95%, bonus included.</p>
+    <p class="fine">Pays shown are × your total bet, per way; the coin figures are for a single way. 243 ways: a symbol pays when it lands anywhere on reels 1, 2, 3 (and 4, 5) in a row, and the win multiplies by how many times it shows on each reel. All pays are added exactly and the spin's total (free spins included) is rounded down to a whole coin once, so the parts you see always add up to what was paid. Free spins play automatically, can't retrigger or start the bonus game, and every free-spin win is multiplied. The bonus game starts only on a base-game spin. <?= $t['bonus']['type'] === 'pick'
+    ? h($t['bonus']['name']) . ' bonus: 12 tiles are dealt face down when it starts, each hiding 2×–1,000× your bet. You pick 3 and win their sum; the other nine then flip so you can see what they held. Leave a pick unfinished and it is picked up again when you reload, or settled with 3 random tiles when you next spin. Tile odds: 2× (30%), 3× (25%), 5× (18%), 8× (12%), 10× (8%), 15× (4%), Mini 25× (2%), Minor 75× (0.7%), Major 250× (0.25%), Grand 1,000× (0.05%).'
+    : h($t['bonus']['name']) . ' bonus: one spin of the wheel, 5×–1,000× your bet. The wheel shows a result the server already drew when the bonus started. The stops aren\'t equally likely: 5× (22%), 8× (20%), 10× (17%), 12× (14%), 15× (11%), 20× (7%), Mini 25× (5%), 40× (2.5%), Minor 75× (1%), Major 250× (0.4%), Grand 1,000× (0.1%).' ?>
+    Wins cap at <?= coins(VS_MAX_WIN) ?>× bet per spin, bonus included; free spins end when the cap is reached. Bets run from <?= coins(VS_MIN_BET) ?> GC in steps of <?= VS_BET_STEP ?>. Return to player <?= number_format($t['rtp'], 1) ?>% by exact math, bonus included; rounding down to whole coins costs about 0.1 points at the <?= coins(VS_MIN_BET) ?> GC minimum, under 0.4 at any allowed bet and nothing at multiples of 100 GC.</p>
   </details>
 </div>
 <?php return ob_get_clean();
@@ -4295,9 +4382,13 @@ function page_game(string $slug): void {
     <ul class="ticks"><?php foreach (GAME_RULES[$slug] ?? (isset(VSLOTS[$slug]) ? [
         '5 reels, 3 rows, 243 ways: symbols pay left to right on adjacent reels, anywhere in each column. More copies on a reel = more ways.',
         'The wild shows up on reels 2, 3 and 4 and stands in for every symbol except the bonus.',
-        '3, 4 or 5 bonus symbols anywhere pay ' . VS_SCATTER_PAY[3] . '×, ' . VS_SCATTER_PAY[4] . '× or ' . VS_SCATTER_PAY[5] . '× your bet and award ' . implode(' / ', VSLOTS[$slug]['fs']) . ' free spins where every win is ×' . VSLOTS[$slug]['mult'] . '.',
+        '3, 4 or 5 bonus symbols anywhere pay ' . VS_SCATTER_PAY[3] . '×, ' . VS_SCATTER_PAY[4] . '× or ' . VS_SCATTER_PAY[5] . '× your bet and award ' . implode(' / ', VSLOTS[$slug]['fs']) . ' free spins where every win is ×' . VSLOTS[$slug]['mult'] . '. Free spins can\'t retrigger or start the bonus game.',
+        'A wild on each of reels 2, 3 and 4 in a base-game spin starts the ' . VSLOTS[$slug]['bonus']['name'] . ' bonus game. ' . (VSLOTS[$slug]['bonus']['type'] === 'pick'
+            ? '12 prizes are dealt face down when it starts; you pick 3 and win their sum, then the other nine are shown. An unfinished pick is resumed when you reload, or settled with 3 random tiles on your next spin.'
+            : 'The wheel shows a result the server already drew when the bonus started.'),
         'Watch for the slow-down: once two bonus symbols land, the remaining reels tease.',
-        'Return to player ≈ 95%, checked with exact math and a million-plus simulated spins.',
+        'Wins are added exactly and rounded down to a whole coin once per spin, free spins included, so the parts always add up to the payout. Wins cap at ' . coins(VS_MAX_WIN) . '× bet per spin. Bets run from ' . coins(VS_MIN_BET) . ' GC in steps of ' . VS_BET_STEP . '.',
+        'Return to player ' . number_format(VSLOTS[$slug]['rtp'], 1) . '% by exact math, bonus included, and checked by simulation; whole-coin rounding costs about 0.1 points at the minimum bet and under 0.4 at any allowed bet.',
     ] : []) as $line): ?><li><?= h($line) ?></li><?php endforeach; ?></ul>
   </aside>
 </section>
@@ -6539,6 +6630,7 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
 .vb-tile.open b{font:400 clamp(1.1rem,3.4vw,1.9rem) var(--vs-font);color:var(--vs-accent)}.vb-tile.open small{font:500 .72rem var(--f-mono)}
 .vb-tile.jp{background:radial-gradient(circle,#fff3c4,var(--vs-accent) 60%,#8a5a00);color:#1a1204;box-shadow:0 0 26px var(--vs-glow)}.vb-tile.jp b{color:#1a1204}
 .vb-tile.miss{opacity:.4;animation:none}
+.vb-tile.picked:not(.open){border-color:var(--vs-accent);box-shadow:0 0 18px var(--vs-glow);transform:scale(1.04)}.vb-tile:disabled:not(.open){cursor:wait}
 @keyframes vbflip{0%{transform:rotateY(90deg)}100%{transform:rotateY(0)}}
 .vb-wheel{position:relative;display:grid;place-items:center;min-height:0}
 .vb-svg{height:100%;max-height:min(440px,64vh);width:auto;max-width:100%;aspect-ratio:208/218;overflow:visible;filter:drop-shadow(0 10px 30px rgba(0,0,0,.6))}
@@ -7044,8 +7136,9 @@ document.addEventListener('click', e => {
   const b = e.target.closest('[data-adj]');
   if (!b) return;
   const inp = b.closest('.betbox').querySelector('input');
-  const min = +inp.min, max = +inp.max, v = +inp.value || min;
-  inp.value = Math.max(min, Math.min(max, { half: Math.floor(v / 2), double: v * 2, min, max }[b.dataset.adj]));
+  const min = +inp.min, max = +inp.max, step = +inp.step || 1, v = +inp.value || min;
+  const want = { half: Math.floor(v / 2), double: v * 2, min, max }[b.dataset.adj];
+  inp.value = Math.max(min, Math.min(max, Math.round(want / step) * step)); // respect the input's step (the video slots bet in 10s)
 });
 
 /* ── chip board: shared by sic bo, big six, crabs, baccarat ── */
@@ -7859,7 +7952,7 @@ function initVideoSlot(root) {
   const cellHtml = s => `<div class="vs-cell" data-s="${s}"><svg viewBox="0 0 64 64" role="img" aria-label="${esc(cfg.names[s] || s)}">${cfg.art[s]}</svg></div>`;
   let busy = false, auto = false;
 
-  const paytable = () => { const b = +form.bet.value || 0; $$('[data-vs-paygrid] [data-pay]', el).forEach(x => { const s = x.closest('[data-sym]').dataset.sym; x.textContent = fmt(Math.floor(cfg.pays[s][+x.dataset.pay] * b)); }); $$('[data-jp]', el).forEach(x => { x.textContent = fmt(+x.dataset.jp * b); }); };
+  const paytable = () => { const b = +form.bet.value || 0; $$('[data-vs-paygrid] [data-pay]', el).forEach(x => { const s = x.closest('[data-sym]').dataset.sym; x.textContent = fmt(Math.floor(Math.round(cfg.pays[s][+x.dataset.pay] * 100) * b / 100)); }); $$('[data-jp]', el).forEach(x => { x.textContent = fmt(+x.dataset.jp * b); }); };
   form.addEventListener('input', paytable); paytable();
 
   function spinReel(reel, final, i, teaseMs) {
@@ -7919,34 +8012,49 @@ function initVideoSlot(root) {
   }
 
   const JP = { 25: 'MINI', 75: 'MINOR', 250: 'MAJOR', 1000: 'GRAND' };
-  // the bonus outcome is already decided by the server; this only lets the player reveal it
+  // wheel: the stop is already decided by the server and this only animates to it.
+  // pick: the 12 prizes are dealt server-side and stay hidden; the 3 tiles chosen here go to the server, which reveals and pays them.
+  // Returns the server's pick reply (final payout, balance, message) or null for a wheel.
   async function playBonus(b, bet) {
     const box = $('[data-vs-bonus]', el);
-    const val = v => `<b>${JP[v] || v + '×'}</b><small>${fmt(Math.floor(v * bet))}</small>`;
+    const val = v => `<b>${JP[v] || v + '×'}</b><small>${fmt(v * bet)}</small>`;
     box.className = 'vs-bonus ' + b.type; box.hidden = false;
     sfx.scatter(K);
+    let res = null;
     if (b.type === 'pick') {
       box.innerHTML = `<div class="vb-head"><b>${esc(b.name)}</b><span>Pick <b data-vb-left>3</b> · won <b data-vb-won>0</b> GC</span></div>
-        <div class="vb-grid">${Array.from({ length: 12 }, (_, i) => `<button type="button" class="vb-tile" aria-label="Tile ${i + 1}"><svg viewBox="0 0 64 64" aria-hidden="true">${cfg.art.W}</svg></button>`).join('')}</div>`;
+        <div class="vb-grid">${Array.from({ length: b.tiles || 12 }, (_, i) => `<button type="button" class="vb-tile" aria-label="Tile ${i + 1}"><svg viewBox="0 0 64 64" aria-hidden="true">${cfg.art.W}</svg></button>`).join('')}</div>`;
+      const tiles = $$('.vb-tile', box), chosen = [];
       await new Promise(done => {
-        let n = 0, got = 0, timer = 0;
-        const arm = () => { timer = setTimeout(() => { const c = $$('.vb-tile:not(.open)', box); pick(c[Math.floor(Math.random() * c.length)]); }, auto ? (turbo() ? 350 : 800) : 15000); };
-        const pick = t => {
-          if (!t || n >= 3 || t.classList.contains('open')) return;
+        let timer = 0;
+        // 15 s per tile before one is chosen for you; autospin chooses quickly
+        const arm = () => { timer = setTimeout(() => { const c = tiles.filter(t => !t.classList.contains('picked')); pick(c[Math.floor(Math.random() * c.length)]); }, auto ? (turbo() ? 350 : 800) : 15000); };
+        const pick = async t => {
+          if (!t || chosen.length >= 3 || t.classList.contains('picked')) return;
           clearTimeout(timer);
-          const v = b.picks[n++]; got += v;
-          t.classList.add('open'); if (JP[v]) t.classList.add('jp'); t.innerHTML = val(v);
-          sfx.win(K, JP[v] ? 4 : 1); if (JP[v]) burst(t, 16);
-          $('[data-vb-left]', box).textContent = 3 - n; $('[data-vb-won]', box).textContent = fmt(Math.floor(got * bet));
-          if (n < 3) { arm(); return; }
-          setTimeout(() => {
-            let k = 0; $$('.vb-tile:not(.open)', box).forEach(x => { x.classList.add('open', 'miss'); x.innerHTML = val(b.others[k++]); });
-            setTimeout(done, turbo() ? 900 : 1900);
-          }, turbo() ? 250 : 600);
+          t.classList.add('picked'); chosen.push(tiles.indexOf(t)); sfx.tick(K);
+          $('[data-vb-left]', box).textContent = 3 - chosen.length;
+          if (chosen.length < 3) { arm(); return; }
+          tiles.forEach(x => { x.disabled = true; });
+          try { res = await post(form.action, { move: 'pick', tiles: JSON.stringify(chosen) }); }
+          catch (err) { toast(err.message, 'err'); res = { error: err.message }; done(); return; }
+          const r = res.bonus; let got = 0;
+          for (let n = 0; n < 3; n++) {
+            const x = tiles[r.picks[n]], v = r.values[n]; got += v;
+            x.classList.add('open'); if (JP[v]) x.classList.add('jp'); x.innerHTML = val(v);
+            sfx.win(K, JP[v] ? 4 : 1); if (JP[v]) burst(x, 16);
+            $('[data-vb-won]', box).textContent = fmt(Math.min(got * bet, r.win));
+            await sleep(turbo() ? 250 : 600);
+          }
+          // the nine you didn't take, as they really were
+          r.board.forEach((v, i) => { if (!r.picks.includes(i)) { const x = tiles[i]; x.classList.add('open', 'miss'); x.innerHTML = val(v); } });
+          setTimeout(done, turbo() ? 900 : 1900);
         };
         box.addEventListener('click', e => pick(e.target.closest('.vb-tile')));
         arm();
       });
+      if (!res || res.error) { box.hidden = true; box.innerHTML = ''; return res; }
+      b = res.bonus;
     } else {
       const N = b.segments.length, seg = 360 / N, R = 96, pt = (a, r) => `${(Math.sin(a * Math.PI / 180) * r).toFixed(2)} ${(-Math.cos(a * Math.PI / 180) * r).toFixed(2)}`;
       const wedges = b.segments.map((v, i) => { const a0 = i * seg - seg / 2, a1 = a0 + seg;
@@ -7967,10 +8075,14 @@ function initVideoSlot(root) {
       await sleep(turbo() ? 700 : 1400);
     }
     box.hidden = true; box.innerHTML = '';
-    const top = Math.max(...(b.type === 'pick' ? b.picks : [b.x]).filter(v => JP[v]), 0);
+    const top = Math.max(...(b.type === 'pick' ? b.values : [b.x]).filter(v => JP[v]), 0);
     if (top) sfx.big(K);
     await showBanner(`<b>${top ? JP[top] + ' JACKPOT' : 'BONUS WIN'}</b><span>${fmt(b.win)} GC · ${b.x}×</span>`, top ? 'tier epic' : 'fs', turbo() ? 1300 : 2400);
+    return res;
   }
+  const bigBanner = d => d.capped
+    ? showBanner(`<b>MAX WIN</b><span>${fmt(d.payout)} GC · ${fmt(cfg.maxwin)}×</span>`, 'tier epic', turbo() ? 1400 : 2600)
+    : showBanner(`<b>${{ big: 'BIG WIN', mega: 'MEGA WIN', epic: 'EPIC WIN' }[d.tier]}</b><span>${fmt(d.payout)} GC · ${d.x}×</span>`, 'tier ' + d.tier, turbo() ? 1400 : 2600);
 
   async function spin() {
     if (busy) return null;
@@ -7985,14 +8097,21 @@ function initVideoSlot(root) {
     let d;
     try { d = await post(form.action, new FormData(form)); }
     catch (err) { toast(err.message, 'err'); if (before !== null) setBalance(before); busy = false; spinBtn.disabled = false; el.classList.remove('spinning'); return null; }
+    if (d.bonus_resolved) { // a pick left unfinished last time was settled with 3 random tiles before this spin
+      const b = d.bonus_resolved;
+      toast(`${b.name}: your unfinished bonus paid ${fmt(b.win)} GC with 3 random tiles.`, 'ok');
+      await showBanner(`<b>${esc(b.name)} SETTLED</b><span>3 random tiles · +${fmt(b.win)} GC</span>`, 'fs', turbo() ? 1100 : 2200);
+    }
     await showGrid(d.grid);
     await presentWins(d.wins, d.scatters, d.base_win);
     let running = d.base_win;
     if (d.bonus) {
       el.classList.add('bonusing');
       await showBanner(`<b>BONUS!</b><span>${esc(d.bonus.name)}</span>`, 'fs', turbo() ? 1000 : 1900);
-      await playBonus(d.bonus, bet);
-      running += d.bonus.win; countTo(running);
+      const r = await playBonus(d.bonus, bet);
+      if (r && !r.error) Object.assign(d, r); // the pick reply carries the revealed bonus and the final payout, x, tier, capped, balance and message
+      else if (r) d.message = 'Bonus pending: it settles with 3 random tiles on your next spin.';
+      running += d.bonus.win || 0; countTo(running);
       el.classList.remove('bonusing');
     }
     if (d.fs) {
@@ -8012,13 +8131,13 @@ function initVideoSlot(root) {
         $('[data-fs-won]', el).textContent = fmt(won - running);
       }
       countTo(d.payout);
+      if (d.capped && d.fs.played < d.fs.count) toast(`Max win reached: the remaining ${d.fs.count - d.fs.played} free spins are forfeited.`);
       await showBanner(`<b>FREE SPINS WON</b><span>${fmt(d.fs.win)} GC</span>`, 'fs', turbo() ? 1200 : 2200);
       fsbar.hidden = true; el.classList.remove('freespins');
     }
-    if (d.tier) {
-      const name = { big: 'BIG WIN', mega: 'MEGA WIN', epic: 'EPIC WIN' }[d.tier];
-      sfx.big(K); burst(banner, d.tier === 'epic' ? 34 : 22);
-      await showBanner(`<b>${name}</b><span>${fmt(d.payout)} GC · ${d.x}×</span>`, 'tier ' + d.tier, turbo() ? 1400 : 2600);
+    if (d.capped || d.tier) {
+      sfx.big(K); burst(banner, d.capped || d.tier === 'epic' ? 34 : 22);
+      await bigBanner(d);
     } else if (d.payout > bet) burst(winEl, 10);
     countTo(d.payout);
     msgEl.textContent = d.message;
@@ -8044,6 +8163,20 @@ function initVideoSlot(root) {
   const snd = $('[data-vs-sound]', el);
   const paintSnd = () => { snd.setAttribute('aria-pressed', sfx.on ? 'true' : 'false'); snd.setAttribute('aria-label', sfx.on ? 'Sound on' : 'Sound off'); snd.classList.toggle('muted', !sfx.on); };
   snd.addEventListener('click', () => { sfx.set(!sfx.on); paintSnd(); }); paintSnd();
+  if (cfg.pending) { // a pick left unfinished: the board is still live on the server, so it plays before anything else
+    (async () => {
+      busy = true; spinBtn.disabled = true; el.classList.add('bonusing');
+      shown = cfg.pending.spin_win; winEl.textContent = fmt(shown);
+      const r = await playBonus(cfg.pending, cfg.pending.bet);
+      el.classList.remove('bonusing');
+      if (r && !r.error) {
+        countTo(r.payout);
+        if (r.capped || r.tier) await bigBanner(r);
+        msgEl.textContent = r.message; setBalance(r.balance);
+      }
+      busy = false; spinBtn.disabled = false;
+    })();
+  }
   el._vs = { spin, cfg };
 }
 
