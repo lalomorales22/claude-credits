@@ -287,3 +287,36 @@ Before any card is dealt the server publishes `deck_hash = sha256(deck_in_deal_o
 - Chat text is length-limited server-side and HTML-escaped client-side. Names come from the ticket, not from the client.
 - Position updates are clamped and rate-limited; a client can't teleport others or spoof another connection id.
 - `ws.php` checks the `Origin` header against the site origin(s) and answers mismatches with 403 before the handshake completes. Setting `rt_origins` (comma-separated) is the allow-list when set; blank = derive from the `Host` header the socket was reached on: `http(s)://<host>` exactly, or any port when the host is localhost / 127.0.0.1 / ::1 / a bare IP address (dev boxes). A request without an `Origin` header is not a browser and is admitted: the ticket is its credential (single use, 60 s, HMAC-signed).
+
+## JS module API (`?action=asset&f=poker`, imported by the poker page and by the floor)
+
+The poker module owns the socket. The floor imports it (the page config carries `poker_asset`, the versioned URL) and shares one connection for presence and poker.
+
+```js
+const M = await import(cfg.poker_asset);
+
+// One socket per page. Fetches a ticket (POST cfg.ticket with the csrf meta), opens cfg.ws, sends hello,
+// heartbeats every 20 s, reconnects with backoff (1,2,4,8…30 s + jitter, fresh ticket each time),
+// state: 'connecting' | 'open' | 'closed' | 'offline' (4 failures; keeps retrying every 30 s).
+const rt = M.connectRealtime(cfg, { room: 'floor' | 'poker', onOpen(welcome), onClose(), onMessage(msg) });
+rt.send({ t: 'pos', x, z, ry, a });      // any protocol message
+const off = rt.on('snap', msg => …);      // per-type subscription; returns an unsubscribe fn
+rt.me;                                    // { id, uid, name, guest } after welcome
+rt.tables;                                // latest poker table summaries (welcome / pk_tables)
+rt.state; rt.close();
+
+// Poker lobby: cards per cfg.tables with live counts. onOpen(tableId) is the navigation hook.
+const lobby = M.mountPokerLobby(host, { rt, cfg, onOpen });   // → { destroy() }
+
+// One table. mode 'page' draws the felt; mode 'hud' is the compact bottom bar the floor uses
+// (the floor renders the felt/cards/chips in 3D from onState(view)). Never auto-leaves a seat.
+const tbl = M.mountPokerTable(host, { rt, tableId, cfg, mode, seatHint, onState(view), onEvents(list), onLeave() });
+tbl.sit(seat, buyin); tbl.leave(); tbl.act('raise', amountTo); tbl.sitout(true); tbl.addon(amount); tbl.view; tbl.destroy();
+
+// Hand history replay + client-side deck-commitment check for ?action=poker_hand.
+M.renderHandHistory(host, record);
+```
+
+Events the floor cares about from `onState(view)`: `view.players[seat].cards` is an array (faces known) or an integer (card backs), `view.board`, `view.pot`, `view.pots`, `view.to_act`, `view.button`, `view.winners`, `view.phase`, `view.me`.
+
+Balance updates: on `bal` the module calls `window.goldTide.setBalance(balance)` when present. Pages embedded in the floor (`?embed=1`) post `{t:'gt_balance', balance}` to `window.parent`; the floor checks `e.origin === location.origin` before trusting it.
