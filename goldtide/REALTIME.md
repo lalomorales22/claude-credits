@@ -297,7 +297,7 @@ Before any card is dealt the server publishes `deck_hash = sha256(deck_in_deal_o
 The poker module owns the socket. The floor imports it (the page config carries `poker_asset`, the versioned URL) and shares one connection for presence and poker.
 
 ```js
-const M = await import(cfg.poker_asset);
+const M = await import(new URL(cfg.poker_asset, location.href).href);   // '?action=…' is not a valid bare specifier: resolve it first
 
 // One socket per page. Fetches a ticket (POST cfg.ticket with the csrf meta), opens cfg.ws, sends hello,
 // heartbeats every 20 s, reconnects with backoff (1,2,4,8…30 s + jitter, fresh ticket each time),
