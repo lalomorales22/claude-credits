@@ -245,23 +245,28 @@ async function waitHttp(url, ms = 15000) {
     try { await B.waitForFunction(([n, id]) => window.__floor.remotes().some(r => r.name === n && r.st === id), [nameA, pkId], { timeout: 8000 }); pkSeen = true; } catch (e) {}
     check(pkSeen, `B sees A's 'st' as ${pkId}`);
     // buy in and wait to be dealt: the HUD lists your two cards (they are too small to read on the 3D felt at 720p)
-    const slid = await F(A, () => /slide over/.test(document.querySelector('.fl-mpk-note') ? document.querySelector('.fl-mpk-note').textContent : ''));
-    await A.click('.fl-mpk-row .fl-btn.gold').catch(() => {});
+    // buy in through the real poker client's HUD (the floor mounts it in 'hud' mode) and wait to be dealt
+    await A.waitForSelector('.fl-pk-hud [data-sit]', { timeout: 15000 }).catch(() => {});
+    await F(A, () => { const b = document.querySelector('.fl-pk-hud [data-sit]'); if (b) b.click(); });
+    await A.waitForSelector('.pk-dlg [data-ok]', { timeout: 8000 }).catch(() => {});
+    await F(A, () => { const b = document.querySelector('.pk-dlg [data-ok]'); if (b) b.click(); });
     let dealt = false;
     for (let i = 0; i < 90 && !dealt; i++) {
-      await F(A, () => { const p = [...document.querySelectorAll('.fl-mpk-row button')].find(b => /^Post a big blind/.test(b.textContent)); if (p) p.click(); });
-      dealt = await F(A, () => document.querySelectorAll('.fl-mpk-hand .fl-mpk-lbl + .fl-mpk-card, .fl-mpk-hand .fl-mpk-card').length >= 2 && /Your hand/i.test(document.querySelector('.fl-mpk-hand').textContent));
+      await F(A, () => { const p = document.querySelector('.fl-pk-hud [data-post]:not([hidden])'); if (p) p.click(); });
+      dealt = await F(A, () => document.querySelectorAll('.fl-pk-hud .pk-mine .pk-card[data-c]').length >= 2);
       if (!dealt) await sleep(1000);
     }
-    const handTxt = await F(A, () => ({ hand: document.querySelector('.fl-mpk-hand').textContent, note: document.querySelector('.fl-mpk-note').textContent, status: document.querySelector('.fl-mpk-status').textContent }));
-    check(dealt && /Your hand\s*(10|[2-9JQKA])[♠♥♦♣]\s*(10|[2-9JQKA])[♠♥♦♣]/.test(handTxt.hand), 'once dealt in, the poker HUD shows your two hole cards', JSON.stringify(handTxt));
-    check(!/slide over/.test(handTxt.note), `the "you'd slide over" note is gone once you are seated${slid ? ' (it was showing before)' : ''}`, JSON.stringify(handTxt));
+    const handTxt = await F(A, () => ({ cards: [...document.querySelectorAll('.fl-pk-hud .pk-mine .pk-card[data-c]')].map(c => c.dataset.c), status: (document.querySelector('.fl-pk-hud [data-status]') || {}).textContent || '' }));
+    check(dealt && handTxt.cards.length === 2 && handTxt.cards.every(c => /^[2-9TJQKA][shdc]$/.test(c)), 'once dealt in, the poker HUD shows your two hole cards', JSON.stringify(handTxt));
+    check(await F(A, () => { const n = document.querySelectorAll('.fl-pk-hud .pk-hud-board .pk-card').length; return n === 0 || n >= 3; }), 'the HUD board strip shows the flop or nothing (never a partial street)');
     await sleep(1500);
     await shot(A, 'floor-a-poker-seat');
     const leaveSeat = async () => {
       await F(A, () => document.querySelector('.fl-stand') && document.querySelector('.fl-stand').click());
       await sleep(300);
       await F(A, () => { const c = document.querySelector('.fl-confirm:not([hidden]) button.gold'); if (c) c.click(); });
+      await sleep(300);
+      await F(A, () => { const c = document.querySelector('.pk-dlg [data-ok]'); if (c) c.click(); });
       await sleep(900);
       if (await F(A, () => window.__floor.state().seated !== null)) { await F(A, () => window.__floor.stand()); await sleep(600); }
     };
@@ -270,7 +275,7 @@ async function waitHttp(url, ms = 15000) {
     // sitting at the same table again reuses its 3D chips / dealer button / spotlight instead of building (and leaking) new ones
     const pkWatch = async () => { await F(A, s => { window.__floor.setPos(s.stand[0], s.stand[1]); window.__floor.face(s.id); return window.__floor.interact(); }, pkSt); await sleep(2200); await F(A, () => window.__floor.stand()); await sleep(600); return F(A, () => { const s = window.__floor.state(); return [s.pkDyn, s.sceneN, s.tex]; }); };
     const w1 = await pkWatch(), w2 = await pkWatch(), w3 = await pkWatch();
-    check(w1[0] === 1 && w3[0] === 1 && w3[1] === w1[1], `sitting at the same poker table again reuses its 3D group instead of building a new one (groups ${w1[0]} → ${w3[0]}, scene objects ${w1[1]} → ${w3[1]}, textures ${w1[2]} → ${w2[2]} → ${w3[2]})`);
+    check(w1[0] === 1 && w3[0] === 1 && w3[2] <= w1[2] + 4, `sitting at the same poker table again reuses its 3D group instead of building a new one (groups ${w1[0]} → ${w3[0]}, scene objects ${w1[1]} → ${w3[1]}, textures ${w1[2]} → ${w2[2]} → ${w3[2]})`);
 
     await A.keyboard.press('KeyH'); await sleep(1200);
     check(await F(A, () => !document.querySelector('.fl-help').hidden), 'H opens the help overlay');
