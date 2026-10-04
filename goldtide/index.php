@@ -8035,7 +8035,12 @@ function walkToAndSit(st) {
   player.walkTo = { st, fx: player.x, fz: player.z, tx, tz, fyaw: player.yaw, tyaw: Math.atan2(-(c.x - tx), -(c.z - tz)), t0: performance.now(), dur: clamp(d / 3.2, .4, 3.5) * 1000 };
 }
 function yawPitchTo(from, to) { const d = new T.Vector3().subVectors(to, from).normalize(); return { yaw: Math.atan2(-d.x, -d.z), pitch: Math.asin(clamp(d.y, -1, 1)) }; }
-function usableBox() { const top = headerHeight() + 8, bottom = 74; return { top, bottom, h: Math.max(120, world.H - top - bottom) }; }
+function usableBox() {
+  let top = headerHeight() + 8;
+  // seated at a screen the map is hidden but the tool row stays: fit the screen below it so it never covers a game control
+  if (player.seated && player.seated.screen && ui.mapWrap) { const r = ui.mapWrap.getBoundingClientRect(), s0 = shell.getBoundingClientRect().top; if (r.height > 0) top = Math.max(top, Math.round(r.bottom - s0) + 6); }
+  const bottom = 74; return { top, bottom, h: Math.max(120, world.H - top - bottom) };
+}
 function activeSize(st) {
   const sc = st.screen, ub = usableBox(), aspect = world.W / ub.h;
   if (aspect < .9) return [sc.w, Math.min(sc.w / (aspect * .96), sc.h * 2.6)];
@@ -8054,8 +8059,9 @@ function screenPose(st) {
 function pokerPose(st) {
   const P = pokerTables.get(st.table), s = P.seats[st.seatNo];
   const out = new T.Vector3(s.sx, 0, s.sz).normalize();
-  const eye = new T.Vector3(s.x + out.x * .18, 1.42, s.z + out.z * .18);
-  const tgt = new T.Vector3(P.cx - out.x * .35, .3, P.cz - out.z * .35);
+  // leaning in over the rail: the neighbours' chairs fall out of frame and your own cards sit in the lower third
+  const eye = new T.Vector3(s.x - out.x * .28, 1.78, s.z - out.z * .28);
+  const tgt = new T.Vector3(P.cx + out.x * .05, .1, P.cz + out.z * .05);
   return Object.assign({ x: eye.x, y: eye.y, z: eye.z }, yawPitchTo(eye, tgt));
 }
 function sit(st) {
@@ -8072,6 +8078,7 @@ function sit(st) {
   tweenTo(pose, 700, () => { if (player.seated === st) onSeated(st); });
 }
 function onSeated(st) {
+  if (st.screen) player.base = screenPose(st); // the window may have changed size during the sit tween
   ui.seated.hidden = false; for (const e of ui.edges) e.hidden = !st.screen || isTouch;
   if (st.kind === 'poker') mountPoker(st); else openScreen(st);
   shell.dataset.seated = st.id;
@@ -8127,15 +8134,19 @@ function setScreenInstance(st, visible) {
 function openScreen(st) {
   closeScreen();
   const pose = screenPose(st), sc = st.screen;
-  const ew = Math.round(clamp(pose.pw * pose.pxPerM, 360, 1400)), eh = Math.round(ew * pose.ph / pose.pw);
+  const { ew, eh } = screenPx(pose);
+  css.k = 1; css.fitN = 0; player.base = pose;
   css.cam = css.cam || css.root.appendChild(el('div', 'fl-css-cam'));
   css.obj = el('div', 'fl-css-obj');
   const src = `?action=${encodeURIComponent(st.slug)}&embed=1`;
   const ifr = el('iframe', 'fl-screen', null, { src, title: gameName(st.slug), width: ew, height: eh, allow: 'fullscreen', referrerpolicy: 'same-origin' });
   ifr.style.width = ew + 'px'; ifr.style.height = eh + 'px';
   ifr.addEventListener('load', () => {
-    ifr.dataset.loaded = '1';
     try { ifr.contentWindow.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); requestStand(); } }); } catch (e) {}
+    fitScreen(ifr);
+    ifr.dataset.loaded = '1';
+    // the embed page builds parts of its layout after load (fonts, 3D stage, reveal): fit again once it settles
+    for (const ms of [350, 1200]) setTimeout(() => { if (css.frame === ifr) fitScreen(ifr); }, ms);
   });
   css.obj.append(ifr); css.cam.append(css.obj); css.frame = ifr;
   css.o3 = new T.Object3D(); css.o3.position.copy(sc.center).addScaledVector(sc.normal, .004); css.o3.quaternion.copy(sc.quat); css.o3.scale.setScalar(pose.pw / ew);
@@ -8145,11 +8156,48 @@ function openScreen(st) {
   css.st = st;
   shell.classList.add('has-screen');
 }
+// The iframe's CSS size is the screen's on-screen size times css.k: the page renders at a larger virtual size and the
+// CSS3D object scales it back down, so a game taller than the screen (Spin / Deal / Roll below the fold) still fits.
+// css.k grows only as far as the main action button needs, and never past 1 / FIT_MIN_SCALE; a resize starts it over at 1.
+const FIT_MIN_SCALE = .6;
+function screenPx(pose) { const ew = Math.round(clamp(pose.pw * pose.pxPerM, 360, 1400)); return { ew, eh: Math.round(ew * pose.ph / pose.pw) }; }
+function applyScreenSize(pose) {
+  if (!css.frame || !css.o3) return;
+  const { ew, eh } = screenPx(pose), k = css.k || 1, vw = Math.round(ew * k), vh = Math.round(eh * k);
+  css.frame.style.width = vw + 'px'; css.frame.style.height = vh + 'px'; css.frame.width = vw; css.frame.height = vh;
+  css.o3.scale.setScalar(pose.pw / vw); css.hole.scale.set(pose.pw, pose.ph, 1);
+}
+function mainControl(doc) {
+  const vis = b => b && b.offsetParent !== null && b.getBoundingClientRect().height > 0;
+  for (const q of ['.game-stage button.gold, .game-stage .btn.gold', '[data-panel] button.gold, [data-panel] .btn.gold', 'main button.gold, main .btn.gold, main button[type=submit]']) {
+    const b = [...doc.querySelectorAll(q)].find(vis); if (b) return b;
+  }
+  return null;
+}
+function fitScreen(ifr) {
+  if (!ifr || css.frame !== ifr || !player.seated || !player.seated.screen) return;
+  let doc; try { doc = ifr.contentDocument; } catch (e) { return; }
+  if (!doc || !doc.body) return;
+  const pose = screenPose(player.seated), { eh } = screenPx(pose), se = doc.scrollingElement || doc.documentElement, k0 = css.k || 1;
+  for (let i = 0; i < 3; i++) {
+    const b = mainControl(doc), cur = Math.round(eh * (css.k || 1));
+    const need = b ? b.getBoundingClientRect().bottom + se.scrollTop + 14 : se.scrollHeight;
+    const k = Math.max(css.k || 1, clamp(need / eh, 1, 1 / FIT_MIN_SCALE)); // only grows: a wider page can reflow into a layout that fits, and shrinking back would undo it
+    if (Math.abs(k * eh - cur) < 8) break;
+    css.k = k; applyScreenSize(pose);
+    void ifr.getBoundingClientRect(); void doc.documentElement.offsetHeight; // lay out the parent, then the page at its new size
+  }
+  // games redraw on their own resize event, after this measurement: look again once they have (a few times at most)
+  if (Math.abs((css.k || 1) - k0) > .01 && (css.fitN = (css.fitN || 0) + 1) < 6) setTimeout(() => fitScreen(ifr), 250);
+  // still taller than the screen at the smallest scale: scroll so the main button is in view
+  const b = mainControl(doc);
+  if (b) { const r = b.getBoundingClientRect(), vh = doc.documentElement.clientHeight || doc.defaultView.innerHeight; if (r.bottom > vh) se.scrollTo({ top: se.scrollTop + Math.ceil(r.bottom - vh + 10), behavior: 'instant' }); }
+}
 function closeScreen() {
   if (css.obj) { const f = css.obj.querySelector('iframe'); if (f) { try { f.src = 'about:blank'; } catch (e) {} } css.obj.remove(); }
   if (css.hole) world.scene.remove(css.hole);
   if (css.st) setScreenInstance(css.st, true);
-  css.obj = css.hole = css.o3 = css.st = css.frame = null;
+  css.obj = css.hole = css.o3 = css.st = css.frame = null; css.k = 1;
   shell.classList.remove('has-screen');
 }
 function renderCSS() {
@@ -8247,7 +8295,7 @@ function buildPeople() {
 /* ═════════════════════════ multiplayer ═════════════════════════ */
 const remotes = new Map(); // id → { id, uid, name, st, buf, A, x, z }
 const net = {
-  rt: null, mod: {}, myId: null, everOpen: false, startedAt: 0, lastSend: 0, pending: false, last: null, seatId: null, online: 1,
+  rt: null, mod: {}, myId: null, everOpen: false, startedAt: 0, lastSend: 0, last: null, seatId: null, online: 1,
   send(m) { return !!(this.rt && this.rt.state === 'open' && this.rt.send(m)); },
   seat(id) { this.seatId = id; this.send({ t: 'seat', st: id }); },
   pos(force) {
@@ -8256,8 +8304,10 @@ const net = {
     const l = this.last, changed = !l || Math.abs(l.x - cur.x) > .01 || Math.abs(l.z - cur.z) > .01 || Math.abs(angDiff(l.ry, cur.ry)) > .02 || l.a !== cur.a;
     if (!changed && !force) return;
     const now = performance.now();
-    if (!force && now - this.lastSend < 100) { this.pending = true; return; }
-    if (this.send({ t: 'pos', ...cur })) { this.last = cur; this.lastSend = now; this.pending = false; }
+    // 10 per second at most (the server drops past 15/s). A change held back here goes out from loop() once 100 ms have
+    // passed, because `changed` stays true against the last position actually sent, so the final resting spot always arrives.
+    if (!force && now - this.lastSend < 100) return;
+    if (this.send({ t: 'pos', ...cur })) { this.last = cur; this.lastSend = now; }
   },
 };
 function rosterEntry(p) { const [id, uid, name, x, z, ry, a, st] = p; return { id, uid, name, x: +x || 0, z: +z || 0, ry: +ry || 0, a: +a || 0, st: st || null }; }
@@ -8406,7 +8456,7 @@ function netStatus() {
 
 /* ═════════════════════════ poker tables ═════════════════════════ */
 function seatMap(players) { const m = new Map(); for (const [k, v] of Object.entries(players || {})) if (v) m.set(+k, v); return m; }
-const pk = { st: null, tid: null, tbl: null, view: null, dyn: null, chips: null, cards: [], gens: new Map(), spot: null, button: null, winHand: -1, flyers: [] };
+const pk = { st: null, tid: null, tbl: null, view: null, dyn: null, dyns: new Map(), chips: null, cards: [], gens: new Map(), spot: null, button: null, winHand: -1, flyers: [] };
 function mountPoker(st) {
   pk.st = st; pk.tid = st.table; pk.winHand = -1;
   ui.pk.hidden = false; ui.pk.replaceChildren();
@@ -8425,15 +8475,18 @@ function unmountPoker() {
   clearPokerDyn(); pk.st = null; pk.tid = null;
 }
 function clearPokerDyn() {
-  if (pk.dyn) { world.scene.remove(pk.dyn); pk.dyn = null; }
+  // the dynamic group is built once per table and kept (hidden) for the next sit, so sitting down again allocates nothing
+  if (pk.dyn) { for (const m of pk.cards) pk.dyn.remove(m); pk.chips.count = 0; pk.button.visible = false; pk.spot.visible = false; pk.dyn.visible = false; pk.dyn = null; }
   for (const A of pk.gens.values()) disposeAvatar(A); pk.gens.clear();
-  for (const f of pk.flyers) world.scene.remove(f.m); pk.flyers = [];
+  for (const f of pk.flyers) { if (f.m.parent) f.m.parent.remove(f.m); f.m.dispose(); } pk.flyers = [];
   pk.cards = [];
 }
 const CHIP_TIERS = [[25000, '#ff8a3d'], [5000, '#e8b64c'], [1000, '#8a4ad9'], [250, '#1a1a24'], [50, '#1b8a5a'], [10, '#d6283f'], [0, '#f1ece0']];
 const chipColor = amt => (CHIP_TIERS.find(([d]) => amt >= d * 4) || CHIP_TIERS[CHIP_TIERS.length - 1])[1];
 function ensureDyn(P) {
   if (pk.dyn) return pk.dyn;
+  const kept = pk.dyns.get(P.t.id);
+  if (kept) { Object.assign(pk, kept.userData.parts); kept.visible = true; pk.dyn = kept; return kept; }
   const g = new T.Group(); g.position.set(P.cx, 0, P.cz); world.scene.add(g);
   pk.chips = new T.InstancedMesh(G.cyl, phong({ color: 0xffffff, specular: 0x444444, shininess: 30 }), 900); pk.chips.count = 0; pk.chips.frustumCulled = false; g.add(pk.chips);
   const btnTex = canvasTex(128, 128, (x, w, h) => { x.fillStyle = '#fbf8f0'; x.beginPath(); x.arc(w / 2, h / 2, w / 2, 0, TAU); x.fill(); x.fillStyle = '#1a1204'; x.font = `800 72px ${FONT_B}`; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('D', w / 2, h / 2 + 4); });
@@ -8442,7 +8495,8 @@ function ensureDyn(P) {
   const cone = new T.Mesh(new T.ConeGeometry(.75, 2.6, 32, 1, true), basic({ color: 0xffe6a8, transparent: true, opacity: .08, blending: T.AdditiveBlending, depthWrite: false, side: T.DoubleSide })); cone.position.y = 1.45; spot.add(cone); world.disposables.add(cone.geometry);
   const pool = new T.Mesh(new T.CircleGeometry(.62, 32).rotateX(-Math.PI / 2), basic({ map: M.shadow.map, color: 0xffd98a, transparent: true, opacity: .5, blending: T.AdditiveBlending, depthWrite: false })); pool.position.y = .02; spot.add(pool); world.disposables.add(pool.geometry);
   spot.visible = false; spot.userData.pool = pool; g.add(spot); pk.spot = spot;
-  pk.dyn = g;
+  g.userData.parts = { chips: pk.chips, button: pk.button, spot };
+  pk.dyns.set(P.t.id, g); pk.dyn = g;
   return g;
 }
 let _m4, _q, _v, _s, _c;
@@ -8470,13 +8524,14 @@ function pokerState(v) {
   for (const m of pk.cards) g.remove(m); pk.cards = [];
   const myRy = P.seats[pk.st.seatNo] ? P.seats[pk.st.seatNo].ry : 0;
   const card = (code, x, z, ry, k = 0) => { const m = new T.Mesh(C.geo(code), C.material); m.position.set(x, .819 + k * .0012, z); m.rotation.y = ry; g.add(m); pk.cards.push(m); return m; };
-  (v.board || []).forEach((c, i) => { const ox = (i - 2) * .125; card(c, ox * Math.cos(myRy), -ox * Math.sin(myRy), myRy, i); });
+  (v.board || []).forEach((c, i) => { const ox = (i - 2) * .16; card(c, ox * Math.cos(myRy), -ox * Math.sin(myRy), myRy, i).scale.setScalar(1.3); });
   const players = seatMap(v.players), chips = [];
   const at = (S, f, side = 0) => [P.a * f * S.sx + side * S.sz * .1, P.b * f * S.sz - side * S.sx * .1];
   for (const [s, p] of players) {
     const S = P.seats[s]; if (!S) continue;
     const list = Array.isArray(p.cards) ? p.cards : (p.in && (p.cards | 0) > 0 ? new Array(p.cards | 0).fill(null) : []);
-    list.forEach((c, k) => { const [x, z] = at(S, .68, (k - (list.length - 1) / 2) * 1.15); card(c, x, z, S.ry + (k - .5) * .12, k); });
+    const mineSeat = s === v.me, f0 = mineSeat ? .6 : .68, sp = mineSeat ? 1.6 : 1.15;
+    list.forEach((c, k) => { const [x, z] = at(S, f0, (k - (list.length - 1) / 2) * sp); const m = card(c, x, z, S.ry + (k - .5) * .12, k); if (mineSeat) m.scale.setScalar(1.5); });
     const [sx, sz] = at(S, .86, 1.5); chipStack(chips, sx, sz, p.stack || 0);
     if (p.bet > 0) { const [bx, bz] = at(S, .5); chipStack(chips, bx, bz, p.bet, 8); }
   }
@@ -8541,14 +8596,24 @@ function updateTableLabels() {
 /* ───────── minimal poker HUD, used only when the poker module doesn't export mountPokerTable ───────── */
 function miniPokerTable(host, { rt, tableId, seatHint, onState, onEvents, onLeave }) {
   const box = el('div', 'fl-mpk', null, { 'data-poker-hud': '1' }); host.append(box);
-  const status = el('div', 'fl-mpk-status', 'Pulling up a chair…'), row = el('div', 'fl-mpk-row'), note = el('div', 'fl-mpk-note');
-  box.append(status, row, note);
+  const status = el('div', 'fl-mpk-status', 'Pulling up a chair…'), hand = el('div', 'fl-mpk-hand', null, { hidden: true, 'aria-live': 'polite' }), row = el('div', 'fl-mpk-row'), note = el('div', 'fl-mpk-note');
+  box.append(status, hand, row, note);
+  const SYM = { s: '♠', h: '♥', d: '♦', c: '♣' };
+  const cardEl = c => { if (typeof c !== 'string' || c.length !== 2 || !SYM[c[1]]) return el('span', 'fl-mpk-card back', '🂠', { 'aria-label': 'face down' }); const r = c[0] === 'T' ? '10' : c[0]; return el('span', 'fl-mpk-card' + (c[1] === 'h' || c[1] === 'd' ? ' red' : ''), r + SYM[c[1]]); };
+  function renderHand(v, mine) {
+    const cards = mine && Array.isArray(mine.cards) ? mine.cards : [], board = Array.isArray(v.board) ? v.board : [];
+    hand.hidden = !cards.length && !board.length;
+    const parts = [];
+    if (cards.length) parts.push(el('span', 'fl-mpk-lbl', 'Your hand'), ...cards.map(cardEl));
+    if (board.length) parts.push(el('span', 'fl-mpk-lbl', 'Board'), ...board.map(cardEl));
+    hand.replaceChildren(...parts);
+  }
   let view = null, buy = null, raise = null;
   const send = m => rt.send(m);
   const offs = [
     rt.on('pk_state', m => { if (m.table && m.table.id === tableId) { view = m.table; api.view = view; render(); safe(onState, view); } }),
     rt.on('pk_events', m => { if (m.table === tableId) safe(onEvents, m.events || []); }),
-    rt.on('pk_err', m => { note.textContent = String(m.msg || 'The dealer said no.'); }),
+    rt.on('pk_err', m => { note.textContent = String(m.msg || 'The dealer said no.'); delete note.dataset.slide; }),
   ];
   send({ t: 'pk_watch', table: tableId });
   const btn = (label, fn, cls = '') => { const b = el('button', 'fl-btn sm ' + cls, label, { type: 'button' }); b.addEventListener('click', fn); return b; };
@@ -8556,6 +8621,8 @@ function miniPokerTable(host, { rt, tableId, seatHint, onState, onEvents, onLeav
     const v = view; if (!v) return;
     const players = seatMap(v.players), mine = v.me !== null && v.me !== undefined ? players.get(v.me) : null;
     row.replaceChildren();
+    renderHand(v, mine);
+    if (mine && note.dataset.slide) { note.textContent = ''; delete note.dataset.slide; } // you're in: the slide-over note is history
     if (!mine) {
       const taken = players.get(seatHint);
       const bal = me ? me.balance : 0, max = Math.min(v.max_buy, bal);
@@ -8564,7 +8631,7 @@ function miniPokerTable(host, { rt, tableId, seatHint, onState, onEvents, onLeav
         const open = []; for (let i = 0; i < v.seats; i++) if (!players.get(i)) open.push(i);
         if (!open.length) { status.textContent = `${v.name} is full right now. You're watching from here.`; return; }
         seat = open.reduce((a, b) => Math.abs(b - seatHint) < Math.abs(a - seatHint) ? b : a, open[0]);
-        note.textContent = `Seat ${seatHint + 1} is taken by ${taken.name}, so you'd slide over to seat ${seat + 1}.`;
+        note.textContent = `Seat ${seatHint + 1} is taken by ${taken.name}, so you'd slide over to seat ${seat + 1}.`; note.dataset.slide = '1';
       }
       if (bal < v.min_buy) { status.textContent = `Buy-in here starts at ${fmt(v.min_buy)} GC. Grab some free coins at the cashier and come back.`; return; }
       status.textContent = `${v.name}: buy in for ${fmt(v.min_buy)}–${fmt(v.max_buy)} GC.`;
@@ -8724,12 +8791,10 @@ function resize() {
   world.renderer.setSize(W, H, false);
   world.camera.aspect = W / H; world.camera.updateProjectionMatrix();
   shell.style.setProperty('--fl-top', headerHeight() + 'px');
-  if (player.seated && player.seated.screen && !player.tween) {
+  if (player.seated && player.seated.screen) {
     const st = player.seated, pose = screenPose(st); player.base = pose;
-    if (css.obj && css.frame) {
-      const ew = Math.round(clamp(pose.pw * pose.pxPerM, 360, 1400)), eh = Math.round(ew * pose.ph / pose.pw);
-      css.frame.style.width = ew + 'px'; css.frame.style.height = eh + 'px'; css.o3.scale.setScalar(pose.pw / ew); css.hole.scale.set(pose.pw, pose.ph, 1);
-    }
+    if (player.tween && player.tween.b) player.tween.b = pose; // mid sit tween: land on the pose for the new size
+    if (css.obj && css.frame) { css.k = 1; applyScreenSize(pose); const f = css.frame; if (f.dataset.loaded === '1') { css.fitN = 0; requestAnimationFrame(() => fitScreen(f)); } }
   }
 }
 function loop(now) {
@@ -8747,7 +8812,7 @@ function loop(now) {
   pk.flyers = pk.flyers.filter(f => !f.tick());
   if (pk.spot && pk.spot.visible) pk.spot.userData.pool.material.opacity = .35 + .2 * Math.sin(t * 4);
   if (sun) { sun.position.set(player.x + 4, 12, player.z + 3); sun.target.position.set(player.x, 0, player.z); }
-  net.pos(net.pending);
+  net.pos(false);
   if (!world.paused) world.renderer.render(world.scene, world.camera);
   renderCSS();
   if (now - mapT > 100) { mapT = now; drawMap(); }
@@ -8774,7 +8839,7 @@ function dispose() {
 function testHooks() {
   window.__floor = {
     ready: false,
-    state: () => ({ x: player.x, z: player.z, yaw: player.yaw, pitch: player.pitch, seated: player.seated ? player.seated.id : null, target: target.st ? target.st.id : null, online: net.online, offline: !ui.offline.hidden, rt: net.rt ? net.rt.state : 'none', myId: net.myId, fps, calls: world.renderer.info.render.calls, iframe: !!css.frame }),
+    state: () => ({ x: player.x, z: player.z, yaw: player.yaw, pitch: player.pitch, seated: player.seated ? player.seated.id : null, target: target.st ? target.st.id : null, online: net.online, offline: !ui.offline.hidden, rt: net.rt ? net.rt.state : 'none', myId: net.myId, fps, calls: world.renderer.info.render.calls, iframe: !!css.frame, tex: world.renderer.info.memory.textures, geo: world.renderer.info.memory.geometries, fit: css.k || 1, tweening: !!player.tween, pkDyn: pk.dyns.size, sceneN: world.scene.children.length }),
     stations: () => stations.map(s => ({ id: s.id, slug: s.slug, kind: s.kind, zone: s.zone, stand: s.stand.slice(), table: s.table ?? null, seat: s.seatNo ?? null })),
     remotes: () => [...remotes.values()].map(R => ({ id: R.id, uid: R.uid, name: R.name, x: R.x, z: R.z, st: R.st })),
     setPos(x, z, yaw) {
@@ -9851,7 +9916,9 @@ html:has(body.pg-floor),body.pg-floor{overflow:hidden;overscroll-behavior:none}
 .fl-online{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px}
 .fl-dot{width:8px;height:8px;border-radius:50%;background:#4fe0a0;box-shadow:0 0 8px #4fe0a0}
 .fl-offline{font-size:12px;color:var(--muted);padding:3px 8px;border-radius:8px;border:1px dashed var(--line);justify-self:start}
-.fl-mapwrap{position:absolute;right:12px;top:calc(var(--fl-top) + 10px);display:grid;gap:8px;justify-items:end;pointer-events:auto}
+.fl-mapwrap{position:absolute;right:12px;top:calc(var(--fl-top) + 10px);display:grid;gap:8px;justify-items:end;pointer-events:none}
+.fl-mapwrap>*{pointer-events:auto}
+.floor-shell.seated-screen .fl-map{display:none}
 .fl-map{width:180px;height:120px;border-radius:12px;border:1px solid rgba(232,182,76,.35);box-shadow:var(--shadow);display:block}
 .fl-mapwrap.nomap .fl-map{display:none}
 .fl-tools{display:flex;gap:6px;align-items:center}
@@ -9892,6 +9959,13 @@ html:has(body.pg-floor),body.pg-floor{overflow:hidden;overscroll-behavior:none}
 .fl-mpk{display:grid;gap:8px;padding:12px 14px;border-radius:14px;background:var(--card);border:1px solid var(--line);color:var(--ink);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
 .fl-mpk-status{font-weight:700}
 .fl-mpk-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.fl-mpk-hand{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fl-mpk-hand[hidden]{display:none}
+.fl-mpk-lbl{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-left:4px}
+.fl-mpk-lbl:first-child{margin-left:0}
+.fl-mpk-card{display:inline-grid;place-items:center;min-width:40px;height:54px;padding:0 6px;border-radius:7px;background:#fbf8f0;color:#15151c;border:1px solid rgba(0,0,0,.25);font:800 20px/1 var(--f-mono);box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.fl-mpk-card.red{color:#c8102e}
+.fl-mpk-card.back{background:#7a1424;color:#e8b64c}
 .fl-mpk-note{font-size:12.5px;color:var(--muted);min-height:1em}
 .fl-mpk-in{width:120px;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--card-solid);color:var(--ink);font:600 14px var(--f-mono)}
 .fl-banner{position:absolute;left:50%;top:calc(var(--fl-top) + 70px);transform:translate(-50%,-12px);padding:12px 22px;border-radius:16px;background:rgba(10,8,6,.82);border:1px solid rgba(232,182,76,.7);color:#ffd98a;font:400 clamp(17px,2.4vw,24px)/1.2 var(--f-display);opacity:0;transition:opacity .3s,transform .3s;pointer-events:none;text-align:center;max-width:calc(100vw - 32px)}

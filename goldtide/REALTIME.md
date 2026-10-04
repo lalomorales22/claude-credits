@@ -101,7 +101,7 @@ Connections that send nothing (not even a `ping` or a pong) for 40 s are closed 
 
 Station ids are strings chosen by the floor module, e.g. `slot:tiki:2`, `table:craps`, `poker:1:3` (table 1, seat 3). The server does not validate them except for length; it only relays `seat` so other avatars can be posed. Real poker seating goes through `pk_join`.
 
-When a player sits at a station the floor module loads `?action=<slug>&embed=1` in an iframe on the machine's screen. In `embed` mode the page renders without header, footer, rules and rail, and `setBalance()` also posts `{t:'gt_balance', balance}` to `window.parent` (same origin) so the HUD stays current.
+When a player sits at a station the floor module loads `?action=<slug>&embed=1` in an iframe on the machine's screen. The iframe renders at a virtual size up to 1/0.6 of the screen's on-screen size and is scaled down so the game's main button (the first visible gold button in `.game-stage`) fits; if it still doesn't, the floor scrolls the embed page to it. The floor sends `pos` at most 10 times a second (a held-back change goes out once 100 ms have passed, so the resting position always arrives). In `embed` mode the page renders without header, footer, rules and rail, and `setBalance()` also posts `{t:'gt_balance', balance}` to `window.parent` (same origin) so the HUD stays current.
 
 ## Poker engine API (`index.php`)
 

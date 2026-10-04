@@ -53,7 +53,9 @@ async function waitHttp(url, ms = 15000) {
   fs.mkdirSync(OUT, { recursive: true });
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt_floor_test_'));
   for (const f of ['index.php', 'ws.php']) fs.copyFileSync(path.join(ROOT, f), path.join(tmp, f));
-  const webPort = await freePort(8400, 8449), wsPort = await freePort(8450, 8499);
+  // FLOOR_TEST_PORTS=8600,8650 moves the two 50-port ranges (web, socket) so parallel runs don't collide
+  const [WLO, SLO] = (process.env.FLOOR_TEST_PORTS || '8400,8450').split(',').map(Number);
+  const webPort = await freePort(WLO, WLO + 49), wsPort = await freePort(SLO, SLO + 49);
   const BASE = `http://127.0.0.1:${webPort}/`;
   // install the scratch database and point the page at our socket server
   execFileSync(PHP, ['-r', `define("GT_NO_ROUTE",1); require "index.php"; db(); q("UPDATE settings SET value=? WHERE key=?", ["ws://127.0.0.1:${wsPort}/", "ws_url"]);`], { cwd: tmp });
@@ -79,6 +81,8 @@ async function waitHttp(url, ms = 15000) {
       page.on('console', m => { if (m.type() === 'error') errors.push([label, m.text()]); });
       page.on('pageerror', e => errors.push([label, 'pageerror: ' + e.message]));
       page.label = label;
+      page.posSent = []; // [ms, {x, z}] of every 'pos' frame this page sends
+      page.on('websocket', w => w.on('framesent', f => { try { const m = JSON.parse(String(f.payload)); if (m.t === 'pos') page.posSent.push([Date.now(), m]); } catch (e) {} }));
       return page;
     };
     const register = async (page, name) => {
@@ -133,6 +137,16 @@ async function waitHttp(url, ms = 15000) {
     for (let i = 0; i < 10 && after && before && Math.hypot(after[0] - before[0], after[1] - before[1]) < .3; i++) { await sleep(300); after = await posOfA(); }
     check(Math.hypot(meA.x - stA.x, meA.z - stA.z) > .3, 'holding W for a second walks A forward', JSON.stringify([stA.x, stA.z, meA.x, meA.z]));
     check(before && after && Math.hypot(after[0] - before[0], after[1] - before[1]) > .3, "B sees A's avatar move", JSON.stringify({ before, after }));
+    // position updates: at most 10 a second (the server drops past 15/s), and the spot A stopped on is the one B ends up with
+    A.posSent.length = 0;
+    await A.keyboard.down('KeyD'); await sleep(1500); await A.keyboard.up('KeyD'); await sleep(1200);
+    const ts = A.posSent.map(p => p[0]); let maxWin = 0;
+    for (let i = 0; i < ts.length; i++) { let j = i; while (j < ts.length && ts[j] - ts[i] < 1000) j++; maxWin = Math.max(maxWin, j - i); }
+    check(ts.length >= 5 && maxWin <= 11, `walking sends about 10 'pos' a second, not one per frame (${maxWin} in the busiest second, ${ts.length} in all)`);
+    const endA = await F(A, () => window.__floor.state());
+    let seenEnd = null;
+    for (let i = 0; i < 10; i++) { seenEnd = await posOfA(); if (seenEnd && Math.hypot(seenEnd[0] - endA.x, seenEnd[1] - endA.z) < .05) break; await sleep(300); }
+    check(seenEnd && Math.hypot(seenEnd[0] - endA.x, seenEnd[1] - endA.z) < .05, "B ends up with the exact spot A stopped on", JSON.stringify({ a: [endA.x, endA.z], seenEnd }));
 
     section('chat');
     await A.keyboard.press('Enter');
@@ -171,6 +185,15 @@ async function waitHttp(url, ms = 15000) {
     check(inner && inner.embed && inner.stage && inner.header === 'none', 'the screen page loaded in embed mode (no header, game panel present)', JSON.stringify(inner));
     check(await F(A, () => document.querySelectorAll('iframe.fl-screen').length === 1), 'exactly one iframe exists');
     check(await F(A, () => getComputedStyle(document.querySelector('.floor-gl')).pointerEvents === 'none' && !document.querySelector('.fl-seated').hidden), 'seated: the canvas lets clicks through and the seated HUD shows');
+    await sleep(1800); // the screen fits itself to the game after load
+    const fit = frame ? await frame.evaluate(() => { const b = [...document.querySelectorAll('.game-stage .btn.gold')].find(b => b.offsetParent); const r = b && b.getBoundingClientRect(); return b ? { text: b.textContent.trim(), bottom: Math.round(r.bottom), ih: innerHeight } : null; }) : null;
+    check(fit && fit.bottom <= fit.ih, "the game's main button is inside the visible part of the screen", JSON.stringify(fit));
+    const cover = await F(A, () => {
+      const f = document.querySelector('iframe.fl-screen').getBoundingClientRect(), y = Math.max(f.top, 0) + 12, out = [];
+      for (const fx of [.1, .5, .85, .95]) { const e = document.elementFromPoint(f.left + f.width * fx, y); out.push(e ? e.tagName + '.' + e.className : 'none'); }
+      return { out, map: getComputedStyle(document.querySelector('.fl-map')).display };
+    });
+    check(cover.map === 'none' && cover.out.every(t => /^IFRAME/.test(t)), 'seated at a screen: the map is hidden and nothing in the HUD covers the top of the game', JSON.stringify(cover));
     let busy = false;
     try { await B.waitForFunction(([n, id]) => window.__floor.remotes().some(r => r.name === n && r.st === id), [nameA, slot.id], { timeout: 8000 }); busy = true; } catch (e) {}
     check(busy, "B sees A seated at that cabinet ('st')");
@@ -191,6 +214,19 @@ async function waitHttp(url, ms = 15000) {
     try { await B.waitForFunction(n => window.__floor.remotes().some(r => r.name === n && !r.st), nameA, { timeout: 8000 }); freed = true; } catch (e) {}
     check(freed, 'B sees A stand up');
 
+    section('resize during the sit tween');
+    await F(A, s => { window.__floor.setPos(s.stand[0], s.stand[1]); return window.__floor.face(s.id); }, slot);
+    await F(A, () => window.__floor.interact());
+    await sleep(150);
+    const midTween = await F(A, () => window.__floor.state().tweening);
+    await A.setViewportSize({ width: 600, height: 900 });
+    await A.waitForSelector('.floor-css3d iframe.fl-screen[data-loaded="1"]', { timeout: 25000 }).catch(() => {});
+    await sleep(800);
+    const rr = await F(A, () => { const r = document.querySelector('iframe.fl-screen').getBoundingClientRect(); return { r: [r.left, r.top, r.right, r.bottom].map(Math.round), W: innerWidth, H: innerHeight }; });
+    check(midTween && rr.r[0] >= -2 && rr.r[1] >= -2 && rr.r[2] <= rr.W + 2 && rr.r[3] <= rr.H + 2, 'a resize in the middle of sitting down still fits the screen to the new window', JSON.stringify({ midTween, ...rr }));
+    await F(A, () => window.__floor.stand()); await sleep(700);
+    await A.setViewportSize({ width: 1100, height: 720 }); await sleep(400);
+
     section('poker seat');
     const tables = await F(A, () => JSON.parse(document.getElementById('floor-cfg').textContent).tables);
     const t1 = tables[0];
@@ -208,11 +244,33 @@ async function waitHttp(url, ms = 15000) {
     let pkSeen = false;
     try { await B.waitForFunction(([n, id]) => window.__floor.remotes().some(r => r.name === n && r.st === id), [nameA, pkId], { timeout: 8000 }); pkSeen = true; } catch (e) {}
     check(pkSeen, `B sees A's 'st' as ${pkId}`);
-    await sleep(2500);
+    // buy in and wait to be dealt: the HUD lists your two cards (they are too small to read on the 3D felt at 720p)
+    const slid = await F(A, () => /slide over/.test(document.querySelector('.fl-mpk-note') ? document.querySelector('.fl-mpk-note').textContent : ''));
+    await A.click('.fl-mpk-row .fl-btn.gold').catch(() => {});
+    let dealt = false;
+    for (let i = 0; i < 90 && !dealt; i++) {
+      await F(A, () => { const p = [...document.querySelectorAll('.fl-mpk-row button')].find(b => /^Post a big blind/.test(b.textContent)); if (p) p.click(); });
+      dealt = await F(A, () => document.querySelectorAll('.fl-mpk-hand .fl-mpk-lbl + .fl-mpk-card, .fl-mpk-hand .fl-mpk-card').length >= 2 && /Your hand/i.test(document.querySelector('.fl-mpk-hand').textContent));
+      if (!dealt) await sleep(1000);
+    }
+    const handTxt = await F(A, () => ({ hand: document.querySelector('.fl-mpk-hand').textContent, note: document.querySelector('.fl-mpk-note').textContent, status: document.querySelector('.fl-mpk-status').textContent }));
+    check(dealt && /Your hand\s*(10|[2-9JQKA])[♠♥♦♣]\s*(10|[2-9JQKA])[♠♥♦♣]/.test(handTxt.hand), 'once dealt in, the poker HUD shows your two hole cards', JSON.stringify(handTxt));
+    check(!/slide over/.test(handTxt.note), `the "you'd slide over" note is gone once you are seated${slid ? ' (it was showing before)' : ''}`, JSON.stringify(handTxt));
+    await sleep(1500);
     await shot(A, 'floor-a-poker-seat');
-    await F(A, () => window.__floor.stand());
-    await sleep(800);
+    const leaveSeat = async () => {
+      await F(A, () => document.querySelector('.fl-stand') && document.querySelector('.fl-stand').click());
+      await sleep(300);
+      await F(A, () => { const c = document.querySelector('.fl-confirm:not([hidden]) button.gold'); if (c) c.click(); });
+      await sleep(900);
+      if (await F(A, () => window.__floor.state().seated !== null)) { await F(A, () => window.__floor.stand()); await sleep(600); }
+    };
+    await leaveSeat();
     check(await F(A, () => document.querySelector('.fl-pk-hud').hidden && window.__floor.state().seated === null), 'standing up from the poker chair unmounts the HUD');
+    // sitting at the same table again reuses its 3D chips / dealer button / spotlight instead of building (and leaking) new ones
+    const pkWatch = async () => { await F(A, s => { window.__floor.setPos(s.stand[0], s.stand[1]); window.__floor.face(s.id); return window.__floor.interact(); }, pkSt); await sleep(2200); await F(A, () => window.__floor.stand()); await sleep(600); return F(A, () => { const s = window.__floor.state(); return [s.pkDyn, s.sceneN, s.tex]; }); };
+    const w1 = await pkWatch(), w2 = await pkWatch(), w3 = await pkWatch();
+    check(w1[0] === 1 && w3[0] === 1 && w3[1] === w1[1], `sitting at the same poker table again reuses its 3D group instead of building a new one (groups ${w1[0]} → ${w3[0]}, scene objects ${w1[1]} → ${w3[1]}, textures ${w1[2]} → ${w2[2]} → ${w3[2]})`);
 
     await A.keyboard.press('KeyH'); await sleep(1200);
     check(await F(A, () => !document.querySelector('.fl-help').hidden), 'H opens the help overlay');
