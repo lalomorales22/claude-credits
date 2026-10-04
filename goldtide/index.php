@@ -6899,7 +6899,7 @@ function banner(text, cls = '') {
   ui.banner.textContent = text; ui.banner.className = 'fl-banner show ' + cls;
   clearTimeout(bannerT); bannerT = setTimeout(() => { ui.banner.className = 'fl-banner'; }, 3800);
 }
-function headerHeight() { const top = document.querySelector('.top'); return top ? Math.round(top.getBoundingClientRect().height) : 0; }
+function headerHeight() { if (document.fullscreenElement) return 0; const top = document.querySelector('.top'); return top ? Math.round(top.getBoundingClientRect().height) : 0; }
 
 /* ───────── no WebGL: every game as a plain link ───────── */
 function fallback(reason) {
@@ -8054,8 +8054,8 @@ function screenPose(st) {
 function pokerPose(st) {
   const P = pokerTables.get(st.table), s = P.seats[st.seatNo];
   const out = new T.Vector3(s.sx, 0, s.sz).normalize();
-  const eye = new T.Vector3(s.x + out.x * .8, 1.85, s.z + out.z * .8);
-  const tgt = new T.Vector3(P.cx - out.x * .3, .35, P.cz - out.z * .3);
+  const eye = new T.Vector3(s.x + out.x * .18, 1.42, s.z + out.z * .18);
+  const tgt = new T.Vector3(P.cx - out.x * .35, .3, P.cz - out.z * .35);
   return Object.assign({ x: eye.x, y: eye.y, z: eye.z }, yawPitchTo(eye, tgt));
 }
 function sit(st) {

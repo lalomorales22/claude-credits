@@ -101,7 +101,7 @@ async function waitHttp(url, ms = 15000) {
     const nameA = 'floor_a_' + suffix, nameB = 'floor_b_' + suffix;
 
     section('two players walk in');
-    const A = await newPage('A'), B = await newPage('B');
+    const A = await newPage('A'), B = await newPage('B', { colorScheme: 'dark' });
     check(await register(A, nameA), 'player A registers through the sign-up form');
     check(await register(B, nameB), 'player B registers through the sign-up form');
     // Every page in one browser shares one software GPU process, so the test keeps only the page it is looking at rendering
@@ -176,6 +176,12 @@ async function waitHttp(url, ms = 15000) {
     check(busy, "B sees A seated at that cabinet ('st')");
     await sleep(2500);
     await shot(A, 'floor-a-seated-slot');
+    // B walks over to look at A on the stool (and at the IN PLAY screen)
+    await F(A, () => window.__floor.pause(true)); await F(B, () => window.__floor.pause(false));
+    await F(B, s => { window.__floor.setPos(s.stand[0] + 1.6, s.stand[1] + 2.2); window.__floor.face(s.id); }, slot);
+    await sleep(2500); await shot(B, 'floor-b-sees-a-seated');
+    check(await F(B, id => window.__floor.state().target !== id || /in play/i.test(document.querySelector('.fl-prompt').textContent), slot.id), 'B is told the cabinet is in play');
+    await F(B, () => window.__floor.pause(true)); await F(A, () => window.__floor.pause(false));
 
     section('stand up');
     await F(A, () => window.__floor.stand());
@@ -208,6 +214,9 @@ async function waitHttp(url, ms = 15000) {
     await sleep(800);
     check(await F(A, () => document.querySelector('.fl-pk-hud').hidden && window.__floor.state().seated === null), 'standing up from the poker chair unmounts the HUD');
 
+    await A.keyboard.press('KeyH'); await sleep(1200);
+    check(await F(A, () => !document.querySelector('.fl-help').hidden), 'H opens the help overlay');
+    await shot(A, 'floor-a-help'); await A.keyboard.press('KeyH');
     section('guest');
     await F(A, () => window.__floor.pause(true));
     const G = await newPage('guest');
@@ -220,6 +229,10 @@ async function waitHttp(url, ms = 15000) {
     await sleep(800);
     check(await F(G, () => window.__floor.state().seated === null && !document.querySelector('iframe.fl-screen')), 'a guest cannot sit');
     await shot(G, 'floor-guest-prompt');
+    await G.goto(BASE + '?action=floor&floor_nogl=1');
+    await G.waitForFunction(() => window.__floor && window.__floor.fallback, null, { timeout: 15000 }).catch(() => {});
+    const fb = await F(G, () => ({ links: document.querySelectorAll('.fl-fallback .fl-links a').length, lobby: !!document.querySelector('.fl-fallback a.fl-btn'), games: Object.keys(JSON.parse(document.getElementById('floor-cfg').textContent).games).length }));
+    check(fb.links === fb.games && fb.lobby, 'without WebGL the floor lists every game as a link plus the lobby', JSON.stringify(fb));
     await G.context().close();
 
     section('mobile');
@@ -251,6 +264,7 @@ async function waitHttp(url, ms = 15000) {
     // A refused WebSocket is reported by Chromium itself ("WebSocket connection to … failed"); that is the browser's network log, not page code.
     const wsNoise = errors.slice(offErrStart).filter(([, t]) => /^WebSocket connection to 'ws:\/\/127\.0\.0\.1:\d+\/' failed/.test(t));
     for (const n of wsNoise) errors.splice(errors.indexOf(n), 1);
+    console.log(`  (set aside ${wsNoise.length} browser network line(s) about the refused socket)`);
 
     section('console');
     check(errors.length === 0, 'no console errors or page errors anywhere', errors.map(e => e.join(': ')).join('\n'));
