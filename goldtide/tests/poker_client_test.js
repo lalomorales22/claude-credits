@@ -13,6 +13,10 @@
  *   - a stale-seq pk_act sent through the rt comes back as a pk_err toast;
  *   - A leaves: the seat row goes, the balance comes back as buy-in +/- results (balance = start + sum of A's nets);
  *   - the hand history page says "Deck commitment verified" from PHP and from the client-side check (deal order too);
+ *   - client hardening on a scripted rt (no server): the action bar unlocks after a reconnect / a lost act, the raise slider
+ *     reaches all-in, add-on is off while dealt into a hand, the "Back to my seat" note (lobby and other tables), the
+ *     pot readout never calls an uncalled excess a side pot, the replay gives uncalled bets back;
+ *   - ws.php killed and restarted while B is seated: B's header balance matches the database after the refund;
  *   - no horizontal scroll on the phone, zero console errors on every page.
  * Screenshots go to tests/out/ (gitignored). Exit 1 on any failure.
  *
@@ -82,8 +86,9 @@ process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
-  const webPort = await freePort(8500, 8549);
-  const wsPort = await freePort(8550, 8599);
+  const range = (env, d) => (process.env[env] || d).split('-').map(Number);   // e.g. PK_WEB_PORTS=8700-8749 PK_WS_PORTS=8750-8799
+  const webPort = await freePort(...range('PK_WEB_PORTS', '8500-8549'));
+  const wsPort = await freePort(...range('PK_WS_PORTS', '8550-8599'));
   const base = `http://127.0.0.1:${webPort}/`;
   php(`q('UPDATE poker_tables SET bots = 2 WHERE id = 1'); q("UPDATE settings SET value = '${ACT_SECS}' WHERE key = 'poker_action_seconds'"); q('UPDATE settings SET value = ? WHERE key = ?', ['ws://127.0.0.1:${wsPort}/', 'ws_url']);`);
   const wsLog = fs.openSync(path.join(tmp, 'ws.out'), 'a');
@@ -340,6 +345,91 @@ process.on('SIGINT', () => { cleanup(); process.exit(130); });
   });
   check(hud.states > 0 && hud.feltHidden && hud.strip && hud.me !== null && hud.api && hud.gone && hud.stillSeated, 'HUD mode mounts on the shared socket, hides the felt, and destroy() keeps the seat', JSON.stringify(hud));
 
+
+  /* ───────────────────────── client hardening on a scripted rt ───────────────────────── */
+
+  section('client hardening (scripted rt)');
+  const H = await pA.evaluate(async () => {
+    const cfg = JSON.parse(document.getElementById('poker-cfg').textContent);
+    const M = await import(new URL(cfg.poker_asset, location.href).href);
+    const subs = {}, sent = [];
+    const rt = { state: 'open', me: { uid: 'p999', name: 'tester', guest: false }, tables: [], seated: null,
+      send(o) { sent.push(o); return true; }, on(t, f) { (subs[t] = subs[t] || new Set()).add(f); return () => subs[t].delete(f); }, off(t, f) { if (subs[t]) subs[t].delete(f); } };
+    const emit = m => { for (const f of [...(subs[m.t] || [])]) f(m, rt); };
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const host = document.createElement('div'); host.id = 'fake-host'; document.body.appendChild(host);
+    const base = { id: 77, name: 'Scripted', seats: 6, sb: 10, bb: 20, min_buy: 400, max_buy: 6000, hand_no: 7, seq: 3, phase: 'flop', button: 1,
+      board: ['2c', '7d', 'Jh'], to_act: 0, ms_left: 8000, act_secs: 8, cur_bet: 0, me: 0,
+      players: { 0: { name: 'tester', stack: 4753, bet: 0, total: 40, in: true, allin: false, cards: ['As', 'Kd'] }, 1: { name: 'house', bot: true, stack: 1000, bet: 0, total: 40, in: true, allin: false, cards: 2 } },
+      legal: { check: true, call: 0, raise: { min: 40, max: 4753 }, allin: 4753 } };
+    const st = over => ({ t: 'pk_state', table: Object.assign(JSON.parse(JSON.stringify(base)), over || {}) });
+    const tbl = M.mountPokerTable(host, { rt, tableId: 77, cfg, mode: 'page' });
+    emit(st());
+    const q = s => host.querySelector(s);
+    const out = {};
+    // raise slider: 4753 is not on the 10-chip grid from 40; the far right must still mean all-in
+    const r = q('[data-raise-range]');
+    r.value = r.max; r.dispatchEvent(new Event('input', { bubbles: true }));
+    out.slider = { max: +r.max, label: q('[data-raise-label]').textContent };
+    // add-on while dealt into the flop, then between hands
+    out.addonLive = { disabled: q('[data-addon]').disabled, text: q('[data-addon]').textContent };
+    // the bar locks on send and unlocks on a dropped socket, on a welcome, and 4 s after an unanswered act
+    const lockAndCheck = async how => {
+      q('.pk-call').click();
+      const locked = q('.pk-call').disabled && q('[data-status]').textContent === 'Sending…';
+      if (how === 'drop') { rt.state = 'closed'; emit({ t: 'rt_state', state: 'closed' }); rt.state = 'open'; emit({ t: 'rt_state', state: 'open' }); }
+      if (how === 'welcome') emit({ t: 'welcome', id: 1, uid: 'p999', name: 'tester' });
+      if (how === 'timeout') await sleep(4400);
+      emit(st());   // the same hand / seq with legal still set, as after a reconnect
+      return locked && !q('.pk-call').disabled && q('[data-status]').textContent === 'Your turn.';
+    };
+    out.unlock = { drop: await lockAndCheck('drop'), welcome: await lockAndCheck('welcome'), timeout: await lockAndCheck('timeout') };
+    out.acts = sent.filter(m => m.t === 'pk_act').length;
+    emit(st({ phase: 'idle', hand_no: 8, seq: 0, to_act: null, legal: null, board: [], players: { 0: { name: 'tester', stack: 4753, bet: 0, total: 0, in: false, cards: [] }, 1: { name: 'house', bot: true, stack: 1000, bet: 0, total: 0, in: false, cards: [] } } }));
+    out.addonIdle = { disabled: q('[data-addon]').disabled, text: q('[data-addon]').textContent };
+    // seated at another table: watching this one shows "Back to my seat" and no "Sit here"
+    rt.seated = { id: 78, name: 'Other table', turn: true };
+    emit(st({ me: null, legal: null }));
+    out.elsewhere = { note: !q('[data-elsewhere]').hidden && /your turn/i.test(q('[data-elsewhere]').textContent) && !!q('[data-elsewhere] [data-goto="78"]'), sits: host.querySelectorAll('.pk-sit').length };
+    tbl.destroy();
+    const lob = M.mountPokerLobby(host, { rt, cfg });
+    const ln = host.querySelector('[data-seated-note]');
+    out.lobby = !ln.hidden && /Other table/.test(ln.textContent) && !!ln.querySelector('[data-open="78"]');
+    rt.seated = null; emit({ t: 'welcome', id: 1, uid: 'p999', name: 'tester' });
+    out.lobbyCleared = ln.hidden;
+    lob.destroy();
+    // pot readout: A all-in 1,640, B all-in 7,740, blinds folded: B's 6,100 is uncalled, not a side pot
+    const pv = { phase: 'preflop', players: { 0: { total: 1640, in: true, allin: true }, 1: { total: 7740, in: true, allin: true }, 2: { total: 20, in: false }, 3: { total: 60, in: false } } };
+    out.pot = M.potText(M.potInfo(pv));
+    const pv2 = { phase: 'turn', players: { 0: { total: 100, in: true, allin: true }, 1: { total: 500, in: true }, 2: { total: 500, in: true }, 3: { total: 900, in: true } } };
+    out.pot2 = M.potText(M.potInfo(pv2));
+    out.pot3 = M.potText(M.potInfo({ phase: 'flop', players: { 0: { total: 120, in: true }, 1: { total: 60, in: true } } }));
+    // replay: b shoves 11,600, a calls 800 all-in: 10,800 goes back before the flop
+    const rec = { button: 1, pot: 1600, board: ['2c', '7d', 'Jh', 'Qs', '3d'],
+      players: [{ seat: 0, name: 'a', start_stack: 800, end_stack: 1600, cards: ['As', 'Ad'], net: 800, won: 1600 }, { seat: 1, name: 'b', start_stack: 12000, end_stack: 11200, cards: ['Kc', 'Kd'], net: -800, won: 0 }],
+      actions: [{ street: 'preflop', seat: 1, act: 'sb', amt: 10, put: 10 }, { street: 'preflop', seat: 0, act: 'bb', amt: 20, put: 20 },
+        { street: 'preflop', seat: 1, act: 'allin', amt: 11600, put: 11590 }, { street: 'preflop', seat: 0, act: 'call', amt: 800, put: 780 }],
+      winners: [{ seat: 0, amount: 1600, hand: 'Pair of aces' }], pots: [{ amount: 1600, winners: [0] }] };
+    const hh = document.createElement('div'); document.body.appendChild(hh);
+    M.renderHandHistory(hh, rec);
+    const steps = [...hh.querySelectorAll('[data-hh-go]')];
+    out.replay = [];
+    for (const b of steps) {
+      b.click();
+      out.replay.push(`${hh.querySelector('[data-hh-text]').textContent} | ${hh.querySelector('[data-hh-pot]').textContent} | b ${hh.querySelector('[data-hh-seat="1"] [data-hh-stack]').textContent}`);
+    }
+    hh.remove(); host.remove();
+    return out;
+  });
+  check(H.slider.max >= 4753 && /All-in 4,753/.test(H.slider.label), 'the raise slider\'s far right is all-in when the stack is off the step grid', JSON.stringify(H.slider));
+  check(H.unlock.drop && H.unlock.welcome && H.unlock.timeout && H.acts === 3, 'the action bar unlocks after a dropped socket, a reconnect welcome, and 4 s with no answer', JSON.stringify(H.unlock) + ' acts ' + H.acts);
+  check(H.addonLive.disabled && /sit out/i.test(H.addonLive.text) && !H.addonIdle.disabled && H.addonIdle.text === 'Add on', 'Add on is off while dealt into a hand (with the reason) and on between hands', JSON.stringify([H.addonLive, H.addonIdle]));
+  check(H.elsewhere.note && H.elsewhere.sits === 0, 'another table shows "your turn at Other table / Back to my seat" and no Sit here', JSON.stringify(H.elsewhere));
+  check(H.lobby && H.lobbyCleared, 'the lobby shows "Back to my seat" from rt.seated and clears it when the seat is gone');
+  check(H.pot === 'Pot 3,360 · Uncalled 6,100' && H.pot2 === 'Main 400 · Side 1,200 · Uncalled 400' && H.pot3 === 'Pot 180', 'the pot readout shows an unmatched excess as uncalled, never as a side pot', `${H.pot} / ${H.pot2} / ${H.pot3}`);
+  const flop = H.replay.find(t => /^Flop/.test(t)) || '', river = H.replay.find(t => /^River/.test(t)) || '';
+  check(/takes back 10,800/.test(flop) && /Pot 1,600 \| b 11,200$/.test(flop) && /Pot 1,600 \| b 11,200$/.test(river), 'the replay hands the uncalled 10,800 back before the run-out (pot 1,600)', H.replay.slice(3).join(' || '));
+
   /* ───────────────────────── leave ───────────────────────── */
 
   section('A leaves');
@@ -355,6 +445,28 @@ process.on('SIGINT', () => { cleanup(); process.exit(130); });
   check(!!headerOk, `A's header balance shows the cash-out (${endA})`, await pA.getAttribute('[data-balance]', 'data-balance'));
   const aSeated = await pA.evaluate(() => { const t = window.goldTidePoker.table; return t && t.view ? t.view.me : 'none'; });
   check(aSeated === null, 'A is back to watching (me = null)');
+
+
+  /* ───────────────────────── ws.php restart refund ───────────────────────── */
+
+  section('ws.php restart while B is seated');
+  if (seatRow(pidB)) {
+    const errAt = errors.length;
+    procs[0].kill('SIGKILL');
+    const tKill = Date.now();
+    await sleep(300);
+    procs[0] = spawn(PHP, ['ws.php', '--port', String(wsPort), '--bind', '127.0.0.1', '--tick', '20'], { cwd: tmp, stdio: ['ignore', wsLog, wsLog] });
+    const refunded = await waitFor(async () => !seatRow(pidB), 10000);
+    const back = await waitFor(() => pB.evaluate(() => window.goldTidePoker.rt.state === 'open' && window.goldTidePoker.table && window.goldTidePoker.table.view && window.goldTidePoker.table.view.me === null), 20000, 250);
+    const balB = dbBal(pidB);
+    const hdrB = await waitFor(async () => +(await pB.getAttribute('[data-balance]', 'data-balance')) === balB, 6000);
+    const toastB = await pB.evaluate(() => [...document.querySelectorAll('.toast')].map(t => t.textContent).join(' | '));
+    check(!!refunded && !!back && !!hdrB, `after the restart refund B's header balance matches the database (${balB})`, `header ${await pB.getAttribute('[data-balance]', 'data-balance')} refunded ${!!refunded} back ${!!back}`);
+    check(/seat was closed while you were disconnected/.test(toastB), 'B is told the seat was closed and the chips refunded', toastB);
+    // the browser logs refused connections while ws.php was down: those are expected, nothing else is
+    for (let i = errors.length - 1; i >= errAt; i--) if (/WebSocket connection to .* failed/.test(errors[i])) errors.splice(i, 1);
+    note(`restart round trip ${((Date.now() - tKill) / 1000).toFixed(1)} s`);
+  } else note('B is no longer seated: restart check skipped');
 
   /* ───────────────────────── hand history ───────────────────────── */
 

@@ -6887,23 +6887,30 @@ function seatList(v) {
 function playerAt(v, s) { const ps = v && v.players; if (!ps || s === null || s === undefined) return null; return ps[s] || ps[String(s)] || null; }
 function dealtIn(p) { return Array.isArray(p.cards) ? p.cards.length > 0 : int(p.cards) > 0; }
 
-/** Live side pots from total contributions: a pot per all-in level among the live players, the rest in the top pot (pk_side_pots() at showdown). */
+/**
+ * Live side pots from total contributions: a pot per all-in level among the live players, the rest in the top pot
+ * (pk_side_pots() at showdown). Chips above everybody else's total (folded players' chips count as matched) are not a
+ * pot: nobody has called them, and the engine hands them back at the end of the street. They come back as `uncalled`.
+ */
 function sidePots(list) {
   const inSeats = list.filter(([, p]) => p.in);
-  const levels = [...new Set(inSeats.filter(([, p]) => p.allin).map(([, p]) => int(p.total)))].sort((a, b) => a - b);
-  levels.push(Infinity);   // everything above the last all-in is one pot, however the live bets differ mid-street
+  const totals = list.map(([, p]) => int(p.total)).sort((a, b) => b - a);
+  const matched = totals.length > 1 ? totals[1] : 0;
+  const uncalled = totals.length ? totals[0] - matched : 0;
+  const levels = [...new Set(inSeats.filter(([, p]) => p.allin).map(([, p]) => int(p.total)).filter(t => t < matched))].sort((a, b) => a - b);
+  levels.push(matched);   // everything above the last all-in up to the matched level is one pot, however the live bets differ mid-street
   const pots = []; let prev = 0;
-  levels.forEach((lvl, i) => {
-    const cap = lvl;
+  for (const cap of levels) {
     let amt = 0;
     for (const [, p] of list) amt += Math.max(0, Math.min(int(p.total), cap) - prev);
     if (amt > 0) pots.push(amt);
-    prev = lvl;
-  });
+    prev = cap;
+  }
+  pots.uncalled = uncalled;
   return pots;
 }
 /** What the pot readout shows: total plus the main/side split. */
-function potInfo(v) {
+export function potInfo(v) {
   const list = seatList(v);
   if (!v || v.phase === 'idle') return { total: 0, parts: [] };
   if (v.phase === 'settle' && Array.isArray(v.pots) && v.pots.length) {
@@ -6912,11 +6919,14 @@ function potInfo(v) {
   }
   const sum = list.reduce((a, [, p]) => a + int(p.total), 0);
   const parts = sidePots(list);
-  return { total: v.pot_total !== undefined && v.pot_total !== null ? int(v.pot_total) : sum, parts };
+  return { total: v.pot_total !== undefined && v.pot_total !== null ? int(v.pot_total) : sum, parts, uncalled: parts.uncalled || 0, allinBelow: list.some(([, p]) => p.in && p.allin) };
 }
-function potText(info) {
+/** "Pot 1,200", or "Main 900 · Side 300"; an unmatched excess shows apart only when it sits over an all-in (where a "Side" label would lie). */
+export function potText(info) {
   if (!info.total) return '';
-  if (info.parts.length > 1) return info.parts.map((a, i) => (i === 0 ? 'Main ' : info.parts.length > 2 ? `Side ${i} ` : 'Side ') + fmt(a)).join(' · ');
+  const unc = info.uncalled || 0;
+  if (info.parts.length > 1) return info.parts.map((a, i) => (i === 0 ? 'Main ' : info.parts.length > 2 ? `Side ${i} ` : 'Side ') + fmt(a)).join(' · ') + (unc ? ` · Uncalled ${fmt(unc)}` : '');
+  if (unc && info.allinBelow) return `Pot ${fmt(info.total - unc)} · Uncalled ${fmt(unc)}`;
   return 'Pot ' + fmt(info.total);
 }
 
@@ -6926,11 +6936,17 @@ function potText(info) {
  * One socket per page: ticket → WebSocket → hello → welcome. Heartbeat every 20 s, reconnect with exponential backoff
  * (1, 2, 4 … 30 s, jitter, fresh ticket each time). After 4 failed attempts in a row the state is 'offline' and it keeps
  * trying every 30 s. onOpen runs on every (re)connect so callers can re-send watch/seat. Never throws out of handlers.
+ * Dead-socket detection: the ticket fetch gives up after 10 s, a socket with no welcome 10 s after it is created is dropped,
+ * and a socket that has received nothing (pong included) for 45 s is dropped (half-open TCP, a stopped server).
+ * Every welcome re-reads the balance from the site (?action=api_me): refunds and cash-outs paid while this page was
+ * disconnected never send a 'bal' frame. rt.seated is the table this player sits at ({id, name, turn}), from pk_state.
  */
 export function connectRealtime(cfg, { room = 'poker', onOpen, onClose, onMessage } = {}) {
   cfg = cfg || {};
   const subs = new Map();
-  let ws = null, state = 'connecting', attempt = 0, fails = 0, retryT = 0, hbT = 0, stopped = false, gen = 0;
+  let ws = null, state = 'connecting', attempt = 0, fails = 0, retryT = 0, hbT = 0, welcomeT = 0, stopped = false, gen = 0;
+  let lastRx = 0, lastPing = 0, balSeq = 0;
+  const TICKET_MS = 10000, WELCOME_MS = 10000, SILENT_MS = 45000, PING_MS = 20000;
   function dispatch(m) {
     for (const key of [m.t, '*']) {
       const list = subs.get(key);
@@ -6939,7 +6955,7 @@ export function connectRealtime(cfg, { room = 'poker', onOpen, onClose, onMessag
   }
   function setState(s) { if (s === state) return; state = s; dispatch({ t: 'rt_state', state: s }); }
   const rt = {
-    me: null, tables: [], welcome: null,
+    me: null, tables: [], welcome: null, seated: null,
     get state() { return state; },
     send(obj) {
       if (!ws || ws.readyState !== 1) return false;
@@ -6949,18 +6965,34 @@ export function connectRealtime(cfg, { room = 'poker', onOpen, onClose, onMessag
     off(type, fn) { const l = subs.get(type); if (l) l.delete(fn); },
     close() {
       stopped = true; gen++;
-      clearTimeout(retryT); clearInterval(hbT);
+      clearTimeout(retryT); clearInterval(hbT); clearTimeout(welcomeT);
       removeEventListener('online', kick);
       const s = ws; ws = null;
       if (s) { try { s.close(1000, 'bye'); } catch (e) { /* closing anyway */ } }
       setState('closed');
     },
     reconnect() { kick(); },
+    /** Re-read the balance from the site; a 'bal' frame that lands while the request is out wins over the reply. */
+    syncBalance() {
+      if (!cfg.me) return;
+      const at = balSeq;
+      fetch(cfg.me_url || '?action=api_me', { credentials: 'same-origin', headers: { 'X-Requested-With': 'fetch', Accept: 'application/json' }, signal: timeoutSignal(TICKET_MS) })
+        .then(r => r.json())
+        .then(j => { if (at === balSeq && j && j.ok && j.data && Number.isFinite(Number(j.data.balance))) applyBalance(Number(j.data.balance), cfg); })
+        .catch(e => warn('balance:', e && e.message));
+    },
   };
+  function timeoutSignal(ms) {
+    try { if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms); } catch (e) { /* fall through */ }
+    if (typeof AbortController === 'undefined') return undefined;
+    const c = new AbortController();
+    setTimeout(() => c.abort(), ms);
+    return c.signal;
+  }
   async function ticket() {
     const fd = new FormData();
     fd.append('csrf', (document.querySelector('meta[name="csrf"]') || {}).content || '');
-    const r = await fetch(cfg.ticket || '?action=rt_ticket', { method: 'POST', body: fd, credentials: 'same-origin', headers: { 'X-Requested-With': 'fetch', Accept: 'application/json' } });
+    const r = await fetch(cfg.ticket || '?action=rt_ticket', { method: 'POST', body: fd, credentials: 'same-origin', headers: { 'X-Requested-With': 'fetch', Accept: 'application/json' }, signal: timeoutSignal(TICKET_MS) });
     const j = await r.json();
     if (!j || !j.ok || !j.data || !j.data.ticket) throw new Error((j && j.error) || 'No ticket');
     return j.data;
@@ -6975,33 +7007,13 @@ export function connectRealtime(cfg, { room = 'poker', onOpen, onClose, onMessag
     let sock;
     try { sock = new WebSocket(d.ws || cfg.ws); } catch (e) { warn('socket:', e && e.message); return failed(my); }
     ws = sock;
-    let welcomed = false;
-    sock.onopen = () => { try { sock.send(JSON.stringify({ t: 'hello', ticket: d.ticket, room })); } catch (e) { /* onclose follows */ } };
-    sock.onmessage = ev => {
-      if (my !== gen) return;
-      let m;
-      try { m = JSON.parse(ev.data); } catch (e) { return; }
-      if (!m || typeof m.t !== 'string') return;
-      if (m.t === 'welcome') {
-        welcomed = true; attempt = 0; fails = 0;
-        rt.me = { id: m.id, uid: m.uid, name: m.name, guest: !!m.guest };
-        rt.welcome = m;
-        if (Array.isArray(m.tables)) rt.tables = m.tables;
-        clearInterval(hbT);
-        hbT = setInterval(() => rt.send({ t: 'ping' }), 20000);
-        setState('open');
-        safe(onOpen, m, rt);
-      } else if (m.t === 'pk_tables' && Array.isArray(m.tables)) {
-        rt.tables = m.tables;
-      } else if (m.t === 'bal' && Number.isFinite(Number(m.balance))) {
-        applyBalance(Number(m.balance), cfg);
-      }
-      safe(onMessage, m, rt);
-      dispatch(m);
-    };
-    sock.onerror = () => { /* onclose carries on */ };
-    sock.onclose = ev => {
+    let welcomed = false, gone = false;
+    /** The socket is finished (closed, or judged dead): count it, tell the page, schedule the next try. Runs once per socket. */
+    const lost = ev => {
+      if (gone) return;
+      gone = true;
       if (ws === sock) ws = null;
+      clearTimeout(welcomeT);
       if (stopped || my !== gen) return;
       clearInterval(hbT);
       if (!welcomed) fails++;
@@ -7009,6 +7021,59 @@ export function connectRealtime(cfg, { room = 'poker', onOpen, onClose, onMessag
       safe(onClose, ev, rt);
       schedule();
     };
+    const drop = why => {
+      warn('socket:', why);
+      sock.onmessage = null;
+      try { sock.close(4000, why); } catch (e) { /* half-open: the close frame may never go out */ }
+      lost({ code: 4000, reason: why });
+    };
+    // the handshake plus the welcome get WELCOME_MS: a server that accepts the TCP connection but never answers
+    // (stopped, overloaded) would otherwise leave the socket CONNECTING for minutes
+    clearTimeout(welcomeT);
+    welcomeT = setTimeout(() => { if (!welcomed && !gone && my === gen) drop('no welcome'); }, WELCOME_MS);
+    sock.onopen = () => {
+      lastRx = Date.now();
+      try { sock.send(JSON.stringify({ t: 'hello', ticket: d.ticket, room })); } catch (e) { /* onclose follows */ }
+    };
+    sock.onmessage = ev => {
+      if (my !== gen) return;
+      lastRx = Date.now();
+      let m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (!m || typeof m.t !== 'string') return;
+      if (m.t === 'welcome') {
+        welcomed = true; attempt = 0; fails = 0;
+        clearTimeout(welcomeT);
+        rt.me = { id: m.id, uid: m.uid, name: m.name, guest: !!m.guest };
+        rt.welcome = m;
+        rt.seated = null;   // the server pushes the seat's pk_state right after the welcome when there still is one
+        if (Array.isArray(m.tables)) rt.tables = m.tables;
+        clearInterval(hbT);
+        lastPing = Date.now();
+        hbT = setInterval(() => {
+          if (my !== gen || gone) return;
+          const now = Date.now();
+          if (now - lastRx > SILENT_MS) { drop('silent for ' + Math.round((now - lastRx) / 1000) + ' s'); return; }
+          if (now - lastPing >= PING_MS) { lastPing = now; rt.send({ t: 'ping' }); }
+        }, 5000);
+        setState('open');
+        if (!m.guest) rt.syncBalance();
+        safe(onOpen, m, rt);
+      } else if (m.t === 'pk_tables' && Array.isArray(m.tables)) {
+        rt.tables = m.tables;
+      } else if (m.t === 'bal' && Number.isFinite(Number(m.balance))) {
+        balSeq++;
+        applyBalance(Number(m.balance), cfg);
+      } else if (m.t === 'pk_state' && m.table && typeof m.table === 'object') {
+        const v = m.table, id = int(v.id);
+        if (v.me !== null && v.me !== undefined) rt.seated = { id, name: String(v.name || ''), turn: !!v.legal };
+        else if (rt.seated && rt.seated.id === id) rt.seated = null;
+      }
+      safe(onMessage, m, rt);
+      dispatch(m);
+    };
+    sock.onerror = () => { /* onclose carries on */ };
+    sock.onclose = ev => lost(ev);
   }
   function failed(my) {
     if (stopped || my !== gen) return;
@@ -7085,25 +7150,28 @@ export function mountPokerLobby(host, { rt, cfg, onOpen } = {}) {
     const lbl = connLabel(rt ? rt.state : 'connecting');
     c.textContent = lbl; c.hidden = !lbl; c.dataset.state = rt ? rt.state : '';
   }
-  function seatedNote(m) {
-    const v = m && m.table;
-    if (!v || v.me === null || v.me === undefined) return;
+  /** "Back to my seat" from rt.seated (kept by connectRealtime from every pk_state, the seated table's included after its page is gone). */
+  function seatedNote() {
     const note = root.querySelector('[data-seated-note]');
-    note.innerHTML = `<span>You've still got a seat at <b>${esc(v.name)}</b>.</span> <button type="button" class="btn gold sm" data-open="${int(v.id)}">Back to my seat</button>`;
-    note.hidden = false;
+    const S = rt && rt.seated;
+    const html = S ? `<span>${S.turn ? `<b>It's your turn</b> at <b>${esc(S.name)}</b>.` : `You've still got a seat at <b>${esc(S.name)}</b>.`}</span> <button type="button" class="btn gold sm" data-open="${int(S.id)}">Back to my seat</button>` : '';
+    if (note.dataset.sig !== html) { note.dataset.sig = html; note.innerHTML = html; }
+    note.hidden = !S;
+    note.classList.toggle('pk-on', !!(S && S.turn));
   }
-  const offs = rt ? [rt.on('pk_tables', update), rt.on('welcome', update), rt.on('rt_state', update), rt.on('pk_state', seatedNote)] : [];
+  const offs = rt ? [rt.on('pk_tables', update), rt.on('welcome', update), rt.on('rt_state', update), rt.on('pk_state', seatedNote), rt.on('welcome', seatedNote)] : [];
   root.addEventListener('click', e => {
     const b = e.target.closest('[data-open]');
     if (b) safe(onOpen, int(b.dataset.open));
   });
   update();
+  seatedNote();
   return { destroy() { offs.forEach(f => f()); root.remove(); } };
 }
 
 /* ───────────────────────── one table ───────────────────────── */
 
-export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHint = null, onState, onEvents, onLeave, onBack } = {}) {
+export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHint = null, onState, onEvents, onLeave, onBack, onOpenTable } = {}) {
   cfg = cfg || {};
   tableId = int(tableId);
   const hud = mode === 'hud';
@@ -7139,6 +7207,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
       <div class="pk-hud-banner" data-hud-banner hidden></div>
     </div>
     <div class="pk-dock" data-dock>
+      <div class="pk-seated-note pk-elsewhere" data-elsewhere hidden></div>
       <div class="pk-mine" data-mine hidden></div>
       <div class="pk-statusline"><span data-status></span> <span class="pk-clock" data-clock></span></div>
       <div class="pk-actions" data-actions hidden>
@@ -7178,7 +7247,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
     name: $('[data-name]'), blinds: $('[data-blinds]'), conn: $('[data-conn]'), hash: $('[data-hash]'), verify: $('[data-verify]'),
     felt: $('[data-felt]'), feltName: $('[data-felt-name]'), board: $('[data-board]'), pot: $('[data-pot]'), banner: $('[data-banner]'),
     seats: $('[data-seats]'), dealer: $('[data-dealer]'), hudBoard: $('[data-hud-board]'), hudPot: $('[data-hud-pot]'), hudBanner: $('[data-hud-banner]'),
-    mine: $('[data-mine]'), status: $('[data-status]'), clock: $('[data-clock]'), actions: $('[data-actions]'),
+    elsewhere: $('[data-elsewhere]'), mine: $('[data-mine]'), status: $('[data-status]'), clock: $('[data-clock]'), actions: $('[data-actions]'),
     fold: $('[data-act="fold"]'), call: $('[data-act="call"]'), raise: $('[data-act="raise"]'), callLabel: $('[data-call-label]'), raiseLabel: $('[data-raise-label]'),
     raiseRow: $('[data-raise-row]'), range: $('[data-raise-range]'), input: $('[data-raise-input]'),
     pre: $('[data-pre]'), preCF: $('[data-pre-cf]'), preCA: $('[data-pre-ca]'), sitbar: $('[data-sitbar]'), settings: $('[data-settings]'),
@@ -7186,7 +7255,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
   };
 
   let view = null, destroyed = false, stateAt = 0;
-  let busy = false, busySeq = -1, busyHand = -1;
+  let busy = false, busySeq = -1, busyHand = -1, busyT = 0, afterWelcome = false;
   let turnKey = '', ticked = false, timerRAF = 0, timerTO = 0;
   let preKey = '';
   let amount = 0;
@@ -7207,16 +7276,42 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
   const offs = [];
   if (rt) {
     offs.push(rt.on('welcome', watch));
+    // A pk_act can die with its socket: whatever state comes after a reconnect is authoritative, so the bar unlocks.
+    offs.push(rt.on('welcome', () => { afterWelcome = true; unlock(); }));
+    offs.push(rt.on('rt_state', m => { if (m.state !== 'open') unlock(); }));
     offs.push(rt.on('pk_state', m => { if (m.table && int(m.table.id) === tableId) applyState(m.table); }));
     offs.push(rt.on('pk_events', m => { if (int(m.table) === tableId && Array.isArray(m.events)) applyEvents(m.events); }));
     offs.push(rt.on('pk_err', m => onError(m.msg)));
     offs.push(rt.on('err', m => onError(m.msg)));
     offs.push(rt.on('rt_state', paintConn));
+    offs.push(rt.on('pk_state', renderElsewhere));
+    offs.push(rt.on('welcome', renderElsewhere));
     if (rt.state === 'open') watch();
+  }
+  /** The seat this player holds at ANOTHER table (rt.seated), so this one never offers a seat with no hint of the live one. */
+  const elsewhere = () => (rt && rt.seated && int(rt.seated.id) !== tableId ? rt.seated : null);
+  let elseSig = null;
+  function renderElsewhere() {
+    if (destroyed) return;
+    const S = elsewhere();
+    const html = S ? `<span>${S.turn ? `<b>It's your turn</b> at <b>${esc(S.name)}</b>.` : `You've got a seat at <b>${esc(S.name)}</b>.`}</span> <button type="button" class="btn gold sm" data-goto="${int(S.id)}">Back to my seat</button>` : '';
+    if (html === elseSig) return;
+    const was = elseSig ? 1 : 0;
+    elseSig = html;
+    R.elsewhere.innerHTML = html; R.elsewhere.hidden = !S;
+    R.elsewhere.classList.toggle('pk-on', !!(S && S.turn));
+    if (view && was !== (S ? 1 : 0)) { if (!hud) renderSeats(view); renderDock(view); }
+  }
+  function unlock() {
+    clearTimeout(busyT);
+    if (!busy || destroyed) return;
+    busy = false;
+    if (view) renderDock(view);
   }
   function onError(msg) {
     if (destroyed) return;
     toast(msg || 'The dealer said no to that one.', 'err');
+    clearTimeout(busyT);
     busy = false; joinPending = null;
     if (view) renderDock(view);
   }
@@ -7226,6 +7321,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
     el.classList.toggle('pk-offline', !!lbl);
   }
   paintConn();
+  renderElsewhere();
   R.status.textContent = 'Taking a look at the table…';
 
   /* ── state ── */
@@ -7233,17 +7329,21 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
     if (destroyed || !v || typeof v !== 'object') return;
     const prev = view;
     view = v; stateAt = performance.now();
-    if (busy && (v.seq !== busySeq || v.hand_no !== busyHand || !v.legal)) busy = false;
+    if (busy && (v.seq !== busySeq || v.hand_no !== busyHand || !v.legal)) { busy = false; clearTimeout(busyT); }
     const me = v.me === null || v.me === undefined ? null : int(v.me);
     if (me !== null) {
       if (!wasSeated && joinPending) { toast(`You're in at seat ${me + 1}. Good luck!`, 'ok'); joinPending = null; }
       wasSeated = true;
     } else if (wasSeated) {
       wasSeated = false;
-      toast(leaving ? 'Cashed out. Your chips are back in your balance.' : "You're up from the table.", 'info');
+      // the seat went while this page was disconnected (the table was reset, or the away window cashed it out): no 'bal'
+      // frame ever comes for that, so re-read the balance from the site
+      toast(leaving ? 'Cashed out. Your chips are back in your balance.' : afterWelcome ? 'Your seat was closed while you were disconnected. Your chips are back in your balance.' : "You're up from the table.", 'info');
+      if (rt && rt.syncBalance) rt.syncBalance();
       leaving = false;
       safe(onLeave, v);
     }
+    afterWelcome = false;
     if (prev && prev.hand_no !== v.hand_no) { flipDelays = {}; }
     R.name.textContent = v.name || conf.name || 'Poker table';
     R.feltName.textContent = v.name || '';
@@ -7311,7 +7411,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
       const betEl = R.seats.querySelector(`.pk-bet[data-bet-seat="${s}"]`);
       const p = playerAt(v, s);
       if (!p) {
-        const canSit = me === null && !(rt && rt.me && rt.me.guest);
+        const canSit = me === null && !(rt && rt.me && rt.me.guest) && !elsewhere();
         const sig = 'empty:' + canSit;
         pod.className = 'pk-seat pk-empty';
         if (podSig.get(s) !== sig) {
@@ -7450,7 +7550,8 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
     let status = '';
     const turnP = v.to_act !== null && v.to_act !== undefined ? playerAt(v, int(v.to_act)) : null;
     if (!p) {
-      status = rt && rt.me && rt.me.guest ? 'Watching. Log in to grab a seat.' : (hud ? 'Watching this table.' : 'Watching. Grab an open seat to play.');
+      const S = elsewhere();
+      status = rt && rt.me && rt.me.guest ? 'Watching. Log in to grab a seat.' : S ? `Watching. You're seated at ${S.name}.` : (hud ? 'Watching this table.' : 'Watching. Grab an open seat to play.');
     } else if (L) status = busy ? 'Sending…' : 'Your turn.';
     else if (p.sitout) status = "You're sitting out.";
     else if (p.away) status = "You're marked away.";
@@ -7467,6 +7568,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
       const guest = rt && rt.me && rt.me.guest;
       let html = '';
       if (guest) html = `<a class="btn gold sm" href="${esc(cfg.login || '?action=login')}">Log in to play</a>`;
+      else if (elsewhere()) html = '<span class="muted">One seat at a time: leave your other table to sit here.</span>';
       else if (hud) {
         const hint = seatHint !== null && seatHint !== undefined ? int(seatHint, -1) : -1;
         const free = hint >= 0 && hint < int(v.seats) && !playerAt(v, hint) ? hint : firstFree(v);
@@ -7480,7 +7582,12 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
       R.settings.hidden = false;
       R.sitout.checked = !!p.sitout;
       R.post.hidden = !(p.owes && !p.post && !dealtIn(p) && !p.sitout && !p.away);
-      R.addon.disabled = int(p.stack) >= int(v.max_buy) || !!p.leaving;
+      // the dealer only tops up a seat that is not in the running hand (pk_addon), and the next hand deals one tick after
+      // the last one ends, so a player dealt in every hand adds on by sitting a hand out
+      const inHand = live && dealtIn(p);
+      R.addon.disabled = int(p.stack) >= int(v.max_buy) || !!p.leaving || inHand;
+      R.addon.textContent = inHand && int(p.stack) < int(v.max_buy) && !p.leaving ? (p.sitout ? 'Add on after this hand' : 'Add on: sit out a hand first') : 'Add on';
+      R.addon.title = inHand ? 'You can top up while you are not in a hand. Tick "Sit out next hand", then add on.' : '';
       R.leave.disabled = !!p.leaving;
       R.leave.textContent = p.leaving ? 'Leaving after this hand' : 'Leave table';
     }
@@ -7502,8 +7609,11 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
       const lo = int(L.raise.min), hi = int(L.raise.max);
       amount = clamp(int(amount, lo), lo, hi);
       R.raise.hidden = false; R.raiseRow.hidden = false;
-      R.range.min = String(lo); R.range.max = String(hi); R.range.step = String(Math.max(1, int(v.bb) >= 2 ? Math.round(int(v.bb) / 2) : 1));
-      R.range.value = String(amount);
+      // the slider steps by half a big blind from the min; its max is rounded UP to that grid so the far right always
+      // reaches all-in (setAmount clamps to hi), whatever the stack
+      const step = Math.max(1, int(v.bb) >= 2 ? Math.round(int(v.bb) / 2) : 1);
+      R.range.min = String(lo); R.range.max = String(lo + Math.ceil((hi - lo) / step) * step); R.range.step = String(step);
+      R.range.value = String(amount >= hi ? int(R.range.max) : amount);
       if (document.activeElement !== R.input) R.input.value = String(amount);
       R.input.min = String(lo); R.input.max = String(hi);
       R.raise.dataset.act = 'raise';
@@ -7530,7 +7640,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
       if (!ok) { R.raise.disabled = true; R.raiseLabel.textContent = `${fmt(lo)} – ${fmt(hi)}`; return; }
     } else R.input.setAttribute('aria-invalid', 'false');
     amount = clamp(Math.round(n), lo, hi);
-    R.range.value = String(amount);
+    R.range.value = String(amount >= hi ? int(R.range.max) : amount);
     if (!fromInput) R.input.value = String(amount);
     R.raise.disabled = busy;
     paintRaiseLabel(view, view.legal);
@@ -7557,6 +7667,9 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
     if (a === 'raise') msg.amt = int(amt !== undefined ? amt : amount);
     if (!send(msg)) return false;
     busy = true; busySeq = v.seq; busyHand = v.hand_no;
+    // safety net: no pk_state / pk_err for the act within 4 s means it was lost; the server drops a repeat for the same seq
+    clearTimeout(busyT);
+    busyT = setTimeout(() => { if (busy && view && view.seq === busySeq && view.hand_no === busyHand) unlock(); }, 4000);
     renderActions(v, v.legal);
     R.status.textContent = 'Sending…';
     return true;
@@ -7712,7 +7825,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
         <p class="muted">${sub}</p>
         ${can ? `
         <div class="pk-dlg-amt"><input type="number" inputmode="numeric" data-amt min="${lo}" max="${hi}" step="1" value="${start}" aria-label="Amount in Gold Coins" autofocus><span>GC</span></div>
-        <input type="range" data-amt-range min="${lo}" max="${hi}" step="${step}" value="${start}" aria-label="Amount slider">
+        <input type="range" data-amt-range min="${lo}" max="${lo + Math.ceil((hi - lo) / Math.max(1, step)) * Math.max(1, step)}" step="${step}" value="${start}" aria-label="Amount slider">
         <div class="pk-dlg-quick">${quick.map(([lbl, val]) => `<button type="button" class="btn ghost sm" data-quick="${val}">${esc(lbl)}</button>`).join('')}</div>` : ''}
         ${note ? `<p class="fine">${note}</p>` : ''}
         <p class="pk-dlg-err" data-dlg-err role="alert"></p>
@@ -7722,7 +7835,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
         const num = form.querySelector('[data-amt]'), rng = form.querySelector('[data-amt-range]'), ok = form.querySelector('[data-ok]'), err = form.querySelector('[data-dlg-err]');
         if (!num) return;
         if (e.quick !== undefined) num.value = String(e.quick);
-        else if (e.target === rng) num.value = rng.value;
+        else if (e.target === rng) num.value = String(Math.min(hi, Number(rng.value)));   // the slider's max sits on the step grid, at or past hi
         const n = Number(num.value);
         const valid = Number.isInteger(n) && n >= lo && n <= hi;
         if (valid) rng.value = String(n);
@@ -7747,6 +7860,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
     if (!rt || !rt.me || rt.me.guest) { toast('Log in to grab a seat.', 'err'); return; }
     if (cfg.me && cfg.me.brk) { toast("You're on a break right now. The tables will be here when it's over.", 'err'); return; }
     if (v.me !== null && v.me !== undefined) { toast("You're already sitting at this table.", 'info'); return; }
+    if (elsewhere()) { toast(`You're already seated at ${elsewhere().name}. Leave that table first.`, 'info'); return; }
     if (playerAt(v, seat)) { toast('Someone just took that seat. Try another one.', 'err'); return; }
     const lo = int(v.min_buy), max = int(v.max_buy), bb = Math.max(1, int(v.bb));
     const bal = currentBalance(cfg);
@@ -7769,12 +7883,13 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
     const bal = currentBalance(cfg);
     const hi = Math.min(room, bal), lo = Math.min(Math.max(1, int(v.bb)), Math.max(1, hi));
     if (room <= 0) { toast(`You're already at the table max of ${fmt(v.max_buy)}.`, 'info'); return; }
+    if (LIVE.has(v.phase) && dealtIn(p)) { toast('You can add on once you are out of the hand. Sit out the next hand to top up.', 'info'); return; }
     amountDialog({
       title: 'Add on',
       sub: `Top up between hands, up to ${fmt(v.max_buy)} GC in front. You have <b>${fmt(p.stack)}</b> at the table and <b>${fmt(bal)}</b> GC in your balance.`,
       lo, hi, step: Math.max(1, int(v.bb)), start: hi, quick: [['Half', Math.max(lo, Math.round(hi / 2))], ['Max', hi]],
       okLabel: n => n ? `Add ${fmt(n)}` : 'Add on',
-      note: hi < lo ? "You don't have enough Gold Coins to top up right now." : 'If a hand is running, the dealer adds it once you are out of it.',
+      note: hi < lo ? "You don't have enough Gold Coins to top up right now." : 'The chips go on your stack right away. You can only add on while you are not in a hand.',
       onConfirm: n => addon(n),
     });
   }
@@ -7812,6 +7927,8 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
     const pr = t.closest('[data-preset]');
     if (pr) { preset(pr.dataset.preset); return; }
     if (t.closest('[data-back]')) { safe(onBack); return; }
+    const go = t.closest('[data-goto]');
+    if (go) { const id = int(go.dataset.goto); if (onOpenTable) safe(onOpenTable, id); else location.href = `?action=poker&t=${id}`; return; }
     if (t.closest('[data-hash]')) {
       const full = R.hash.dataset.full || '';
       const done = () => toast('Deck hash copied. Check it against the hand history once the hand is over.', 'ok');
@@ -7857,7 +7974,7 @@ export function mountPokerTable(host, { rt, tableId, cfg, mode = 'page', seatHin
     destroy() {
       if (destroyed) return;
       destroyed = true;
-      cancelAnimationFrame(timerRAF); clearTimeout(timerTO); clearTimeout(bannerT);
+      cancelAnimationFrame(timerRAF); clearTimeout(timerTO); clearTimeout(bannerT); clearTimeout(busyT);
       document.removeEventListener('keydown', onKey);
       try { RM.removeEventListener('change', onMotion); PHONE.removeEventListener('change', onPhone); } catch (e) { /* old engines */ }
       offs.forEach(f => f());
@@ -7970,10 +8087,26 @@ export function renderHandHistory(host, record) {
   // state after step i, replayed from the start
   function stateAt(i) {
     const st = { board: 0, pot: 0, cur: 0, seats: new Map(), text: '', last: null };
-    for (const p of players) st.seats.set(p.seat, { stack: int(p.start_stack), bet: 0, folded: false, last: '' });
+    for (const p of players) st.seats.set(p.seat, { stack: int(p.start_stack), bet: 0, put: 0, folded: false, last: '' });
+    // the street is over: chips nobody matched go back to the top bettor, as pk_return_uncalled() does (folded chips count as matched)
+    const giveBack = () => {
+      let top = null, topPut = -1, other = 0;
+      st.seats.forEach((x, seat) => { if (!x.folded && x.put > topPut) { topPut = x.put; top = seat; } });
+      if (top === null) return '';
+      st.seats.forEach((x, seat) => { if (seat !== top) other = Math.max(other, x.put); });
+      const back = topPut - other;
+      if (back <= 0) return '';
+      const x = st.seats.get(top);
+      x.stack += back; x.put -= back; st.pot -= back;
+      return `${nameOf(top)} takes back ${fmt(back)} (uncalled)`;
+    };
     for (let k = 0; k <= i; k++) {
       const s = steps[k];
-      if (s.kind === 'street') { st.board = BOARD_N[s.street]; st.cur = 0; st.seats.forEach(x => { x.bet = 0; x.last = ''; }); st.text = s.text; }
+      if (s.kind === 'street') {
+        const back = giveBack();
+        st.board = BOARD_N[s.street]; st.cur = 0; st.seats.forEach(x => { x.bet = 0; x.put = 0; x.last = ''; });
+        st.text = back ? `${s.text} · ${back}` : s.text;
+      }
       else if (s.kind === 'deal') st.text = s.text;
       else if (s.kind === 'act') {
         const a = s.a, x = st.seats.get(int(a.seat));
@@ -7991,7 +8124,7 @@ export function renderHandHistory(host, record) {
           default: txt = `${who}: ${String(a.act)}`;
         }
         if (a.auto) txt += ' (auto)';
-        if (x) { x.stack -= put; x.bet = amt; x.last = LAST[a.act] || ''; if (a.act === 'fold') x.folded = true; }
+        if (x) { x.stack -= put; x.put += put; x.bet = amt; x.last = LAST[a.act] || ''; if (a.act === 'fold') x.folded = true; }
         st.pot += put; st.cur = Math.max(st.cur, amt);
         st.text = txt; st.last = int(a.seat);
       } else if (s.kind === 'end') {
@@ -8144,7 +8277,7 @@ function bootRoom(room) {
     document.querySelectorAll('[data-recent-for]').forEach(s => { s.hidden = int(s.dataset.recentFor) !== tid; });
     room.dataset.table = String(tid);
     current = tid
-      ? mountPokerTable(stage, { rt, tableId: tid, cfg, mode: 'page', onBack: () => show(0, true) })
+      ? mountPokerTable(stage, { rt, tableId: tid, cfg, mode: 'page', onBack: () => show(0, true), onOpenTable: id => show(id, true) })
       : mountPokerLobby(stage, { rt, cfg, onOpen: id => { show(id, true); window.scrollTo({ top: room.getBoundingClientRect().top + scrollY - 80, behavior: reduced() ? 'auto' : 'smooth' }); } });
   }
   addEventListener('popstate', () => show(int(new URLSearchParams(location.search).get('t')), false));
@@ -9182,6 +9315,7 @@ input[type=range]{padding:0;height:8px;accent-color:var(--gold);background:trans
 @keyframes pk-pulse{50%{opacity:.3}}
 .pk-seated-note{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px 14px;border:1px solid var(--gold);border-radius:14px;margin-bottom:14px;background:var(--card)}
 .pk-seated-note[hidden]{display:none}
+.pk-seated-note.pk-on{background:rgba(232,182,76,.18);box-shadow:0 0 0 2px rgba(232,182,76,.35)}
 .pk-conn{font-size:.8rem;font-weight:700;padding:4px 10px;border-radius:999px;background:rgba(255,125,107,.15);color:var(--neg);border:1px solid var(--neg)}
 .pk-conn[data-state="connecting"]{color:var(--gold-text);border-color:var(--gold);background:rgba(232,182,76,.12)}
 .pk-conn[hidden]{display:none}

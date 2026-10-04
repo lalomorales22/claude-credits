@@ -302,11 +302,15 @@ const M = await import(new URL(cfg.poker_asset, location.href).href);   // '?act
 // One socket per page. Fetches a ticket (POST cfg.ticket with the csrf meta), opens cfg.ws, sends hello,
 // heartbeats every 20 s, reconnects with backoff (1,2,4,8…30 s + jitter, fresh ticket each time),
 // state: 'connecting' | 'open' | 'closed' | 'offline' (4 failures; keeps retrying every 30 s).
+// Dead sockets are dropped and retried: the ticket fetch times out after 10 s, a socket with no welcome 10 s after
+// it is created is closed, and so is one that has received nothing (pong included) for 45 s (half-open TCP, a hung server).
 const rt = M.connectRealtime(cfg, { room: 'floor' | 'poker', onOpen(welcome), onClose(), onMessage(msg) });
 rt.send({ t: 'pos', x, z, ry, a });      // any protocol message
 const off = rt.on('snap', msg => …);      // per-type subscription; returns an unsubscribe fn
 rt.me;                                    // { id, uid, name, guest } after welcome
 rt.tables;                                // latest poker table summaries (welcome / pk_tables)
+rt.seated;                                // { id, name, turn } of the table this player sits at (from pk_state), or null
+rt.syncBalance();                         // re-read the balance from ?action=api_me (done on every welcome)
 rt.state; rt.close();
 
 // Poker lobby: cards per cfg.tables with live counts. onOpen(tableId) is the navigation hook.
@@ -314,7 +318,9 @@ const lobby = M.mountPokerLobby(host, { rt, cfg, onOpen });   // → { destroy()
 
 // One table. mode 'page' draws the felt; mode 'hud' is the compact bottom bar the floor uses
 // (the floor renders the felt/cards/chips in 3D from onState(view)). Never auto-leaves a seat.
-const tbl = M.mountPokerTable(host, { rt, tableId, cfg, mode, seatHint, onState(view), onEvents(list), onLeave() });
+// onOpenTable(id) navigates to the table the player is seated at when it is another one ("Back to my seat").
+// The action bar unlocks on any reconnect (a pk_act can die with its socket) and 4 s after an act nobody answered.
+const tbl = M.mountPokerTable(host, { rt, tableId, cfg, mode, seatHint, onState(view), onEvents(list), onLeave(), onOpenTable(id) });
 tbl.sit(seat, buyin); tbl.leave(); tbl.act('raise', amountTo); tbl.sitout(true); tbl.post(true); tbl.addon(amount); tbl.view; tbl.destroy();
 
 // Hand history replay + client-side deck-commitment check for ?action=poker_hand.
@@ -323,4 +329,4 @@ M.renderHandHistory(host, record);
 
 Events the floor cares about from `onState(view)`: `view.players[seat].cards` is an array (faces known) or an integer (card backs), `view.board`, `view.pot`, `view.pots`, `view.to_act`, `view.button`, `view.winners`, `view.phase`, `view.me`.
 
-Balance updates: on `bal` the module calls `window.goldTide.setBalance(balance)` when present. Pages embedded in the floor (`?embed=1`) post `{t:'gt_balance', balance}` to `window.parent`; the floor checks `e.origin === location.origin` before trusting it.
+Balance updates: on `bal` the module calls `window.goldTide.setBalance(balance)` when present. Refunds and cash-outs paid while a page was disconnected (ws.php start-up refund, the away window) send no `bal`, so every welcome, and every seat that disappears without one, re-reads `?action=api_me`; a `bal` frame that arrives while that request is out wins. Pages embedded in the floor (`?embed=1`) post `{t:'gt_balance', balance}` to `window.parent`; the floor checks `e.origin === location.origin` before trusting it.
