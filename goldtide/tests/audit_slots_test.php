@@ -61,10 +61,10 @@ function t_bonus_ev(array $t): float {
     return $t['bonus']['type'] === 'wheel' ? $ev : 3 * $ev;
 }
 
-/* ── 0. fresh install: the six slots seed at VS_MIN_BET, everything else at 10 ── */
+/* ── 0. fresh install: every video slot seeds at VS_MIN_BET, everything else at 10 ── */
 db();
 $mins = array_column(q('SELECT slug, min_bet FROM games')->fetchAll(), 'min_bet', 'slug');
-t_check('seed: video slots start at VS_MIN_BET (' . VS_MIN_BET . ')', count(array_filter(array_keys(VSLOTS), fn($s) => (int)$mins[$s] === VS_MIN_BET)) === 6 && (int)$mins['dice'] === 10, json_encode(array_intersect_key($mins, VSLOTS + ['dice' => 1])));
+t_check('seed: every video slot starts at VS_MIN_BET (' . VS_MIN_BET . ')', count(array_filter(array_keys(VSLOTS), fn($s) => (int)$mins[$s] === VS_MIN_BET)) === count(VSLOTS) && (int)$mins['dice'] === 10, json_encode(array_intersect_key($mins, VSLOTS + ['dice' => 1])));
 q("UPDATE games SET min_bet = 10 WHERE slug = 'tiki'");
 $g10 = row("SELECT * FROM games WHERE slug = 'tiki'"); $gf = vs_game($g10);
 t_check('vs_game(): a legacy 10 GC row is floored to VS_MIN_BET in memory and in the table', (int)$gf['min_bet'] === VS_MIN_BET && (int)$gf['max_bet'] === 5000 && (int)val("SELECT min_bet FROM games WHERE slug = 'tiki'") === VS_MIN_BET);
