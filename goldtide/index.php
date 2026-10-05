@@ -6797,9 +6797,10 @@ function floor_js(): string {
  * Contract: REALTIME.md (wire protocol, station ids, JS module API). No dependencies besides three.js, served by index.php.
  *
  * How the screens work: each machine's screen in the WebGL scene is a "hole" (a mesh that writes depth but clears colour to
- * transparent). The WebGL canvas is transparent and sits ABOVE a CSS3D layer that places the game's <iframe> at exactly the
- * same 3D transform, so the page renders in true perspective, stays anchored when your head turns and is hidden correctly by
- * anything in front of it. One iframe at a time: it is created after you sit and destroyed when you stand.
+ * transparent). The WebGL canvas is transparent and sits ABOVE a layer that holds the game's <iframe>, placed every frame
+ * with a flat 2D matrix() fitted to the screen's projected corners, so it lines up with the bezel, stays anchored when your
+ * head turns and is hidden correctly by anything in front of it. (Not CSS 3D: Safari mis-positions iframes in 3D layers.)
+ * One iframe at a time: it is created after you sit and destroyed when you stand.
  *
  * Optional room shell: drop a binary glTF at data/floor.glb (meters, y-up, origin at the entrance doors, the hall extending
  * toward -z, roughly 70 m wide (x -35..35) by 45 m deep (z 0..-45), 5 m ceiling; static meshes with PBR base colours /
@@ -8175,9 +8176,6 @@ function closeConfirm(ok) { const cb = ui.confirm._cb; ui.confirm.hidden = true;
 
 /* ───────── the screen: hole + CSS3D iframe ───────── */
 const css = { root: null, cam: null, obj: null, o3: null, hole: null, st: null, frame: null };
-const eps = v => Math.abs(v) < 1e-10 ? 0 : v;
-const camCSS = m => { const e = m.elements; return `matrix3d(${eps(e[0])},${eps(-e[1])},${eps(e[2])},${eps(e[3])},${eps(e[4])},${eps(-e[5])},${eps(e[6])},${eps(e[7])},${eps(e[8])},${eps(-e[9])},${eps(e[10])},${eps(e[11])},${eps(e[12])},${eps(-e[13])},${eps(e[14])},${eps(e[15])})`; };
-const objCSS = m => { const e = m.elements; return `translate(-50%,-50%)matrix3d(${eps(e[0])},${eps(e[1])},${eps(e[2])},${eps(e[3])},${eps(-e[4])},${eps(-e[5])},${eps(-e[6])},${eps(-e[7])},${eps(e[8])},${eps(e[9])},${eps(e[10])},${eps(e[11])},${eps(e[12])},${eps(e[13])},${eps(e[14])},${eps(e[15])})`; };
 function setScreenInstance(st, visible) {
   const b = buckets.get(st.screen.key); if (!b || !b.mesh) return;
   const m = visible ? b.items[st.screen.index].m : new T.Matrix4().makeScale(0, 0, 0);
@@ -8252,15 +8250,43 @@ function closeScreen() {
   css.obj = css.hole = css.o3 = css.st = css.frame = null; css.k = 1;
   shell.classList.remove('has-screen');
 }
+// The game page is placed from the screen's projected corners each frame. Facing the screen (how you play) the corners
+// form a rectangle and the iframe gets a plain 2D matrix(), with no perspective or preserve-3d anywhere: WebKit (Safari)
+// mis-positions iframes inside 3D-transformed layers (the page lands shrunk into a corner of the bezel), and a flat
+// layer keeps the text crisp. Only while you turn your head does the quad pick up perspective; then a single flat
+// projective matrix3d (a homography, still no 3D context) keeps all four corners on the bezel.
+let _cv = null;   // corner scratch vectors, made on first use (three.js loads after this module starts)
 function renderCSS() {
-  if (!css.obj) return;
+  if (!css.obj || !css.hole || !css.frame) return;
+  _cv = _cv || [new T.Vector3(), new T.Vector3(), new T.Vector3(), new T.Vector3(), new T.Vector3()];
   const cam = world.camera, W = world.W, H = world.H;
-  const fov = cam.projectionMatrix.elements[5] * H / 2;
-  css.root.style.perspective = fov + 'px';
-  cam.updateMatrixWorld(); cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
-  css.cam.style.width = W + 'px'; css.cam.style.height = H + 'px';
-  css.cam.style.transform = `translateZ(${fov}px)` + camCSS(cam.matrixWorldInverse) + `translate(${W / 2}px,${H / 2}px)`;
-  css.o3.updateMatrixWorld(); css.obj.style.transform = objCSS(css.o3.matrixWorld);
+  cam.updateMatrixWorld(); css.hole.updateMatrixWorld();
+  const q = [];   // top-left, top-right, bottom-right, bottom-left in CSS pixels
+  for (const [i, x, y] of [[0, -.5, .5], [1, .5, .5], [2, .5, -.5], [3, -.5, -.5]]) {
+    const v = _cv[i].set(x, y, 0).applyMatrix4(css.hole.matrixWorld);
+    _cv[4].copy(v).applyMatrix4(cam.matrixWorldInverse);
+    if (_cv[4].z > -0.02) { css.obj.style.visibility = 'hidden'; return; }   // a corner behind the eye: nothing sensible to draw
+    v.project(cam); q.push([(v.x + 1) / 2 * W, (1 - v.y) / 2 * H]);
+  }
+  const vw = css.frame.offsetWidth || 1, vh = css.frame.offsetHeight || 1, [p0, p1, p2, p3] = q;
+  const r = n => +n.toFixed(6);
+  // how far the bottom-right corner sits from where a parallelogram would put it
+  const off = Math.hypot(p1[0] + p3[0] - p0[0] - p2[0], p1[1] + p3[1] - p0[1] - p2[1]);
+  let tf;
+  if (off < 1.5) {
+    tf = 'matrix(' + [(p1[0] - p0[0]) / vw, (p1[1] - p0[1]) / vw, (p3[0] - p0[0]) / vh, (p3[1] - p0[1]) / vh, p0[0], p0[1]].map(r).join(',') + ')';
+  } else {
+    // unit square → quad homography, then scaled to the element's pixel size
+    const dx1 = p1[0] - p2[0], dx2 = p3[0] - p2[0], dx3 = p0[0] - p1[0] + p2[0] - p3[0];
+    const dy1 = p1[1] - p2[1], dy2 = p3[1] - p2[1], dy3 = p0[1] - p1[1] + p2[1] - p3[1];
+    const den = dx1 * dy2 - dx2 * dy1 || 1e-9;
+    const g = (dx3 * dy2 - dx2 * dy3) / den, h = (dx1 * dy3 - dx3 * dy1) / den;
+    const a = p1[0] - p0[0] + g * p1[0], b = p3[0] - p0[0] + h * p3[0];
+    const d = p1[1] - p0[1] + g * p1[1], e = p3[1] - p0[1] + h * p3[1];
+    tf = 'matrix3d(' + [a / vw, d / vw, 0, g / vw, b / vh, e / vh, 0, h / vh, 0, 0, 1, 0, p0[0], p0[1], 0, 1].map(r).join(',') + ')';
+  }
+  css.obj.style.visibility = '';
+  css.obj.style.transform = tf;
 }
 function onMessage(e) {
   if (e.origin !== location.origin || !e.data || typeof e.data !== 'object') return;
@@ -11432,8 +11458,8 @@ html:has(body.pg-floor),body.pg-floor{overflow:hidden;overscroll-behavior:none}
 .floor-shell{position:fixed;inset:0;background:#05070d;overflow:hidden;touch-action:none;--fl-top:64px;font-family:var(--f-body);-webkit-user-select:none;user-select:none}
 .floor-css3d,.floor-gl{position:absolute;inset:0;width:100%;height:100%}
 .floor-css3d{overflow:hidden;pointer-events:none}
-.fl-css-cam{position:absolute;left:0;top:0;transform-style:preserve-3d;pointer-events:none}
-.fl-css-obj{position:absolute;left:0;top:0;transform-style:preserve-3d;pointer-events:auto}
+.fl-css-cam{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
+.fl-css-obj{position:absolute;left:0;top:0;transform-origin:0 0;pointer-events:auto}
 .fl-screen{display:block;border:0;background:#05060c}
 .floor-gl{display:block;touch-action:none}
 .floor-shell.seated-screen .floor-gl{pointer-events:none}
