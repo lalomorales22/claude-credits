@@ -8191,6 +8191,7 @@ function openScreen(st) {
   const src = `?action=${encodeURIComponent(st.slug)}&embed=1`;
   const ifr = el('iframe', 'fl-screen', null, { src, title: gameName(st.slug), width: ew, height: eh, allow: 'fullscreen', referrerpolicy: 'same-origin' });
   ifr.style.width = ew + 'px'; ifr.style.height = eh + 'px';
+  css.vw = ew; css.vh = eh; css.fw = css.fh = css.lastW = css.lastH = 0;
   ifr.addEventListener('load', () => {
     try { ifr.contentWindow.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); requestStand(); } }); } catch (e) {}
     fitScreen(ifr);
@@ -8209,13 +8210,25 @@ function openScreen(st) {
 // The iframe's CSS size is the screen's on-screen size times css.k: the page renders at a larger virtual size and the
 // CSS3D object scales it back down, so a game taller than the screen (Spin / Deal / Roll below the fold) still fits.
 // css.k grows only as far as the main action button needs, and never past 1 / FIT_MIN_SCALE; a resize starts it over at 1.
-const FIT_MIN_SCALE = .6;
+const FIT_MIN_SCALE = .6, FIT_MIN_SCALE_BETS = .5;   // the second only for a betting area that can't fit otherwise (sic bo, craps)
 function screenPx(pose) { const ew = Math.round(clamp(pose.pw * pose.pxPerM, 360, 1400)); return { ew, eh: Math.round(ew * pose.ph / pose.pw) }; }
+// The page lays out at this virtual size (css.vw × css.vh, so its own media queries and fit see the full size) and the
+// iframe element is shrunk onto the machine with CSS zoom on the element, not a transform: the browser lays the frame out
+// at the smaller size and clicks map natively (WebKit misroutes clicks into transform-scaled iframes).
 function applyScreenSize(pose) {
   if (!css.frame || !css.o3) return;
-  const { ew, eh } = screenPx(pose), k = css.k || 1, vw = Math.round(ew * k), vh = Math.round(eh * k);
-  css.frame.style.width = vw + 'px'; css.frame.style.height = vh + 'px'; css.frame.width = vw; css.frame.height = vh;
-  css.o3.scale.setScalar(pose.pw / vw); css.hole.scale.set(pose.pw, pose.ph, 1);
+  const { ew, eh } = screenPx(pose), k = css.k || 1;
+  css.vw = Math.round(ew * k); css.vh = Math.round(eh * k);
+  css.frame.style.width = css.vw + 'px'; css.frame.style.height = css.vh + 'px';
+  css.o3.scale.setScalar(pose.pw / css.vw); css.hole.scale.set(pose.pw, pose.ph, 1);
+  css.fw = 0; if (css.lastW) setFrameSize(css.lastW, css.lastH);
+}
+// on-screen size of the frame = virtual size × zoom; only touched when it really changes
+function setFrameSize(w, h) {
+  css.lastW = w; css.lastH = h;
+  if (Math.abs(w - (css.fw || 0)) < .5 && Math.abs(h - (css.fh || 0)) < .5) return;
+  css.fw = w; css.fh = h;
+  css.frame.style.zoom = String(+(w / (css.vw || w)).toFixed(5));
 }
 function mainControl(doc) {
   const vis = b => b && b.offsetParent !== null && b.getBoundingClientRect().height > 0;
@@ -8224,15 +8237,29 @@ function mainControl(doc) {
   }
   return null;
 }
+// The part of the page you have to be able to reach: the chips, every betting spot and the main button (on chip-board
+// tables like baccarat the PLAYER / TIE / BANKER spots sit below Deal, so a screen fitted only to Deal cut them off).
+// Returns [top, bottom] in the page's own viewport px, or null when the page has no such controls.
+function reachSpan(doc) {
+  const vis = e => e.offsetParent !== null && e.getBoundingClientRect().height > 0;
+  let top = Infinity, bottom = -Infinity;
+  const add = e => { const r = e.getBoundingClientRect(); top = Math.min(top, r.top); bottom = Math.max(bottom, r.bottom); };
+  const b = mainControl(doc); if (b) add(b);
+  doc.querySelectorAll('.game-stage [data-bet], .game-stage [data-chip], .game-stage [data-cb-go], [data-panel] [data-bet], [data-panel] [data-chip]').forEach(e => { if (vis(e)) add(e); });
+  return bottom > -Infinity ? [top, bottom] : null;
+}
 function fitScreen(ifr) {
   if (!ifr || css.frame !== ifr || !player.seated || !player.seated.screen) return;
   let doc; try { doc = ifr.contentDocument; } catch (e) { return; }
   if (!doc || !doc.body) return;
   const pose = screenPose(player.seated), { eh } = screenPx(pose), se = doc.scrollingElement || doc.documentElement, k0 = css.k || 1;
   for (let i = 0; i < 3; i++) {
-    const b = mainControl(doc), cur = Math.round(eh * (css.k || 1));
-    const need = b ? b.getBoundingClientRect().bottom + se.scrollTop + 14 : se.scrollHeight;
-    const k = Math.max(css.k || 1, clamp(need / eh, 1, 1 / FIT_MIN_SCALE)); // only grows: a wider page can reflow into a layout that fits, and shrinking back would undo it
+    const span = reachSpan(doc), cur = Math.round(eh * (css.k || 1));
+    // the whole page from the top if that fits at the smallest scale, else just the betting area
+    const pageNeed = span ? span[1] + se.scrollTop + 14 : se.scrollHeight;
+    const whole = !span || pageNeed <= eh / FIT_MIN_SCALE;
+    const need = whole ? pageNeed : span[1] - span[0] + 28;
+    const k = Math.max(css.k || 1, clamp(need / eh, 1, 1 / (whole ? FIT_MIN_SCALE : FIT_MIN_SCALE_BETS))); // only grows: a wider page can reflow into a layout that fits, and shrinking back would undo it
     if (Math.abs(k * eh - cur) < 8) break;
     css.k = k; applyScreenSize(pose);
     void ifr.getBoundingClientRect(); void doc.documentElement.offsetHeight; // lay out the parent, then the page at its new size
@@ -8240,8 +8267,12 @@ function fitScreen(ifr) {
   // games redraw on their own resize event, after this measurement: look again once they have (a few times at most)
   if (Math.abs((css.k || 1) - k0) > .01 && (css.fitN = (css.fitN || 0) + 1) < 6) setTimeout(() => fitScreen(ifr), 250);
   // still taller than the screen at the smallest scale: scroll so the main button is in view
-  const b = mainControl(doc);
-  if (b) { const r = b.getBoundingClientRect(), vh = doc.documentElement.clientHeight || doc.defaultView.innerHeight; if (r.bottom > vh) se.scrollTo({ top: se.scrollTop + Math.ceil(r.bottom - vh + 10), behavior: 'instant' }); }
+  // still taller than the screen: scroll the betting area into view, its top edge first (the chips live up there)
+  const span = reachSpan(doc);
+  if (span) {
+    const vh = doc.documentElement.clientHeight || doc.defaultView.innerHeight;
+    if (span[1] > vh || span[0] < 0) se.scrollTo({ top: Math.max(0, se.scrollTop + Math.floor(span[1] - span[0] + 24 <= vh ? span[1] - vh + 12 : span[0] - 12)), behavior: 'instant' });
+  }
 }
 function closeScreen() {
   if (css.obj) { const f = css.obj.querySelector('iframe'); if (f) { try { f.src = 'about:blank'; } catch (e) {} } css.obj.remove(); }
@@ -8251,10 +8282,10 @@ function closeScreen() {
   shell.classList.remove('has-screen');
 }
 // The game page is placed from the screen's projected corners each frame. Facing the screen (how you play) the corners
-// form a rectangle and the iframe gets a plain 2D matrix(), with no perspective or preserve-3d anywhere: WebKit (Safari)
-// mis-positions iframes inside 3D-transformed layers (the page lands shrunk into a corner of the bezel), and a flat
-// layer keeps the text crisp. Only while you turn your head does the quad pick up perspective; then a single flat
-// projective matrix3d (a homography, still no 3D context) keeps all four corners on the bezel.
+// form a rectangle and the iframe is just a positioned box of that size, shrunk with CSS zoom on the element: no
+// transform at all, because WebKit (Safari) both mis-positions iframes inside 3D-transformed layers and misroutes clicks
+// into transform-scaled iframes. Only while you turn your head does the box get a transform: a flat matrix() or a
+// projective matrix3d (a homography, still no 3D context) that keeps all four corners on the bezel.
 let _cv = null;   // corner scratch vectors, made on first use (three.js loads after this module starts)
 function renderCSS() {
   if (!css.obj || !css.hole || !css.frame) return;
@@ -8268,10 +8299,22 @@ function renderCSS() {
     if (_cv[4].z > -0.02) { css.obj.style.visibility = 'hidden'; return; }   // a corner behind the eye: nothing sensible to draw
     v.project(cam); q.push([(v.x + 1) / 2 * W, (1 - v.y) / 2 * H]);
   }
-  const vw = css.frame.offsetWidth || 1, vh = css.frame.offsetHeight || 1, [p0, p1, p2, p3] = q;
-  const r = n => +n.toFixed(6);
-  // how far the bottom-right corner sits from where a parallelogram would put it
+  const [p0, p1, p2, p3] = q, r = n => +n.toFixed(6);
+  // how far the bottom-right corner sits from where a parallelogram would put it, and how much the top edge tilts
   const off = Math.hypot(p1[0] + p3[0] - p0[0] - p2[0], p1[1] + p3[1] - p0[1] - p2[1]);
+  const tilt = Math.abs(p1[1] - p0[1]) + Math.abs(p3[0] - p0[0]);
+  css.obj.style.visibility = '';
+  if (off < 1.5 && tilt < 1.5) {
+    // facing the screen: an ordinary positioned box, no transform at all
+    setFrameSize(p1[0] - p0[0], p3[1] - p0[1]);
+    css.obj.style.transform = 'none';
+    css.obj.style.left = p0[0] + 'px'; css.obj.style.top = p0[1] + 'px';
+    return;
+  }
+  // head turned: keep the element's size and map its box onto the projected quad
+  if (!css.fw) setFrameSize(Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), Math.hypot(p3[0] - p0[0], p3[1] - p0[1]));
+  const vw = css.fw, vh = css.fh;
+  css.obj.style.left = css.obj.style.top = '0px';
   let tf;
   if (off < 1.5) {
     tf = 'matrix(' + [(p1[0] - p0[0]) / vw, (p1[1] - p0[1]) / vw, (p3[0] - p0[0]) / vh, (p3[1] - p0[1]) / vh, p0[0], p0[1]].map(r).join(',') + ')';
@@ -8285,7 +8328,6 @@ function renderCSS() {
     const d = p1[1] - p0[1] + g * p1[1], e = p3[1] - p0[1] + h * p3[1];
     tf = 'matrix3d(' + [a / vw, d / vw, 0, g / vw, b / vh, e / vh, 0, h / vh, 0, 0, 1, 0, p0[0], p0[1], 0, 1].map(r).join(',') + ')';
   }
-  css.obj.style.visibility = '';
   css.obj.style.transform = tf;
 }
 function onMessage(e) {

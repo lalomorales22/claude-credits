@@ -227,6 +227,33 @@ async function waitHttp(url, ms = 15000) {
     await F(A, () => window.__floor.stand()); await sleep(700);
     await A.setViewportSize({ width: 1100, height: 720 }); await sleep(400);
 
+    section('bet at a table game through the machine screen');
+    // real mouse clicks at the spots as drawn on the machine: chip → PLAYER → Deal must register and move coins.
+    // (Safari routes clicks wrongly into transform-scaled iframes, so the screen is never transformed while you face it.)
+    const bac = await F(A, () => window.__floor.stations().find(s => s.slug === 'baccarat'));
+    if (bac) {
+      await F(A, s => { window.__floor.setPos(s.stand[0], s.stand[1]); window.__floor.face(s.id); return window.__floor.interact(); }, bac);
+      await A.waitForSelector('.floor-css3d iframe.fl-screen[data-loaded="1"]', { timeout: 25000 }).catch(() => {});
+      await sleep(1500);
+      const flat = await F(A, () => { const o = document.querySelector('.fl-css-obj'); return o && (o.style.transform === 'none' || o.style.transform === ''); });
+      check(flat, 'facing the screen, the game frame has no CSS transform (plain box + zoom)');
+      const at = sel => F(A, sel => {
+        const f = document.querySelector('iframe.fl-screen'), el = f && f.contentDocument.querySelector(sel); if (!el) return null;
+        const fr = f.getBoundingClientRect(), k = fr.width / f.clientWidth, er = el.getBoundingClientRect();
+        return [fr.left + (er.left + er.width / 2) * k, fr.top + (er.top + er.height / 2) * k];
+      }, sel);
+      const tap = async sel => { const c = await at(sel); if (c) { await A.mouse.click(c[0], c[1]); await sleep(350); } return !!c; };
+      const bal0 = await F(A, () => +document.querySelector('[data-balance]').dataset.balance);
+      await tap('[data-chip="100"]'); await tap('[data-bet="player"]');
+      const onTable = await F(A, () => ((document.querySelector('iframe.fl-screen').contentDocument.body.textContent.match(/On the table:\s*([\d,]+)/) || [])[1] || '0').replace(/,/g, ''));
+      check(+onTable === 100, 'clicking a chip, then PLAYER, puts 100 GC on the table', 'on the table: ' + onTable);
+      await tap('[data-cb-go], .cb-bar button.gold');
+      let moved = false;
+      for (let i = 0; i < 12 && !moved; i++) { await sleep(500); moved = (await F(A, () => +document.querySelector("[data-balance]").dataset.balance)) !== bal0 || await F(A, () => /(Player|Banker) wins|Tie\b/.test((document.querySelector("iframe.fl-screen").contentDocument.querySelector(".result, .bac-msg, .msg") || {}).textContent || "")); }
+      check(moved, 'Deal plays the hand and the result reaches the floor');
+      await F(A, () => window.__floor.stand()); await sleep(700);
+    } else check(false, 'baccarat has a station on the floor');
+
     section('poker seat');
     const tables = await F(A, () => JSON.parse(document.getElementById('floor-cfg').textContent).tables);
     const t1 = tables[0];
