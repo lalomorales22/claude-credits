@@ -1,4 +1,4 @@
-# Gold Tide realtime layer: the floor, multiplayer and poker
+# Slop Casino realtime layer: the floor, multiplayer and poker
 
 This file is the contract between the pieces that make the casino live:
 

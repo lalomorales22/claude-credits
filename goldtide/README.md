@@ -1,4 +1,4 @@
-# ☀ GOLD TIDE
+# Slop Casino
 
 **A free-to-play social casino.** 26 games, a walk-around 3D casino floor, and live multiplayer Texas hold'em, all played with Gold Coins: play money with no cash value. Built so a casino partner can hand it to guests as a practice floor, a marketing hook, or an event activation without touching real-money gaming.
 
@@ -69,9 +69,9 @@ Real no-limit Texas hold'em between players, hosted by `ws.php`.
 - **Your coins are safe.** Buy-ins and cash-outs go through the same ledger as every other game. If the server crashes mid-hand, the next start refunds every seat its start-of-hand stack (the interrupted hand is void); a kill -9 test checks it to the coin.
 - **House players** keep tables dealing when it's quiet. They're always marked HOUSE and never touch the ledger.
 
-### The lobby
+### The look
 
-The lobby is a desert dusk over the inland San Diego backcountry: layered ridgelines, a setting sun and stars. The light theme turns it into a warm desert morning. The palette is earth tones: canyon brown, terracotta, turquoise, sandstone, sage and ochre. Each room gets its own accent color, and a geometric woven band runs under the hero, under each room heading and across the top of each card. The band is a generic pattern that doesn't copy any nation's designs, and it lives in one CSS variable (`--weave`). If a tribal partner wants their own artwork there, swap in what they supply and approve (the ridgelines are in `mesa_svg()`).
+Slop Casino is themed after slop.cc: a near-black background (`#1d1d1a`), the coral mascot (`#ed7357`) as the logo, favicon and a blinking lobby hero, and bold heavy-sans headings. The lobby shows games as rounded video-style tiles, each with a dark pill in the corner (bet range, `3D` or `LIVE`). On the 3D floor the mascot floats over a marble plinth in the entrance lobby, and the big sign reads whatever `site_name` is set to. The light theme swaps in a warm off-white with a deeper coral. The games keep their own themed rooms and casino lettering inside the felt. Palette tokens live at the top of `app_css()` (`--bg`, `--gold` is the coral accent, `--gold-ink`), and the mascot is `slop_logo_svg()`.
 
 ### Rooms
 

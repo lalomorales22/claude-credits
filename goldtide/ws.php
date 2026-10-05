@@ -1,7 +1,7 @@
 #!/usr/bin/env php
 <?php
 /**
- * GOLD TIDE realtime server: the floor, chat and every live poker table over one WebSocket.
+ * SLOP CASINO realtime server: the floor, chat and every live poker table over one WebSocket.
  *
  *     php ws.php [--port 8081] [--bind 0.0.0.0] [--tick 50] [--idle 40] [--away 90] [--max 500] [--verbose]
  *     php ws.php --help
@@ -74,7 +74,7 @@ function ws_log(string $msg): void {
 }
 
 function ws_usage(): string {
-    return "Gold Tide realtime server\n  php ws.php [--port 8081] [--bind 0.0.0.0] [--tick 50] [--idle 40] [--away 90] [--max 500] [--verbose]\n"
+    return "Slop Casino realtime server\n  php ws.php [--port 8081] [--bind 0.0.0.0] [--tick 50] [--idle 40] [--away 90] [--max 500] [--verbose]\n"
         . "  --tick  loop period in ms        --idle  close silent sockets after N s (ping at N/2)\n"
         . "  --away  cash out a disconnected player after N s (0 = at once)   --max  client cap\n";
 }
