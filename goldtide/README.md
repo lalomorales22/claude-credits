@@ -1,19 +1,20 @@
 # ☀ GOLD TIDE
 
-**A free-to-play social casino in one file.** Slots, blackjack, and roulette played with Gold Coins, which are play money with no cash value. Built so a casino partner can hand it to guests as a practice table, a marketing hook, or an event activation without touching real-money gaming.
+**A free-to-play social casino.** 26 games, a walk-around 3D casino floor, and live multiplayer Texas hold'em, all played with Gold Coins: play money with no cash value. Built so a casino partner can hand it to guests as a practice floor, a marketing hook, or an event activation without touching real-money gaming.
 
-It's one `index.php` plus a SQLite database that builds itself on first run. No composer, no npm, no build step.
+It's one `index.php` plus a SQLite database that builds itself on first run, and an optional `ws.php` realtime server for the multiplayer parts. No composer, no npm, no build step, no CDNs: three.js and the fonts are embedded.
 
 ```bash
-php -S localhost:8000 index.php
+php -S localhost:8000 index.php   # the site: every game works with just this
+php ws.php                        # optional: multiplayer floor + live poker (port 8081)
 # open http://localhost:8000
 ```
 
-Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry Pi behind a Cloudflare tunnel. Needs PHP 8.1+ with `pdo_sqlite`.
+Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry Pi behind a Cloudflare tunnel. Needs PHP 8.1+ with `pdo_sqlite`; `ws.php` runs on the built-in stream functions (no extensions to install); `pcntl` is used for clean shutdowns when present. On shared hosting that can't run a long-lived process, everything except multiplayer still works: the floor plays solo and shows "Multiplayer floor offline".
 
 ## what's inside
 
-**For players: 25 games in six rooms**
+**For players: 26 games in six rooms, plus the floor**
 
 | room | game | what it is | return |
 |---|---|---|---|
@@ -39,11 +40,34 @@ Or drop `index.php` on Bluehost or any Apache+PHP host, or run it on a Raspberry
 | Card Room | **Harbor Blackjack** | 6 decks, S17, 3:2, double any two, split once (DAS), late surrender, peek | 99.6% (basic strategy, measured over 600k hands) |
 | | **Boardwalk Poker** | Jacks or Better 9/6 video poker | 99.5% perfect play |
 | | **Coastline 3-Card** | ante/play vs dealer + Pair Plus | ~98% ante/play (Q-6-4), 97.7% Pair Plus |
+| | **Bayside Hold'em** | live no-limit Texas hold'em against real players, house players fill empty seats (always labelled); three tables from 10/20 to 250/500 | player vs player (no rake) |
 | | **Tide Hi-Lo** | higher or lower, multiplier builds, cash out anytime | 99% |
 | Boardwalk Arcade | **Tide Crash** | live multiplier curve, cash out before it breaks (a cash-out at exactly the break multiplier wins, manual or auto), auto cash-out | 99% |
 | | **Pearl Drop** ★ | the flagship plinko (see below) | 98.5–98.9% (exact at multiples of 100 GC; 97.5–99.4% at the 10 GC minimum; 96.8–100.3% over every stake 10–5,000 GC, 98.3–99.1% from 100 GC up) |
 | | **Reef Mines** | 5×5 grid, pick 1–24 urchins, find pearls; wins capped at 5,000× the bet | 99% |
 | | **Lighthouse Dice** | slide your own odds, roll over (target or higher) / under (below target) | 99% |
+
+### ★ The Floor (`?action=floor`)
+
+A first-person 3D casino you walk around in. It's built in code (no downloaded assets): a roughly 70 × 45 m hall with a marble entrance lobby and the site name in gold, a bar, a cashier cage for free coins, the **Slot Hall** (48 cabinets, every slot several times), **the Pit** (an island per table game with a real centerpiece: a spinning roulette wheel, the craps bubble dome, the big six wheel, a sic bo cup, a crab track, the coin pusher, each ringed by seat terminals), the **Card Room** (blackjack-style tables and one oval poker table per live table), and the **Arcade** with Pearl Drop as a tall showpiece. Coffered ceilings, chandeliers, casino carpet, fog for depth.
+
+- **Walk up and sit down.** WASD + mouse (pointer lock), Shift to run, E to play, Esc to stand. The camera eases into the seat and the machine's screen becomes the real game: the actual game page runs on the screen in true 3D perspective, so you still see the machines to your left and right and can turn your head (arrow keys or drag the edges) while you play. Every enabled game has at least one station (116 in all).
+- **Other people.** Everyone on the floor shows up as an avatar with their name over their head, walking around, sitting at machines (their screen shows IN PLAY) and at poker tables. Positions are smoothed, chat pops up over their heads and in a chat panel (Enter to talk).
+- **Poker in 3D.** Sit at a poker table and the felt, cards, chip stacks, bets, pot, dealer button and a light on whoever's acting are all drawn in the room, with the betting controls in a bar at the bottom.
+- **Phones too.** A virtual joystick, drag to look, tap a machine to walk over and sit.
+- **Graceful.** Without the realtime server the floor still plays solo. Without WebGL it lists every game as a link.
+- **Your own building.** Drop a binary glTF at `data/floor.glb` (meters, y-up, origin at the entrance doors, hall toward −z, x −35..35, z 0..−45, 5 m ceiling; static meshes with PBR base colour and embedded textures) and it replaces the procedural floor, walls and ceiling while machines, tables and collisions stay. That's the path for a room modelled in Blender to match a partner's real property.
+
+### Bayside Hold'em: live poker
+
+Real no-limit Texas hold'em between players, hosted by `ws.php`.
+
+- **Live-room rules**: moving button, heads-up blinds (button posts the small blind), min-raise = last full raise, short all-ins don't reopen the action (TDA rule), uncalled bets returned, exact side pots, odd chips to the first winner clockwise from the button, a missed-blind rule so nobody can sit out the big blind for free, an action clock (two timeouts and you sit out).
+- **Exact evaluator**, checked against an independent brute-force reference on 30,000 random hands, plus a 5,000-hand fuzz that asserts chip conservation and legality after every single action.
+- **Provably fair deal.** Before a card moves the table publishes SHA-256 of the shuffled deck plus a salt; after the hand it reveals both. Every hand has a history page (`?action=poker_hand&id=N`) that re-checks the hash and the deal order on the server and again in your browser.
+- **Hidden cards stay hidden.** Each player gets their own view of the table; tests scan every frame sent to opponents and watchers for cards they shouldn't have.
+- **Your coins are safe.** Buy-ins and cash-outs go through the same ledger as every other game. If the server crashes mid-hand, the next start refunds every seat its start-of-hand stack (the interrupted hand is void); a kill -9 test checks it to the coin.
+- **House players** keep tables dealing when it's quiet. They're always marked HOUSE and never touch the ledger.
 
 ### The lobby
 
@@ -92,6 +116,37 @@ Every paytable was checked with exact math or a 200k-hand simulation. The formul
 - Append-only audit log of every admin action, enforced by database triggers
 - Site settings for brand name, tagline, partner name ("Presented with ___"), announcement banner, starting coins, bonus amounts, minimum age, opening/closing signups, and `trusted_proxies` (see security)
 
+## running the realtime server
+
+```bash
+php ws.php                              # 0.0.0.0:8081
+php ws.php --port 9000 --bind 127.0.0.1 # options; --verbose for more logging
+```
+
+`ws.php` includes `index.php`, so it shares the database and every rule. It never trusts the browser: players connect with a 60-second signed ticket from the site, and every poker action is checked against the engine's legal moves. It idles at about 0.2% CPU and used about 0.5% with 20 players walking around. Keep it running with systemd, `pm2`, or a `@reboot` cron line on the Pi.
+
+The page finds the socket automatically: in dev (`php -S` on a non-standard port) it uses port 8081 on the same host; behind a proxy it uses `wss://your-host/ws`. To put it behind Cloudflare or nginx, proxy `/ws` to port 8081 with WebSocket upgrade, or set `ws_url` under **Settings**. Set `rt_origins` if the site is reachable under more than one hostname. Full protocol, engine API and persistence rules: [`REALTIME.md`](REALTIME.md).
+
+```nginx
+location /ws { proxy_pass http://127.0.0.1:8081; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; proxy_read_timeout 120s; }
+```
+
+## tests
+
+Everything a partner's auditor needs to re-check the claims, no frameworks:
+
+| command | what it proves |
+|---|---|
+| `php tests/poker_test.php` | hold'em rules, evaluator vs brute force, side pots, 5,000-hand fuzz, deck-commitment verifier (375 checks, ~3 s) |
+| `php tests/ws_test.php` | WebSocket protocol (RFC 6455), tickets, origin checks, presence, chat limits, buy-in/cash-out ledger, shutdown refunds (117 checks) |
+| `php tests/poker_e2e_test.php` | two real players + house players over real sockets for 5+ hands, hidden-card frame scan, kill -9 refund, ledger reconciliation (~2 min) |
+| `php tests/audit_core_test.php` | void refunds, races, trusted proxies, refill gate, table limits, stale admin edits |
+| `php tests/audit_slots_test.php` | slot RTP by simulation at the minimum bet, the round-trip pick bonus, max-win cap |
+| `php tests/audit_tables_test.php` | three-card ranking over all 22,100 hands, blackjack split/surrender and RTP, baccarat rounding, sic bo combinations |
+| `php tests/audit_arcade3d_test.php` | craps betting units and exact payouts, multiplier rounding, keno, dice, crash ties, Pearl Drop seed pre-commit, mines cap |
+| `node tests/floor_test.js` | the 3D floor in two browsers: presence, chat escaping, sitting at machines and poker, guest and offline modes, phones (needs Playwright) |
+| `node tests/poker_client_test.js` | the poker client in two browsers: buy-in, real hands, no leaked cards, hand-history verification, phones (needs Playwright) |
+
 ## first run
 
 1. Load the site once. It creates `data/app.sqlite` and `admin_password.txt`.
@@ -131,5 +186,7 @@ Not legal advice. Get a gaming attorney to review before a partner launch.
 | `data/error.log` | PHP errors (display_errors is off) |
 | `admin_password.txt` | first-run admin password, wiped when you change it |
 | `.htaccess`, `data/.htaccess` | Apache deny rules |
+| `data/ws.log` | realtime server log (truncated above 5 MB) |
+| `data/floor.glb` | optional: your own 3D room shell (you add this) |
 
 All of these are gitignored.

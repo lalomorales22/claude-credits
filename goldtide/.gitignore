@@ -4,3 +4,4 @@ admin_password.txt
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+tests/out/
