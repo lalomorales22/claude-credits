@@ -10447,6 +10447,8 @@ function bootRoom(room) {
   addEventListener('popstate', () => show(int(new URLSearchParams(location.search).get('t')), false));
   window.goldTidePoker = { rt, get table() { return curTid ? current : null; }, get tableId() { return curTid; }, show: id => show(id, true) };
   show(int(room.dataset.table), false);
+  // the lobby/table renders from the page config right away and carries its own connection badge, so the spinner can go
+  if (loading) loading.hidden = true;
 }
 
 function boot() {
@@ -11954,7 +11956,8 @@ html:has(body.pg-floor),body.pg-floor{overflow:hidden;overscroll-behavior:none}
 
 /* responsive */
 @media (max-width:980px){
-  .table-wrap,.acct-grid,.rl-top{grid-template-columns:1fr}
+  .table-wrap,.acct-grid,.rl-top{grid-template-columns:minmax(0,1fr)}
+  .acct .panel{min-width:0;overflow-x:auto}
   .paytable,.house-rules{order:3}
 }
 @media (max-width:720px){

@@ -170,8 +170,10 @@ final class GTServer {
         stream_set_blocking($this->srv, false);
         $this->refundAllSeats('table reset');
         if (GT_POKER) { $this->pkLoadTables(); }
-        pcntl_async_signals(true);
-        foreach ([SIGINT, SIGTERM] as $sig) { pcntl_signal($sig, function () { $this->stop = true; }); }
+        if (function_exists('pcntl_async_signals')) {   // clean shutdown on Ctrl-C / systemd stop; without pcntl the startup refund covers a hard stop
+            pcntl_async_signals(true);
+            foreach ([SIGINT, SIGTERM] as $sig) { pcntl_signal($sig, function () { $this->stop = true; }); }
+        } else { ws_log('pcntl not available: Ctrl-C ends without the shutdown refund; the next start refunds every seat instead'); }
         ws_log("listening on ws://{$this->opt['bind']}:{$this->opt['port']}/  tick {$this->opt['tick']} ms, idle {$this->opt['idle']} s, away {$this->opt['away']} s, tables " . count($this->tables));
         while (!$this->stop) { $this->tick(); }
         $this->shutdown();
