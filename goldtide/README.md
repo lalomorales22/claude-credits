@@ -16,11 +16,24 @@ It's one `index.php` plus a SQLite database that builds itself on first run, and
 ```bash
 git clone https://github.com/lalomorales22/slop-casino.git
 cd slop-casino
+./start.sh
+```
+
+That starts the site and the multiplayer server, then opens <http://127.0.0.1:8000> in your browser. Grab your free coins and hit **The Floor** in the nav. **Ctrl+C** stops both servers. Needs PHP 8.1+ with `pdo_sqlite` (macOS: `brew install php`; Debian, Ubuntu or a Pi: `sudo apt install php-cli php-sqlite3`). The first load creates `data/app.sqlite` and an `admin_password.txt` for the back office at `?action=admin`.
+
+| | |
+|---|---|
+| `./start.sh --port 8080` | use another port for the site (if it's taken, the next free one is used) |
+| `./start.sh --lan` | let phones and other computers on your wifi join the floor; prints the address to share |
+| `./start.sh --no-ws` | site only, no multiplayer floor or live poker |
+| `./start.sh --no-open` | don't open a browser |
+
+Logs go to `data/logs/web.log` and `data/logs/ws.log`. Prefer doing it by hand? It's two commands:
+
+```bash
 php -S localhost:8000 index.php   # the site: every game works with just this
 php ws.php                        # second terminal, optional: multiplayer floor + live poker (port 8081)
 ```
-
-Open <http://localhost:8000>, grab your free coins, and hit **The Floor** in the nav. Needs PHP 8.1+ with `pdo_sqlite`. The first load creates `data/app.sqlite` and an `admin_password.txt` for the back office at `?action=admin`.
 
 ## A look around
 
@@ -189,6 +202,7 @@ Not legal advice. Get a gaming attorney to review before a partner launch.
 |---|---|
 | `index.php` | the whole casino: every game engine, the pages, the back office, the 3D floor, the poker client, three.js and the fonts |
 | `ws.php` | the realtime server: presence, chat and every live poker table |
+| `start.sh` | one-command launcher: starts both servers, opens the browser, Ctrl+C stops everything |
 | `REALTIME.md` | the realtime protocol, the poker engine API and the persistence rules |
 | `docs/GAMES.md` | every game's rules, math and measured return |
 | `tests/` | the test suites above |
@@ -198,6 +212,7 @@ Runtime files, all gitignored:
 | path | what |
 |---|---|
 | `data/app.sqlite` | the database (WAL mode) |
+| `data/logs/` | `start.sh`'s server logs |
 | `data/error.log`, `data/ws.log` | the PHP and realtime logs |
 | `admin_password.txt` | the first-run admin password |
 | `.htaccess`, `data/.htaccess` | the Apache deny rules |

@@ -19,11 +19,14 @@ define('DB_FILE',  DATA_DIR . '/app.sqlite');
 define('PW_FILE',  __DIR__ . '/admin_password.txt');
 define('LOG_FILE', DATA_DIR . '/error.log');
 
-// php -S router mode: let the built-in server hand out real files that exist next to us
+// php -S router mode: let the built-in server hand out plain static files that exist next to us (images, media,
+// fonts, css/js). Everything else, including other .php files, dotfiles (.git), source, tests and data/, comes
+// here instead, so `start.sh --lan` doesn't share the repo with the whole wifi.
 if (PHP_SAPI === 'cli-server') {
-    $p = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
-    if ($p !== '/' && $p !== '/index.php' && is_file(__DIR__ . $p) && !str_starts_with($p, '/data')
-        && basename($p) !== 'admin_password.txt') {
+    $p = rawurldecode(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/');
+    if ($p !== '/' && !str_contains($p, "\0") && !preg_match('#(^|/)\.|^/(data|tests)(/|$)#i', $p)
+        && preg_match('/\.(png|jpe?g|gif|webp|avif|svg|ico|css|js|mjs|woff2?|ttf|otf|mp3|ogg|wav|mp4|webm)$/i', $p)
+        && is_file(__DIR__ . $p)) {
         return false;
     }
 }
