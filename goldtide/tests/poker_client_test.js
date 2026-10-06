@@ -2,7 +2,7 @@
 /**
  * tests/poker_client_test.js: the poker client (poker_js(), page_poker(), page_poker_hand()) end to end in Chromium.
  *
- * Starts its own `php -S` (ports 8500-8549) and `php ws.php` (8550-8599) on a scratch copy of goldtide/ (the real data/
+ * Starts its own `php -S` (ports 8500-8549) and `php ws.php` (8550-8599) on a scratch copy of the app (the real data/
  * is never touched), with table 1 at 2 house players and an 8 s clock. Two real players register in two browser
  * contexts: A on a desktop viewport, B on a 390x844 phone. Checks:
  *   - lobby with live counts, lobby -> table without a reload (pushState) and back/forward (popstate);
@@ -20,7 +20,7 @@
  *   - no horizontal scroll on the phone, zero console errors on every page.
  * Screenshots go to tests/out/ (gitignored). Exit 1 on any failure.
  *
- *     /opt/node22/bin/node goldtide/tests/poker_client_test.js
+ *     /opt/node22/bin/node tests/poker_client_test.js
  */
 'use strict';
 const PW = process.env.PLAYWRIGHT || '/opt/node22/lib/node_modules/playwright';

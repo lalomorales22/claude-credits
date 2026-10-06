@@ -3,12 +3,12 @@
 /**
  * tests/ws_test.php: end-to-end tests for ws.php against REALTIME.md (Running it, Tickets, Wire protocol, The floor,
  * Persistence, Security rules) with the real poker engine from index.php. No framework: one line per check, a
- * summary, exit 1 on any failure. It runs from a temporary copy of goldtide/ with its own SQLite file (under
+ * summary, exit 1 on any failure. It runs from a temporary copy of the app with its own SQLite file (under
  * TMPDIR / the system temp dir), so the real data/ is never touched, and it starts and stops its own ws.php on a
  * free port in 8300-8399. The poker part plays two hands heads-up on table 1 (bots off, 2 s clock) and checks the
  * ledger after every path that moves coins. tests/poker_e2e_test.php covers the longer multi-hand scenarios.
  *
- *     php goldtide/tests/ws_test.php
+ *     php tests/ws_test.php
  */
 declare(strict_types=1);
 error_reporting(E_ALL);

@@ -1,6 +1,6 @@
 <?php
 /**
- * Kelp Keno paytable solver / checker. Run: php goldtide/tests/keno_rtp.php   (exit 0 = every pick count inside 94–96%)
+ * Kelp Keno paytable solver / checker. Run: php tests/keno_rtp.php   (exit 0 = every pick count inside 94–96%)
  *
  * 40 balls, 10 drawn, pick p: P(catch k) = C(p,k)·C(40-p,10-k) / C(40,10) (hypergeometric), RTP(p) = Σ_k P(k)·pay[p][k].
  * The "solver" is a greedy nudge: starting from the shipped KENO_PAY, for every pick count outside the band it prints the

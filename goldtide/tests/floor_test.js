@@ -2,14 +2,14 @@
 /**
  * tests/floor_test.js: end-to-end tests for The Floor (?action=floor, floor_js()) with Playwright + Chromium.
  *
- * It runs from a temporary copy of goldtide/ with its own SQLite file (the real data/ is never touched), starts its own
+ * It runs from a temporary copy of the app with its own SQLite file (the real data/ is never touched), starts its own
  * `php -S` on a free port in 8400-8449 and its own `php ws.php` in 8450-8499, and points the ws_url setting at it.
  * Two registered players, a guest and a phone walk the floor: first frame, roster, movement seen by the other player,
  * escaped chat, sitting at a slot cabinet (iframe on the screen), standing up, sitting at a poker seat (HUD + 'st' seen by
  * the other player), the guest sign-up prompt, the mobile joystick, the socket-offline case, and no console errors.
- * Screenshots go to goldtide/tests/out/ (gitignored). Exit code 1 on any failure.
+ * Screenshots go to tests/out/ (gitignored). Exit code 1 on any failure.
  *
- *     node goldtide/tests/floor_test.js            # PLAYWRIGHT=/path/to/playwright to override the module location
+ *     node tests/floor_test.js            # PLAYWRIGHT=/path/to/playwright to override the module location
  */
 'use strict';
 const path = require('path'), fs = require('fs'), os = require('os'), net = require('net');

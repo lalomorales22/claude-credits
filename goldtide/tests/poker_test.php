@@ -1,6 +1,6 @@
 <?php
 /**
- * Gold Tide poker engine test-suite. Run: php goldtide/tests/poker_test.php   (exit 0 = all green)
+ * Slop Casino poker engine test-suite. Run: php tests/poker_test.php   (exit 0 = all green)
  *
  * No framework. Sections: evaluator (hand-picked + 30,000 random hands against an independent brute-force reference),
  * scripted betting scenarios, side pots and odd chips, timers / sit-out / leaving / busting / add-ons, a 5,000-hand fuzz

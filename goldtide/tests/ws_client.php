@@ -3,7 +3,7 @@
  * tests/ws_client.php: shared helpers for the realtime end-to-end tests (ws_test.php, poker_e2e_test.php).
  * A hand-written RFC 6455 client (masked frames, ping/pong, close codes, an inbox per connection and a `seen`
  * log for scans), plus scratch-copy / server start / health / port helpers. Everything runs against a temporary
- * copy of goldtide/ so the real data/ is never created. No framework.
+ * copy of the app so the real data/ is never created. No framework.
  */
 declare(strict_types=1);
 
@@ -17,7 +17,7 @@ function free_port(int $from = 8300, int $to = 8399): int {
 }
 
 /**
- * A scratch copy of goldtide/ (index.php + ws.php) under the system temp dir (TMPDIR honoured) with its own data/, so the
+ * A scratch copy of the app (index.php + ws.php) under the system temp dir (TMPDIR honoured) with its own data/, so the
  * real data/ is never created or touched. Returns the directory; remove it with rm_tree() when the run is green.
  */
 function scratch_copy(string $root, string $tag): string {

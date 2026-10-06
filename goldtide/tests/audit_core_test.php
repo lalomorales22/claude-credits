@@ -9,11 +9,11 @@
  *   - every chip board: exact keys, duplicates merged, max_bet per spot, 10 × max_bet per spin/round (2D roulette too)
  *   - admin player edit refuses to save over a balance that moved (balance_was); round/hand edits carry a rev
  *
- * Runs against a scratch copy of ../index.php in the system temp dir, so goldtide/data is never touched.
+ * Runs against a scratch copy of ../index.php in the system temp dir, so the real data/ is never touched.
  * Anything that ends in fail() / redirect() / exit runs in a child php process (this same file in "child" mode)
  * that prints one JSON line the parent reads. Exit code 0 = all green.
  *
- *     php goldtide/tests/audit_core_test.php
+ *     php tests/audit_core_test.php
  */
 declare(strict_types=1);
 

@@ -107,7 +107,7 @@ When a player sits at a station the floor module loads `?action=<slug>&embed=1` 
 
 All functions are pure over a table state array except that `pk_start_hand()` draws randomness with `random_int` / `random_bytes` (and bots / bot timing use `random_int`). Nothing here touches the database or the session; `ws.php` owns persistence. Seats are 0-based.
 
-Tests: `php goldtide/tests/poker_test.php` (no framework, exit 0 = green, ~5 s): evaluator against a brute-force reference, scripted betting scenarios, side pots, timers, a 5,000-hand fuzz with invariants after every action, record verification and a throughput figure. A casino partner's auditor can run it as is.
+Tests: `php tests/poker_test.php` (no framework, exit 0 = green, ~5 s): evaluator against a brute-force reference, scripted betting scenarios, side pots, timers, a 5,000-hand fuzz with invariants after every action, record verification and a throughput figure. A casino partner's auditor can run it as is.
 
 ### Table state
 

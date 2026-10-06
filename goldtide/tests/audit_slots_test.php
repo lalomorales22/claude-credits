@@ -4,7 +4,7 @@
  * running-total max-win cap, the real pick bonus (hidden board, move=pick, auto-settle), and the rules/README claims.
  *
  * Runs against a scratch copy of index.php (its own data/ directory), so the shared checkout's database is never touched.
- *   php goldtide/tests/audit_slots_test.php            GT_SIM_N=<spins per slot> (default 300000) scales the RTP simulation.
+ *   php tests/audit_slots_test.php            GT_SIM_N=<spins per slot> (default 300000) scales the RTP simulation.
  * Prints one line per check and exits 1 if any failed.
  */
 declare(strict_types=1);

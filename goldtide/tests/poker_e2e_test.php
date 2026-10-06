@@ -17,9 +17,9 @@
  *     before the kill), leaves poker_seats empty and never records the void hand;
  *   - record_round counted one round per real player per hand they were dealt into.
  *
- * Runs from a scratch copy of goldtide/ (TMPDIR honoured) on a free port in 8900-8949; about 2 minutes; exit 1 on failure.
+ * Runs from a scratch copy of the app (TMPDIR honoured) on a free port in 8900-8949; about 2 minutes; exit 1 on failure.
  *
- *     php goldtide/tests/poker_e2e_test.php
+ *     php tests/poker_e2e_test.php
  */
 declare(strict_types=1);
 error_reporting(E_ALL);

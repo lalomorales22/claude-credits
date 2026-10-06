@@ -1,6 +1,6 @@
 <?php
 /**
- * Gold Tide table-games audit regressions. Run: php goldtide/tests/audit_tables_test.php   (exit 0 = all green, < 60 s)
+ * Slop Casino table-games audit regressions. Run: php tests/audit_tables_test.php   (exit 0 = all green, < 60 s)
  *
  * Covers the "tables" audit group: Coastline 3-Card hand ordering (exhaustive, against a brute-force reference), Harbor
  * Blackjack rules (split once, DAS, split aces, late surrender, peek, 3:2 and surrender rounding, multi-hand DB flow) and its

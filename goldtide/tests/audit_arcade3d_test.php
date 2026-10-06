@@ -1,8 +1,8 @@
 <?php
 /**
- * Regression tests for the arcade / 3D audit group. Run: php goldtide/tests/audit_arcade3d_test.php   (exit 0 = green)
+ * Regression tests for the arcade / 3D audit group. Run: php tests/audit_arcade3d_test.php   (exit 0 = green)
  *
- * Runs against a scratch COPY of index.php (its data/ lives next to the copy), so the real goldtide/data is never touched.
+ * Runs against a scratch COPY of index.php (its data/ lives next to the copy), so the real data/ is never touched.
  * Pure functions are checked in-process; actions that end in ok()/fail()/redirect (plinko_play, fair_rotate,
  * mines_act, do_take_break, ...) run in a child php process against the same scratch copy and are read back as JSON.
  *

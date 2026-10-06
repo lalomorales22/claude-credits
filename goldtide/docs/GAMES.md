@@ -1,0 +1,87 @@
+# Slop Casino: games, math and fairness
+
+The long version of what's behind every table: how each game pays, how the returns were measured, and the rules the engine enforces. The short version is in the [README](../README.md).
+
+## Every game
+
+| room | game | what it is | return |
+|---|---|---|---|
+| Slot Hall | **Nikita Boar** ★ | the first Slop character machine: the boar that broke the internet. Stonks charts, sniper scopes, gym dumbbells, kaiju skylines, truffles and a slop bucket; free spins ×3, Truffle Hunt pick bonus | 95.4% |
+| | **Sunset Reels** | the classic: 3 reels, 5 paylines | ~95% |
+| | **Abyss Critters** | deep-sea creatures, kraken wilds, 10–25 free spins ×3, Sunken Treasure pick bonus | 95.5% |
+| | **Tinfoil Hat** | conspiracy theories: UFOs, bigfoot, lizard people; free spins ×3, Declassified pick bonus | 95.0% |
+| | **Black Site Breach** | top-secret data heist: keycards, vaults, lasers; free spins ×4, Vault Cracker pick bonus | 95.3% |
+| | **Code Rain** | green digital-rain hacker world; rare free spins ×5, Mainframe Hack pick bonus | 95.0% |
+| | **Tiki Tides** | tiki-bar luau, low volatility, free spins ×2, Volcano Wheel | 95.6% |
+| | **Calavera Fiesta** | Día de los Muertos, 12–24 free spins ×2, Fiesta Wheel | 95.1% |
+| 3D Games | **Coronado Roulette 3D** | real 3D wheel: rotor, frets, a ball that orbits, drops and settles | 97.3% |
+| | **Harbor Craps** | full bubble craps: line, come, 3-4-5× odds, place/buy/lay on every number, Big 6/8, field, hardways, horn, C&E, every prop; 3D table or glass bubble dome | 98.6% pass |
+| | **Pier Pusher** | boardwalk coin pusher in 3D | 95% |
+| | *3D slot cabinet* | a toggle on every themed slot: curved drum reels, chrome, chasing bulbs | same as slot |
+| Scratch & Keno | | | |
+| | **Sunset Scratchers** | scratch 9 spots with your finger/mouse, match 3 | 91% |
+| | **Kelp Keno** | pick 1–10 of 40, ten drawn | 94.2–95.6% (every pick count) |
+| Table Games | **Coronado Roulette** | single-zero wheel, full board | 97.3% |
+| | **Bayfront Baccarat** | player / banker / tie, full third-card tableau; 5% commission rounds to the nearest coin | 98.8% player / 98.9% banker |
+| | **Surf Sic Bo** | three dice, 50 bets on the board (incl. 15 two-dice combinations at 6:1) | 97.2% small/big/combos, 92.1% singles, 81–90% the rest |
+| | **Boardwalk Big Six** | 54-stop carnival money wheel | 78–89% (it's a carnival wheel) |
+| | **Crab Crawl Derby** | six racing crabs at fixed odds, animated race | 93.9% |
+| Card Room | **Harbor Blackjack** | 6 decks, S17, 3:2, double any two, split once (DAS), late surrender, peek | 99.6% (basic strategy, measured over 600k hands) |
+| | **Boardwalk Poker** | Jacks or Better 9/6 video poker | 99.5% perfect play |
+| | **Coastline 3-Card** | ante/play vs dealer + Pair Plus | ~98% ante/play (Q-6-4), 97.7% Pair Plus |
+| | **Bayside Hold'em** | live no-limit Texas hold'em against real players, house players fill empty seats (always labelled); three tables from 10/20 to 250/500 | player vs player (no rake) |
+| | **Tide Hi-Lo** | higher or lower, multiplier builds, cash out anytime | 99% |
+| Boardwalk Arcade | **Tide Crash** | live multiplier curve, cash out before it breaks (a cash-out at exactly the break multiplier wins, manual or auto), auto cash-out | 99% |
+| | **Pearl Drop** ★ | the flagship plinko (see below) | 98.5–98.9% (exact at multiples of 100 GC; 97.5–99.4% at the 10 GC minimum; 96.8–100.3% over every stake 10–5,000 GC, 98.3–99.1% from 100 GC up) |
+| | **Reef Mines** | 5×5 grid, pick 1–24 urchins, find pearls; wins capped at 5,000× the bet | 99% |
+| | **Lighthouse Dice** | slide your own odds, roll over (target or higher) / under (below target) | 99% |
+
+## Slot Hall
+
+Seven themed 5-reel video slots on one shared engine: 243 ways (matching symbols pay left to right on adjacent reels), wilds on reels 2–4, and 3+ bonus symbols triggering free spins with a multiplier. Every cell is drawn independently, which gives the return-to-player an exact closed form. Each slot's table was solved to 95.0–95.6% (the figure in the table above, bonus included) and confirmed by simulation. Pays are 2-decimal multiples of the bet, so the engine does all win math in integer hundredths of the bet and rounds the spin's total (free spins included) down to a whole coin **once**: every part shown on screen adds up to the coins paid, and the coin paytable is produced by the same arithmetic. That single rounding still costs up to about 20/bet points of return, which is why the video slots take **50 GC minimum, in steps of 10 GC** (about 0.1 points at 50 GC, under 0.4 at any allowed bet, nothing at multiples of 100 GC, versus 1.5 points at the old 10 GC minimum and 0.4 at odd bets such as 51 GC). Wins cap at 5,000× the bet per spin, bonus included; the cap is applied to the same running total, so a capped spin's parts still add up, and free spins end at the spin that reaches it. Each slot has its own hand-drawn symbol set, animated backdrop (bubbles, digital rain, laser grid, UFO searchlights, torch embers, marigold petals, stonks candles and shroom spores), synthesized sound palette and volatility. Every slot also has a **bonus game with four jackpots**. It starts when a wild lands on each of reels 2, 3 and 4 in the base game (not during free spins). Nikita Boar and the sea, conspiracy, black-site and hacker slots play a real pick-3-of-12 bonus (Truffle Hunt, Sunken Treasure, Declassified, Vault Cracker, Mainframe Hack): when it triggers the server deals 12 hidden prizes and keeps them in the round; the three tiles you tap are posted back, revealed and paid (bet × their sum), and the other nine then flip to show what they really held. A pick left unfinished is resumed when the page loads again, or settled with three random tiles before your next spin (the spin reply says so). Tiki Tides and Calavera Fiesta spin a jackpot wheel that shows a result the server already drew when the bonus started. A marquee shows the Mini (25×), Minor (75×), Major (250×) and Grand (1,000×) values at your current bet. The bonus EV is part of the closed-form RTP (any 3 of 12 i.i.d. tiles have the same expected sum as 3 draws) and was re-checked by simulation. You also get near-miss slowdowns when two bonus symbols land, a full free-spins mode, big/mega/epic win banners, autospin and turbo.
+
+## Pearl Drop, the flagship
+
+The house favorite, and it's featured at the top of the lobby.
+
+- **Golden pegs.** Every drop, 3 pegs light up gold. Each one a pearl touches doubles that pearl's multiplier, and they stack (×2, ×4, ×8). The math stays exact because every path touches exactly one peg per row, so the bonus factor is the same for every path. Each paytable is scaled so the total with golden pegs lands at 98.5–98.9% for all 15 rows/risk combos. Each pearl pays bet × multiplier rounded to the nearest coin in integer math (`pay_mult()`), so the figure is exact whenever the bet per pearl is a multiple of 100 GC; at other stakes the rounding moves it: 97.5–99.4% at the 10 GC minimum, 96.8–100.3% across every stake from 10 to 5,000 GC (a few odd stakes under 100 GC, 12 GC for instance, come out slightly player-positive on some tables), and 98.3–99.1% at any stake of 100 GC or more. We kept the 10 GC minimum and state the exhaustive range rather than raising it; `tests/audit_arcade3d_test.php` sweeps every stake. One drop can wager at most 10× the table maximum (bet × pearls), the same per-round limit as the chip boards.
+- **8, 10, 12, 14 or 16 rows**, **low / medium / high risk**, and **1, 3, 5, 10 or 20 pearls per drop**, all falling at once.
+- **Provably fair.** Outcomes are HMAC-SHA256(server seed, `client:nonce:ball:N`). Players see the seed's SHA-256 fingerprint before they play, set their own client seed, and can rotate to reveal the seed and recompute any drop with the checker built into the page. The NEXT server seed is pre-committed too: its hash is shown before the player chooses the client seed that will be paired with it, and a rotation promotes exactly that seed, so the server can never pick a seed after seeing the client's input.
+- **Autoplay** with stop-on-big-hit, a profit target and a loss limit, plus **turbo** and the space bar.
+- Synthesized sound (peg tinks, gold chimes, bucket thuds) with a mute toggle, a live bucket heatmap, session stats, a multiplier history strip, and BIG / MEGA / LEGENDARY win banners.
+
+Every paytable was checked with exact math or a 200k-hand simulation. The formulas are in comments next to each engine. Fractional payouts (baccarat banker 0.95:1, blackjack 3:2 and surrender, the craps buy/lay commission) round to the nearest whole coin, half up, never down; craps place, odds, buy and lay bets are taken only in the unit their odds pay whole, so those payouts are exact. `tests/audit_tables_test.php` re-derives the table-game figures: all 22,100 three-card hands against a brute-force ranker, the blackjack return with basic strategy through the live engine, the exact 216-roll sic bo returns, the craps betting units and exact unit returns (place 6 98.48%, buy/lay 4 98.33%), and the exact bet-key spellings of sic bo, roulette, craps and the crab derby.
+
+## Full craps
+
+Harbor Craps deals the whole menu, bubble-craps style. You get Pass and Don't Pass, and Come and Don't Come, which travel to their own number. Odds are 3-4-5× behind the line and come bets, and 6× when laying, and they pay exactly true odds: the server only accepts odds in the multiples that pay without fractions (1 GC on 4/10, 2 GC on 5/9, 5 GC on 6/8; lay odds 2 / 3 / 6 GC). Every number has Place, Buy and Lay. Place 6/8 pays 7:6 in multiples of 6 GC, place 5/9 (7:5) and 4/10 (9:5) in multiples of 5 GC. Buy pays true odds and charges a 5% commission on the amount bought, only on a win, rounded to the nearest coin, so the house edge is 1.67% on 4/10, 2.00% on 5/9 and 2.27% on 6/8; buy bets go down in multiples of 20 GC so the vig is a whole coin. Lay pays true odds the other way less 5% of the win, only on a win (1.67% / 2.00% / 2.27%), in multiples of 40 GC on 4/10, 30 GC on 5/9 and 24 GC on 6/8. Any other amount is refused with a message naming the right multiple, and the chip rack snaps a tap to it (20 and 30 GC chips are on the rack for exactly this). Big 6 and Big 8, the field and all four hardways are on the board. The props are Any 7, Any craps, Aces, Ace-deuce, Yo, Boxcars, Horn and C & E. Place, buy, lay, big, hardway and come-odds bets are OFF on the come-out (lay bets being off is a house rule here; many live tables work them). **Take bets down** pulls back anything that isn't a contract bet. The 3D view flips between a full table (every chip stack sits on its printed spot) and a glass bubble dome where air jets pop the dice. `tests/audit_arcade3d_test.php` checks the exact expectation of every place, buy, lay and odds bet at every legal amount, and a CLI simulation of 80k rolls per bet matched the textbook house edges within noise.
+
+## 3D games
+
+These are real 3D gameplay, built with three.js r170 (MIT). three.js is embedded in `index.php` (gzip+base64) and served from `?action=asset`, so everything still works offline from a single file. The 3D module only loads on pages that need it. The server still decides every outcome and the scene is steered to it: the roulette ball is guided into the pocket the server picked, and the dice tumble and settle on the rolled faces (a browser test checks 40 of 40 throws). Without WebGL, the 2D controls still play every game.
+
+## Rooms
+
+Every classic game has its own themed room: an animated night-time scene behind the table and a sound palette. The harbor at night with a lighthouse beam (blackjack), a velvet VIP lounge with chandelier glow (baccarat), carnival bulbs and a turning Ferris wheel (big six), a kelp forest (keno), rolling surf (sic bo), fish crossing the reef (mines), a synthwave grid (video poker), a sunset with gulls (Sunset Reels), and more. Cards get a soft flip sound as they land, dice rattle, wheels tick, and every game has BIG / MEGA / EPIC win banners. One sound switch in the header mutes the whole site.
+
+## Payout rounding
+
+Multiplier games (Pearl Drop, Kelp Keno, Tide Crash, Reef Mines, Lighthouse Dice) pay in integer math: the multiplier is carried as whole hundredths (ten-thousandths for Dice) and the win is `intdiv(bet × m + half, scale)`, i.e. bet × multiplier rounded to the nearest coin, so the multiplier on screen is the one that's paid (`floor(100 * 0.29)` on binary floats is 28). Hi-lo (4-dp multiplier) and the video-slot engine (base ways, free spins, bonus and the total) go through the same `pay_mult()`, and the slot paytable on screen uses the same rounding. Reef Mines wins are capped at 5,000× the bet, like hi-lo and the slots. `tests/audit_arcade3d_test.php` covers all of this against a scratch database, and `tests/keno_rtp.php` prints the Keno RTP per pick count.
+
+## The back office
+
+- Dashboard: players, active users, coins in play, today's wagers and hold, actual RTP per game over the last 7 days. Wagers and RTP count chips that were decided: craps chips taken back down are logged as a reversal of their wager (a positive `wager` row, shown to the player as "Chips back"), so they net out of both.
+- Full CRUD on every table (players, games, game rounds, promo codes, redemptions, ledger, blackjack hands, settings, admins, lockouts), with search, filters, sorting, pagination, bulk actions, and CSV export
+- Changing a player's balance writes an `admin` row to the coin ledger. The edit form remembers the balance it was opened with and the save is refused ("Balance changed to X while you were editing. Reload and try again.") if the player's balance moved in between, so an open tab can't erase a win or a loss. Round and blackjack-hand edits carry the same kind of check.
+- Voiding a stuck round (any game) refunds the chips still at risk on it: for craps that is what's on the layout right now, not chips already paid or taken down. The refund is decided inside the same transaction as the status change, a settled or voided round can't be reopened or voided again, and the round's `payout` ends up as everything it returned (paid so far + refund). The refund is logged as a reversal of the wager (a positive `wager` row, like a craps take-down), so voided chips drop out of "Wagered today", hold and RTP rather than counting as an admin credit on top of a wager that never resolved. A video slot waiting on its bonus picks also gets the base and free-spin win it had already banked.
+- Turn any game on or off, rename it, or change its min/max bet under **Games**. Disabled games vanish from the lobby.
+- Append-only audit log of every admin action, enforced by database triggers
+- Site settings for brand name, tagline, partner name ("Presented with ___"), announcement banner, starting coins, bonus amounts, minimum age, opening/closing signups, and `trusted_proxies` (see security)
+
+## Player-side rules
+
+- **Free coins**: 10,000 GC welcome stack, a daily bonus with a 7-day streak, a "running low" refill every 4h (it unlocks when your balance **plus the chips you have on tables** is under 500 GC, so parking craps chips doesn't count as being broke), and **promo codes** you can hand out at events.
+- **Leaderboards**: biggest stack, biggest single win, most rounds. Only chips that were actually decided count as a round, wagered or won: craps chips you park and take back down count for nothing.
+- **Table limits**, the same on every chip board (both roulettes, sic bo, big six, crabs, baccarat, craps): one spot holds at most the table max (default 5,000 GC; duplicate chips on a spot merge before the check, and a spot's name has to match the table's spelling exactly), and one spin or round at most 10× the table max. On craps the per-spot max counts chips already working, and the 10× cap applies to the new chips on each roll.
+- **Take a break**: players can lock their own account for 1–90 days, and it can't be shortened. A live Tide Crash wave is settled at its current multiplier inside the same transaction that starts the break (cashed out, or already lost if it had broken), so no round keeps running while the player is locked out; other multi-step games just resume afterwards.
+- Dark and light themes, fully responsive, keyboard accessible, and it honors reduced motion. Every game still plays with JavaScript off (plain forms); JS adds the animation.
